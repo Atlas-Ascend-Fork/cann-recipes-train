@@ -1,31 +1,35 @@
 # Qwen3-1.7B SFT训练示例
 
 ## 硬件要求
-卡数：1张A3
+硬件环境：Atlas A3。训练脚本默认使用 1 个 NPU 逻辑设备（`NPUS_PER_NODE=1`）。
 
 ## 基于Dockerfile构建环境
 
-1. 创建镜像。
+1. 在宿主机下载源码并进入样例目录。
    ```bash
-   # 请预先下载本样例提供的Dockerfile文件：Dockerfile.cann.mindspeed.qwen3
-   # 随后基于该Dockerfile创建docker image。请传入镜像名称，例如 qwen3_sft
+   git clone https://gitcode.com/cann/cann-recipes-train.git
+   cd cann-recipes-train/llm_sft/qwen3
+   ```
+
+2. 在宿主机创建镜像并启动容器。
+   ```bash
+   # 当前目录已包含 Dockerfile 和 build_docker.sh
    docker build -t qwen3_sft -f Dockerfile.cann.mindspeed.qwen3 .
 
-   # 创建并进入镜像
-   # 请设置容器名称，例如 qwen3_sft，镜像名称同上一步
-   # container_name=qwen3_sft
-   # image_name=qwen3_sft:latest
-   # 默认docker创建为单机配置（16卡），可按照实际环境进行修改选择对应的卡数 --device=/dev/davinci0
+   # 创建并进入容器；脚本默认使用容器名 qwen3_sft、镜像名 qwen3_sft:latest
    bash build_docker.sh
    ```
 
-2. 源码准备。
-   ```bash
-   # 下载本样例所在代码仓，以master分支为例
-   git clone https://gitcode.com/cann/cann-recipes-train.git
+   `build_docker.sh` 默认按 A3 整机配置映射 `/dev/davinci0`～`/dev/davinci15` 共 16 个 NPU 设备节点。容器映射的设备数量不等于训练使用的设备数量：本样例训练脚本的 `NPUS_PER_NODE=1`，仅启动 1 个训练进程。
 
+   如果运行环境只提供部分设备节点，请按实际可用节点修改 `build_docker.sh` 中的 `--device` 参数。例如，仅提供 `/dev/davinci0` 时，保留 `--device=/dev/davinci0` 及公共设备节点 `/dev/davinci_manager`、`/dev/devmm_svm`、`/dev/hisi_hdc`，移除 `davinci1`～`davinci15` 的映射。多设备训练还需同步调整训练进程数，以及训练和模型转换脚本中的并行配置。
+
+   脚本会将宿主机上的本样例目录挂载到容器的 `/workspace/qwen3`。如需更改容器名或镜像名，请修改 `build_docker.sh` 中的 `container_name`、`image_name`，并与构建命令保持一致。
+
+3. 在容器内准备依赖和训练脚本。
+   ```bash
+   cd /workspace/qwen3
    # 添加镜像中已经准备好的依赖文件
-   cd ./cann-recipes-train/llm_sft/qwen3/
    cp -r /workspace/MindSpeed-LLM MindSpeed-LLM
    cp -r qwen3_dense MindSpeed-LLM/examples/mcore
 

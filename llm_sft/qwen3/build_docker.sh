@@ -14,10 +14,14 @@
 
 container_name=qwen3_sft
 image_name=qwen3_sft:latest
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 # 执行docker run命令创建容器，可通过-v按需挂载宿主机目录至容器
+# 默认映射 A3 整机的 16 个 NPU 设备节点，训练使用的设备数由训练脚本配置
 docker run -itd \
 --device=/dev/davinci0 --device=/dev/davinci1 --device=/dev/davinci2 --device=/dev/davinci3 --device=/dev/davinci4 --device=/dev/davinci5 --device=/dev/davinci6 --device=/dev/davinci7 --device=/dev/davinci8 --device=/dev/davinci9 --device=/dev/davinci10 --device=/dev/davinci11 --device=/dev/davinci12 --device=/dev/davinci13 --device=/dev/davinci14 --device=/dev/davinci15 --device=/dev/davinci_manager --device=/dev/devmm_svm --device=/dev/hisi_hdc \
+-v "${script_dir}:/workspace/qwen3" \
+--workdir /workspace/qwen3 \
 -v /usr/local/dcmi:/usr/local/dcmi \
 -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
 -v /var/log/npu/slog/slogd:/var/log/npu/slog/slogd \

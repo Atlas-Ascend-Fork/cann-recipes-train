@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-source /usr/local/Ascend/cann/set_env.sh # 修改为实际安装的Toolkit包路径
+source /usr/local/Ascend/ascend-toolkit/set_env.sh # 修改为实际安装的Toolkit包路径
 # 一站式平台默认 ascend-toolkit 路径
 # source /home/developer/Ascend/cann-8.5.0/set_env.sh
 mkdir ./finetune_dataset
@@ -27,4 +27,3 @@ python ./preprocess_data.py \
     --log-interval 1000 \
     --enable-thinking true \
     --prompt-type qwen3
-    

@@ -2,31 +2,35 @@
 
 ## Hardware Requirements
 
-- Number of cards: 1 x A3
+- Hardware: Atlas A3. The training script uses one logical NPU device by default (`NPUS_PER_NODE=1`).
 
 ## Build Environment with Dockerfile
 
-1. Build the Docker image.
+1. Clone the repository on the host and enter the example directory.
    ```bash
-   # Download the provided Dockerfile: Dockerfile.cann.mindspeed.qwen3
-   # Build the Docker image with a given name, e.g., qwen3_sft
+   git clone https://gitcode.com/cann/cann-recipes-train.git
+   cd cann-recipes-train/llm_sft/qwen3
+   ```
+
+2. Build the image and start the container on the host.
+   ```bash
+   # The current directory contains the Dockerfile and build_docker.sh
    docker build -t qwen3_sft -f Dockerfile.cann.mindspeed.qwen3 .
 
-   # Create and enter the container
-   # Set container name, e.g., qwen3_sft, and image name as above
-   # container_name=qwen3_sft
-   # image_name=qwen3_sft:latest
-   # By default, the container is created with single-node configuration (16 cards); modify according to actual environment, e.g., --device=/dev/davinci0 for the desired number of cards
+   # Create and enter the container (default name: qwen3_sft, image: qwen3_sft:latest)
    bash build_docker.sh
    ```
 
-2. Prepare the source code.
-   ```bash
-   # Clone the repository (master branch as example)
-   git clone https://gitcode.com/cann/cann-recipes-train.git
+   By default, `build_docker.sh` maps all 16 NPU device nodes (`/dev/davinci0` through `/dev/davinci15`) on an A3 server. The number of devices mapped into the container does not determine how many devices training uses: this example sets `NPUS_PER_NODE=1` and launches only one training process.
 
+   If the environment exposes only some device nodes, edit the `--device` arguments in `build_docker.sh` to match the available nodes. For example, if only `/dev/davinci0` is available, keep `--device=/dev/davinci0` and the shared device nodes `/dev/davinci_manager`, `/dev/devmm_svm`, and `/dev/hisi_hdc`, and remove the mappings for `davinci1` through `davinci15`. For training on multiple devices, also update the training process count and the parallelism settings in the training and model conversion scripts.
+
+   The script mounts this example directory from the host at `/workspace/qwen3` in the container. To use different container or image names, edit `container_name` and `image_name` in `build_docker.sh` and keep the image name consistent with the build command.
+
+3. Prepare dependencies and training scripts inside the container.
+   ```bash
+   cd /workspace/qwen3
    # Copy the required dependency files already prepared in the image
-   cd ./cann-recipes-train/llm_sft/qwen3/
    cp -r /workspace/MindSpeed-LLM MindSpeed-LLM
    cp -r qwen3_dense MindSpeed-LLM/examples/mcore
 
