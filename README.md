@@ -26,6 +26,7 @@
 
 ## 🚀 最新动态
 
+- [2026/09] 新增 [基于昇腾950超节点的万亿MoE模型预训练系统参考实践](docs/llm_pretrain/ascend950_superpod_moe_pretrain_system_reference.md)
 - [2026/09] 新增 [Qwen3.6-27B 模型 AscendC 算子生成监督微调支持](llm_sft/qwen36_ascendc/torchtitan/README.md)，包括 [TorchTitan-NPU 样例](llm_sft/qwen36_ascendc/torchtitan/README.md)和 [MindSpeed-MM 样例](llm_sft/qwen36_ascendc/mindspeed-mm/README.md)
 - [2026/08] 新增 [DeepSeek-V4-Flash HiF8 低精度预训练](llm_pretrain/deepseekv4/README.md#deepseek-v4-flash-a5-hif8-%E4%BD%8E%E7%B2%BE%E5%BA%A6%E8%AE%AD%E7%BB%83)样例，在 Atlas A5 上使能单卡 HiF8 低精度预训练
 - [2026/05] 新增 [DeepSeek-V4-Pro 模型续训练支持](llm_pretrain/deepseekv4/README.md)，基于 TorchTitan-NPU + AutoFuse，使能 **训练入图、AutoFuse**
