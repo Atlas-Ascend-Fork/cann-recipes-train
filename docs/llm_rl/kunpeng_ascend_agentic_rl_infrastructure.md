@@ -12,6 +12,12 @@
 
 面对上述挑战，我们发布了鲲鹏CPU、昇腾950和灵衢协同的Agentic RL实践，充分发挥**鲲鹏CPU的环境执行与工具调度能力、昇腾NPU的高效训练与推理能力，以及灵衢高速互联的通信能力**，为社区大规模Agentic RL训练提供技术参考。
 
+相关源码实现可参考：
+
+- [DeepSeek V4 Flash RL训练执行样例]()
+
+- [Agentic RL训练执行样例]()
+
 ## Highlights
 
 - 完成 Ascend 950 与鲲鹏 CPU 协同的 Agentic RL 训练流程，对接运行于鲲鹏CPU的 AgentENV 沙箱环境，支持基于多种 Harness 的 Agentic RL 训练和 SWE 任务的稳定 Reward 收敛。
@@ -26,17 +32,17 @@
 
 ## Outline
 
-- RL Framework 及部署方案
+- [RL Framework 及部署方案](#rl-framework-及部署方案)
 
-- 训推一致性保障
+- [训推一致性保障](#训推一致性保障)
 
-- 低精度训练
+- [低精度训练](#低精度训练)
 
-- 长序列训练优化
+- [长序列训练优化](#长序列训练优化)
 
-- Agentic RL 训练流程
+- [Agentic RL 训练流程](#agentic-rl-训练流程)
 
-- Future Plan
+- [Future Plan](#future-plan)
 
 ## RL Framework 及部署方案
 
@@ -48,17 +54,17 @@
 
 整体架构与 Vime 保持一致，主要包含 Training、Rollout 和 Data Buffer 三个核心模块：
 
-- **Training（TorchTitan）：**负责 RL 主训练流程，从 Data Buffer 获取训练数据，完成模型优化更新，并将最新权重同步至 Rollout 模块；
+- **Training（TorchTitan）：** 负责 RL 主训练流程，从 Data Buffer 获取训练数据，完成模型优化更新，并将最新权重同步至 Rollout 模块；
 
-- **Rollout（vLLM \+ Router）：**负责推理采样流程，通过 vLLM 推理引擎生成轨迹数据，并结合 Router 完成请求调度，产出包含 reward/verifier 信息的新数据；
+- **Rollout（vLLM \+ Router）：** 负责推理采样流程，通过 vLLM 推理引擎生成轨迹数据，并结合 Router 完成请求调度，产出包含 reward/verifier 信息的新数据；
 
-- **Data Buffer：**作为训练与 Rollout 的数据桥梁，负责管理 Prompt 初始化、自定义数据以及 Rollout 生成数据。
+- **Data Buffer：** 作为训练与 Rollout 的数据桥梁，负责管理 Prompt 初始化、自定义数据以及 Rollout 生成数据。
 
-本实践实际部署中采用**“训推分离 \+ PD 共卡”**的组合部署形态。
+本实践实际部署中采用**“训推分离 \+ PD 共卡”** 的组合部署形态。
 
-- **训推分离：**训练侧与 Rollout 侧部署在独立 NPU 资源域中。训练侧保留模型参数、activation、gradient 和 optimizer state；Rollout 侧独立管理推理权重、请求调度和 KV Cache，两侧通过权重同步衔接每一轮 RL 更新，保障训练稳定性与训推资源边界清晰。
+- **训推分离：** 训练侧与 Rollout 侧部署在独立 NPU 资源域中。训练侧保留模型参数、activation、gradient 和 optimizer state；Rollout 侧独立管理推理权重、请求调度和 KV Cache，两侧通过权重同步衔接每一轮 RL 更新，保障训练稳定性与训推资源边界清晰。
 
-- **PD 共卡：**Rollout 内部将 Prefill 和 Decode 共卡部署，按阶段复用 NPU 资源与显存，降低部署复杂度。
+- **PD 共卡：** Rollout 内部将 Prefill 和 Decode 共卡部署，按阶段复用 NPU 资源与显存，降低部署复杂度。
 
 > Note：当前实践未启用 PD 分离模式，主要原因是 PD 分离场景下的 Routing Replay 能力尚在完善阶段。后续该特性支持后，用户可结合集群资源规模、模型特点及训推负载特征，在训推共卡/分离和 PD 共卡/分离等多种部署模式之间灵活选择，进一步优化 Agentic RL 系统的资源利用效率。
 > 
@@ -175,13 +181,13 @@ LLM 训练和推理通常需要复杂的细粒度数据类型控制，以 DeepSe
 
 MXFP8 训练流程如上图所示。为保证 RL 训推一致性，训练阶段与 Rollout 推理阶段采用严格一致的数据类型和量化策略。
 
-**在训练正向阶段，**BF16 Activation 分别沿 M 维和 K 维进行 MXFP8 量化，生成 row\-wise 和 col\-wise 的 FP8 Activation。其中，FP32 Master Weight 按 32×32 block 进行量化，得到 FP8 Weight 以及对应的 E8M0 Scale。Block\-wise Scale 在计算前广播为 row\-wise 的 1×32 Scale，方便直接调用 MXFP8 Matmul Kernel，完成 FP8 Activation 与 FP8 Weight 的矩阵乘计算。
+**在训练正向阶段，** BF16 Activation 分别沿 M 维和 K 维进行 MXFP8 量化，生成 row\-wise 和 col\-wise 的 FP8 Activation。其中，FP32 Master Weight 按 32×32 block 进行量化，得到 FP8 Weight 以及对应的 E8M0 Scale。Block\-wise Scale 在计算前广播为 row\-wise 的 1×32 Scale，方便直接调用 MXFP8 Matmul Kernel，完成 FP8 Activation 与 FP8 Weight 的矩阵乘计算。
 
-**在训练反向阶段，**BF16 Gradient 分别沿 M 维和 N 维进行 MXFP8 量化，生成 row\-wise 和 col\-wise 的 FP8 Gradient。其中，col\-wise FP8 Gradient 与正向缓存的 col\-wise FP8 Activation 进行矩阵乘，计算权重梯度 dW，用于后续优化器更新；row\-wise FP8 Gradient 与缓存的 FP8 Weight 进行矩阵乘，计算得到输入梯度 dX，完成梯度反向传播。与正向类似，FP8 Weight 对应的 Scale 会广播为 col\-wise Scale。
+**在训练反向阶段，** BF16 Gradient 分别沿 M 维和 N 维进行 MXFP8 量化，生成 row\-wise 和 col\-wise 的 FP8 Gradient。其中，col\-wise FP8 Gradient 与正向缓存的 col\-wise FP8 Activation 进行矩阵乘，计算权重梯度 dW，用于后续优化器更新；row\-wise FP8 Gradient 与缓存的 FP8 Weight 进行矩阵乘，计算得到输入梯度 dX，完成梯度反向传播。与正向类似，FP8 Weight 对应的 Scale 会广播为 col\-wise Scale。
 
-**在训推权重同步阶段，**由于 TorchTitan 训练引擎仅保留 FP32 Master Weight，不驻留低精度权重副本，RL Framework 从 TorchTitan 获取 FP32 Master Weight，并按照与训练正向阶段一致的量化流程转换为 FP8 Weight 后传输至 Rollout 引擎。
+**在训推权重同步阶段，** 由于 TorchTitan 训练引擎仅保留 FP32 Master Weight，不驻留低精度权重副本，RL Framework 从 TorchTitan 获取 FP32 Master Weight，并按照与训练正向阶段一致的量化流程转换为 FP8 Weight 后传输至 Rollout 引擎。
 
-**在 Rollout 阶段，**推理引擎获取更新后的低精度权重，调用 W8A8 Matmul Kernel 完成推理计算，实现低精度推理加速。
+**在 Rollout 阶段，** 推理引擎获取更新后的低精度权重，调用 W8A8 Matmul Kernel 完成推理计算，实现低精度推理加速。
 
 值得注意的是，本实践对权重量化采用**FP8 32×32 Per Block 量化**。相比 DeepSeek\-V4 原生的 128×128 粒度，该方案能提供更细粒度的 Scale 表征，从而获得更高的量化精度；同时，生成的 Block\-wise E8M0 Scale 经广播后，可直接复用 Ascend 950DT 上的 MXFP8 Kernel \(该 Kernel 为 per\-group 粒度\)，无需引入额外计算路径，进而提升算子执行效率。
 
@@ -249,7 +255,7 @@ chunk 大小需要在内存和执行效率之间取舍，较小的 chunk 可以�
   <img src="./figures/dsv4_figures/workflow.svg" width="80%" alt="rl-framework">
 </p>
 
-### **沙箱环境与 RL 框架解耦****，支持多种 Harness **
+### **沙箱环境与 RL 框架解耦，支持多种 Harness **
 
 本实践实现了环境执行与 RL 训推分离部署下的稳定训练：AgentENV 沙箱环境在 CPU 侧承载代码执行与工具交互，TorchTitan 和 vLLM\-Ascend 在 NPU 侧完成策略优化与推理采样，两侧通过环境控制和模型请求接口协同。框架将任务环境、Harness 与模型协议适配分开，支持 Codex、Claude Code 等不同 Harness 复用同一套训练主干，使 Agent 执行方式的扩展无需重写 RL 后端。
 
