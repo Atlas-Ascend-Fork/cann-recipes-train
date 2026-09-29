@@ -14,7 +14,7 @@
 
 相关源码实现可参考：
 
-- [DeepSeek V4 Flash RL训练执行样例]()
+- [DeepSeek V4 Flash RL训练执行样例](../../llm_rl/deepseek_v4/README.md)
 
 - [Agentic RL训练执行样例]()
 
@@ -67,8 +67,7 @@
 - **PD 共卡：** Rollout 内部将 Prefill 和 Decode 共卡部署，按阶段复用 NPU 资源与显存，降低部署复杂度。
 
 > Note：当前实践未启用 PD 分离模式，主要原因是 PD 分离场景下的 Routing Replay 能力尚在完善阶段。后续该特性支持后，用户可结合集群资源规模、模型特点及训推负载特征，在训推共卡/分离和 PD 共卡/分离等多种部署模式之间灵活选择，进一步优化 Agentic RL 系统的资源利用效率。
-> 
-> 
+
 
 ## 训推一致性保障
 
@@ -349,6 +348,3 @@ Agentic RL 与 AgentENV 协同管理两类独立沙箱：执行沙箱承载 Agen
 6. 提升Agentic RL任务的规模化和丰富度
 
     当前版本主要展示了SWE\-Gym 的训练效果，之后本项目将聚焦 “多任务\+多harness” 的Agentic RL训练场景。基于已有的稳定训推精度和轻便解耦的环境，本工作将继续演进并提升模型后训练能力的泛化性。
-
-
-
