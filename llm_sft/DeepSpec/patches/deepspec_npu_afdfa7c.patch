@@ -1,0 +1,2503 @@
+diff --git a/.gitignore b/.gitignore
+index 2c903a6..8617e23 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -8,4 +8,9 @@ logs/
+ *.egg-info/
+ build/
+ dist/
+-.DS_Store
+\ No newline at end of file
++.DS_Store
++log/
++train_logs/
++tensorboard/
++checkpoints/
++*.log
+diff --git a/deepspec/data/cuda_prefetcher.py b/deepspec/data/cuda_prefetcher.py
+index 69eac90..fe92e20 100644
+--- a/deepspec/data/cuda_prefetcher.py
++++ b/deepspec/data/cuda_prefetcher.py
+@@ -2,6 +2,8 @@ from threading import Thread
+ 
+ import torch
+ 
++from deepspec.utils import accelerator_module, device_type
++
+ 
+ def move_batch_to_device(batch, device):
+     moved = {key: value.to(device, non_blocking=True) for key, value in batch.items()}
+@@ -14,15 +16,26 @@ def move_batch_to_device(batch, device):
+ class CUDAPrefetcher:
+     """Overlaps DataLoader iteration and H2D transfer with compute.
+ 
+-    Uses a background thread and a dedicated CUDA stream so that both
+-    next(dataloader) and the H2D copy for the next batch run concurrently
+-    with the forward/backward of the current batch.
++    CUDA: a background thread fetches the next CPU batch and queues the H2D
++    copy on a dedicated stream, overlapping with compute on the current batch.
++
++    NPU: Ascend's runtime binds a device context to the thread that first
++    touches the device.  Driving NPU ops from a freshly spawned daemon thread
++    forces lazy device/context setup on that thread, which can fail hard with a
++    RUNTIME memory-allocation error (and SIGSEGV) when the device is
++    memory-pressured.  We therefore fall back to fetching and transferring
++    inline on the calling thread for NPU, keeping only the H2D-side-stream
++    overlap while never touching the device from a background thread.
+     """
+ 
+     def __init__(self, dataloader, device):
+         self.dataloader = dataloader
+         self.device = device
+-        self.stream = torch.cuda.Stream(device=device)
++        self.accelerator = accelerator_module()
++        # Only CUDA uses the background-thread prefetch; NPU stays on the
++        # calling thread to avoid per-thread NPU device-context creation.
++        self._use_thread = device_type() != "npu"
++        self.stream = self.accelerator.Stream(device=device)
+ 
+     def __iter__(self):
+         self._iter = iter(self.dataloader)
+@@ -40,9 +53,20 @@ class CUDAPrefetcher:
+         except StopIteration:
+             self._done = True
+             return
+-        with torch.cuda.stream(self.stream):
++        with self.accelerator.stream(self.stream):
+             self._gpu_batch = move_batch_to_device(cpu_batch, self.device)
+ 
++    def _kickoff_next(self):
++        """Start fetching the following batch, on a thread (CUDA) or inline (NPU)."""
++        if self._use_thread:
++            self._thread = Thread(target=self._fetch_and_transfer, daemon=True)
++            self._thread.start()
++        else:
++            # Inline on the calling thread so no NPU device op runs off-thread.
++            # Side-stream H2D still overlaps with compute on the batch returned
++            # by the caller; the caller simply awaits it on the next __next__.
++            self._fetch_and_transfer()
++
+     def __next__(self):
+         # Join the background thread kicked off in the previous __next__.
+         if self._thread is not None:
+@@ -53,7 +77,7 @@ class CUDAPrefetcher:
+             raise StopIteration
+ 
+         # Make the compute stream wait until the side-stream H2D is complete.
+-        current = torch.cuda.current_stream(self.device)
++        current = self.accelerator.current_stream(self.device)
+         current.wait_stream(self.stream)
+         batch = self._gpu_batch
+ 
+@@ -62,12 +86,11 @@ class CUDAPrefetcher:
+         for value in batch.values():
+             value.record_stream(current)
+ 
+-        # Kick off the next fetch and H2D in a background thread so it
+-        # overlaps with compute on the batch we are about to return.
+-        self._thread = Thread(target=self._fetch_and_transfer, daemon=True)
+-        self._thread.start()
++        # Kick off the next fetch and H2D so it overlaps with compute on the
++        # batch we are about to return.
++        self._kickoff_next()
+ 
+         return batch
+ 
+     def __len__(self):
+-        return len(self.dataloader)
++        return len(self.dataloader)
+\ No newline at end of file
+diff --git a/deepspec/data/parser.py b/deepspec/data/parser.py
+index e7828dc..08192a5 100644
+--- a/deepspec/data/parser.py
++++ b/deepspec/data/parser.py
+@@ -50,6 +50,49 @@ TEMPLATE_REGISTRY.register(
+     ),
+ )
+ 
++# DeepSeek V4 Non-Think chat template.
++# Conversation format:
++#   <｜begin▁of▁sentence｜><｜User｜>user_msg<｜Assistant｜></think>assistant_msg<｜end▁of▁sentence｜>
++# The bos token is added automatically by the tokenizer (add_special_tokens).
++TEMPLATE_REGISTRY.register(
++    "deepseek",
++    ChatTemplate(
++        assistant_header="<｜Assistant｜></think>",
++        user_header="<｜User｜>",
++        system_prompt=None,
++        end_of_turn_token="<｜end▁of▁sentence｜>",
++    ),
++)
++
++# Jinja template for DeepSeek V4 tokenizer (Non-Think mode).
++# The tokenizer on HuggingFace does not ship with a chat_template, so we
++# provide one that matches the official encode_messages(thinking_mode="chat") output.
++DEEPSEEK_V4_CHAT_TEMPLATE = (
++    "{%- for message in messages %}"
++    "  {%- if message['role'] == 'user' %}"
++    "    {{- '<｜User｜>' + message['content'] -}}"
++    "  {%- elif message['role'] == 'assistant' %}"
++    "    {{- '<｜Assistant｜></think>' + message['content'] + '<｜end▁of▁sentence｜>' -}}"
++    "  {%- elif message['role'] == 'system' %}"
++    "    {{- message['content'] -}}"
++    "  {%- endif %}"
++    "{%- endfor %}"
++    "{%- if add_generation_prompt %}"
++    "  {{- '<｜Assistant｜></think>' -}}"
++    "{%- endif %}"
++)
++
++
++def set_tokenizer_chat_template(tokenizer, chat_template: str):
++    """Install a Jinja chat_template on *tokenizer* if it doesn't already have one.
++
++    DeepSeek-V4 and similar models ship without a chat_template. This helper
++    installs the Jinja template for the named DeepSpec chat template so that
++    ``tokenizer.apply_chat_template`` works.
++    """
++    if tokenizer.chat_template is None and chat_template == "deepseek":
++        tokenizer.chat_template = DEEPSEEK_V4_CHAT_TEMPLATE
++
+ 
+ class GeneralParser:
+     def __init__(self, tokenizer, chat_template):
+@@ -210,6 +253,7 @@ def preprocess_record(
+         template = TEMPLATE_REGISTRY.get(chat_template)
+     except KeyError:
+         assert False, f"Unknown chat template: {chat_template}"
++    set_tokenizer_chat_template(tokenizer, chat_template)
+     parser = GeneralParser(tokenizer=tokenizer, chat_template=template)
+     assert "conversations" in record, "Expected `conversations` field for JSONL records."
+     return parser.parse(
+diff --git a/deepspec/eval/__init__.py b/deepspec/eval/__init__.py
+index 8eaead3..f80f5b1 100644
+--- a/deepspec/eval/__init__.py
++++ b/deepspec/eval/__init__.py
+@@ -1,9 +1,10 @@
+ from .base_evaluator import BaseEvaluator, DraftProposal, VerificationResult
+-from .dspark import Gemma4DSparkEvaluator, Qwen3DSparkEvaluator
++from .dspark import DeepSeekV4DSparkEvaluator, Gemma4DSparkEvaluator, Qwen3DSparkEvaluator
+ from .eagle3 import Gemma4Eagle3Evaluator, Qwen3Eagle3Evaluator
+ 
+ __all__ = [
+     "BaseEvaluator",
++    "DeepSeekV4DSparkEvaluator",
+     "DraftProposal",
+     "Gemma4Eagle3Evaluator",
+     "Gemma4DSparkEvaluator",
+diff --git a/deepspec/eval/base_evaluator.py b/deepspec/eval/base_evaluator.py
+index d094ec3..49b1a54 100644
+--- a/deepspec/eval/base_evaluator.py
++++ b/deepspec/eval/base_evaluator.py
+@@ -443,9 +443,9 @@ def generate_decoding_sample(
+ 
+ class BaseEvaluator:
+ 
+-    def __init__(self, local_rank: int, args):
++    def __init__(self, args):
+         self.args = args
+-        self.device, self.global_rank, self.world_size = init_dist(local_rank)
++        self.device, self.global_rank, self.world_size = init_dist()
+         self.tasks = args.tasks
+ 
+         self.target_model, self.draft_model, self.tokenizer = self.build_models()
+diff --git a/deepspec/eval/dspark/__init__.py b/deepspec/eval/dspark/__init__.py
+index 2126a6c..a89b06d 100644
+--- a/deepspec/eval/dspark/__init__.py
++++ b/deepspec/eval/dspark/__init__.py
+@@ -1,4 +1,4 @@
+-from .evaluator import Gemma4DSparkEvaluator, Qwen3DSparkEvaluator
++from .evaluator import DeepSeekV4DSparkEvaluator, Gemma4DSparkEvaluator, Qwen3DSparkEvaluator
+ from .draft_ops import (
+     DSparkDraftProposal,
+     build_dspark_proposal,
+@@ -7,6 +7,7 @@ from .draft_ops import (
+ from .confidence_head import ConfidenceHeadRecorder
+ 
+ __all__ = [
++    "DeepSeekV4DSparkEvaluator",
+     "Gemma4DSparkEvaluator",
+     "Qwen3DSparkEvaluator",
+     "DSparkDraftProposal",
+diff --git a/deepspec/eval/dspark/confidence_head.py b/deepspec/eval/dspark/confidence_head.py
+index 36b1c32..0bddc05 100644
+--- a/deepspec/eval/dspark/confidence_head.py
++++ b/deepspec/eval/dspark/confidence_head.py
+@@ -27,6 +27,11 @@ def model_display_name(path: str) -> str:
+     return os.path.basename(normalized) or normalized
+ 
+ 
++def confidence_metric_dtype(device: torch.device) -> torch.dtype:
++    device = torch.device(device)
++    return torch.float32 if device.type == "npu" else torch.float64
++
++
+ class PerPositionConfidenceMetrics:
+     """Per-position ECE + AUROC + Brier for cumprod predictions."""
+ 
+@@ -41,22 +46,23 @@ class PerPositionConfidenceMetrics:
+         self.block_size = int(block_size)
+         self.num_coarse_bins = int(num_coarse_bins)
+         self.num_fine_bins = int(num_fine_bins)
++        self.dtype = confidence_metric_dtype(device)
+         self.coarse_count = torch.zeros(
+             (self.block_size, self.num_coarse_bins),
+-            dtype=torch.float64,
++            dtype=self.dtype,
+             device=device,
+         )
+         self.coarse_pred = torch.zeros_like(self.coarse_count)
+         self.coarse_target = torch.zeros_like(self.coarse_count)
+         self.fine_pos = torch.zeros(
+             (self.block_size, self.num_fine_bins),
+-            dtype=torch.float64,
++            dtype=self.dtype,
+             device=device,
+         )
+         self.fine_neg = torch.zeros_like(self.fine_pos)
+         self.brier_num = torch.zeros(
+             self.block_size,
+-            dtype=torch.float64,
++            dtype=self.dtype,
+             device=device,
+         )
+ 
+@@ -66,12 +72,12 @@ class PerPositionConfidenceMetrics:
+         probs: torch.Tensor,
+         targets: torch.Tensor,
+     ) -> None:
+-        probs = probs.reshape(-1).to(torch.float64).clamp(EPS_PROB, 1.0 - EPS_PROB)
+-        targets = targets.reshape(-1).to(torch.float64)
++        probs = probs.reshape(-1).to(self.dtype).clamp(EPS_PROB, 1.0 - EPS_PROB)
++        targets = targets.reshape(-1).to(self.dtype)
+         assert probs.shape == targets.shape
+         pos_count = probs.numel()
+         assert pos_count <= self.block_size
+-        weights = torch.ones_like(probs, dtype=torch.float64)
++        weights = torch.ones_like(probs, dtype=self.dtype)
+         pos_idx = torch.arange(pos_count, device=probs.device)
+ 
+         coarse_idx = (
+@@ -363,11 +369,11 @@ class ConfidenceHeadRecorder:
+         step_probs = torch.sigmoid(
+             confidence_logits[:, :effective_length]
+         ).squeeze(0)
+-        cumprod_pred = step_probs.to(torch.float64).cumprod(dim=0)
++        cumprod_pred = step_probs.to(self.dataset_metrics.dtype).cumprod(dim=0)
+         prefix_label = (
+             verification.accept_prefix_mask[:, :effective_length]
+             .squeeze(0)
+-            .to(torch.float64)
++            .to(self.dataset_metrics.dtype)
+         )
+         self.dataset_metrics.update(
+             probs=cumprod_pred,
+diff --git a/deepspec/eval/dspark/draft_ops.py b/deepspec/eval/dspark/draft_ops.py
+index 753a56d..2024bfc 100644
+--- a/deepspec/eval/dspark/draft_ops.py
++++ b/deepspec/eval/dspark/draft_ops.py
+@@ -7,11 +7,12 @@ from transformers import DynamicCache
+ 
+ from deepspec.eval.base_evaluator import DraftProposal
+ from deepspec.utils.sampling import logits_to_probs
++from deepspec.modeling.dspark.deepseek_v4.modeling import DeepSeekV4DSparkModel
+ from deepspec.modeling.dspark.gemma4 import Gemma4DSparkModel
+ from deepspec.modeling.dspark.qwen3 import Qwen3DSparkModel
+ 
+ 
+-DSparkModel = Qwen3DSparkModel | Gemma4DSparkModel
++DSparkModel = Qwen3DSparkModel | Gemma4DSparkModel | DeepSeekV4DSparkModel
+ 
+ 
+ @dataclass
+diff --git a/deepspec/eval/dspark/evaluator.py b/deepspec/eval/dspark/evaluator.py
+index eba2b34..b647b25 100644
+--- a/deepspec/eval/dspark/evaluator.py
++++ b/deepspec/eval/dspark/evaluator.py
+@@ -20,6 +20,7 @@ from deepspec.eval.dspark.draft_ops import (
+     forward_dspark_draft_block,
+ )
+ from deepspec.modeling.dspark.common import extract_context_feature
++from deepspec.modeling.dspark.deepseek_v4.modeling import DeepSeekV4DSparkModel
+ from deepspec.modeling.dspark.gemma4 import Gemma4DSparkModel
+ from deepspec.modeling.dspark.qwen3 import Qwen3DSparkModel
+ from deepspec.utils import jsonable
+@@ -223,3 +224,7 @@ class Qwen3DSparkEvaluator(BaseEvaluator):
+ 
+ class Gemma4DSparkEvaluator(Qwen3DSparkEvaluator):
+     draft_model_cls = Gemma4DSparkModel
++
++
++class DeepSeekV4DSparkEvaluator(Qwen3DSparkEvaluator):
++    draft_model_cls = DeepSeekV4DSparkModel
+diff --git a/deepspec/modeling/dspark/common.py b/deepspec/modeling/dspark/common.py
+index 76d908a..e56009c 100644
+--- a/deepspec/modeling/dspark/common.py
++++ b/deepspec/modeling/dspark/common.py
+@@ -8,6 +8,14 @@ from torch.nn.attention.flex_attention import create_block_mask
+ from deepspec.utils.metrics import add_metric
+ 
+ 
++def _arange(*args, device, **kwargs):
++    """``torch.arange`` with int32 dtype on NPU (Ascend doesn't support int64 indexing)."""
++    dtype = kwargs.pop("dtype", None)
++    if dtype is None:
++        dtype = torch.int32 if device.type == "npu" else torch.int64
++    return torch.arange(*args, device=device, dtype=dtype, **kwargs)
++
++
+ @dataclass
+ class DSparkForwardOutput:
+     """Outputs for one DSpark training forward.
+@@ -41,9 +49,9 @@ class DSparkForwardOutput:
+ 
+ 
+ class AcceptRatePredictor(nn.Module):
+-    def __init__(self, input_dim: int):
++    def __init__(self, input_dim: int, bias: bool = True):
+         super().__init__()
+-        self.proj = nn.Linear(int(input_dim), 1)
++        self.proj = nn.Linear(int(input_dim), 1, bias=bias)
+ 
+     def forward(self, features):
+         return self.proj(features).squeeze(-1)
+@@ -57,6 +65,8 @@ def extract_context_feature(hidden_states, layer_ids):
+ 
+ 
+ def validate_target_layer_ids(layer_ids, num_target_layers: int):
++    if isinstance(layer_ids, (str, bytes)):
++        layer_ids = [x for x in str(layer_ids).replace(" ","").split(",") if x]
+     layer_ids = [int(layer_id) for layer_id in layer_ids]
+     assert layer_ids, "target_layer_ids must not be empty."
+     start = 0
+@@ -82,13 +92,52 @@ def create_dspark_attention_mask(
+     seq_len: int,
+     block_size: int,
+     device: torch.device,
++    attn_implementation: str = "flex_attention",
++    sliding_window: Optional[int] = None,
+ ):
++    if sliding_window is not None and (
++        isinstance(sliding_window, bool)
++        or not isinstance(sliding_window, int)
++        or sliding_window <= 0
++    ):
++        raise ValueError("sliding_window must be None or a positive integer")
++
++    if attn_implementation != "flex_attention":
++        bsz, num_blocks = anchor_positions.shape
++        q_len = num_blocks * block_size
++        kv_len = seq_len + q_len
++        q_idx = _arange(q_len, device=device)
++        kv_idx = _arange(kv_len, device=device)
++        q_block_ids = (q_idx // block_size).unsqueeze(0).expand(bsz, -1)
++        anchor_pos = anchor_positions.gather(1, q_block_ids).unsqueeze(-1)
++        q_block_ids = q_block_ids.unsqueeze(-1)
++        kv_idx = kv_idx.view(1, 1, kv_len)
++
++        is_context = kv_idx < seq_len
++        mask_context = is_context & (kv_idx < anchor_pos)
++        if sliding_window is not None:
++            mask_context = mask_context & (kv_idx >= anchor_pos - sliding_window)
++        is_draft = kv_idx >= seq_len
++        kv_block_ids = (kv_idx - seq_len) // block_size
++        mask_draft = is_draft & (q_block_ids == kv_block_ids)
++        is_valid_block = block_keep_mask.gather(
++            1,
++            q_block_ids.squeeze(-1),
++        ).unsqueeze(-1)
++        dense_mask = (mask_context | mask_draft) & is_valid_block
++        empty_rows = ~dense_mask.any(dim=-1, keepdim=True)
++        self_kv_idx = int(seq_len) + q_idx.view(1, -1, 1)
++        dense_mask = dense_mask | (empty_rows & (kv_idx == self_kv_idx))
++        return dense_mask.unsqueeze(1)
++
+     def dspark_mask_mod(b, h, q_idx, kv_idx):
+         del h
+         q_block_id = q_idx // block_size
+         anchor_pos = anchor_positions[b, q_block_id]
+         is_context = kv_idx < seq_len
+         mask_context = is_context & (kv_idx < anchor_pos)
++        if sliding_window is not None:
++            mask_context = mask_context & (kv_idx >= anchor_pos - sliding_window)
+         is_draft = kv_idx >= seq_len
+         kv_block_id = (kv_idx - seq_len) // block_size
+         mask_draft = is_draft & (q_block_id == kv_block_id)
+@@ -134,13 +183,14 @@ def sample_anchor_positions(
+     valid_counts = valid.sum(dim=1)
+     bsz = loss_mask.shape[0]
+     num_candidates = valid.shape[1]
++    _idx_dtype = torch.int32 if device.type == "npu" else torch.int64
+     max_n = int(num_anchors)
+     if num_candidates == 0:
+-        anchors = torch.zeros(bsz, max_n, dtype=torch.long, device=device)
++        anchors = torch.zeros(bsz, max_n, dtype=_idx_dtype, device=device)
+         keep_mask = torch.zeros(bsz, max_n, dtype=torch.bool, device=device)
+         return anchors, keep_mask
+ 
+-    indices = torch.arange(num_candidates, device=device).unsqueeze(0).expand(
++    indices = _arange(num_candidates, device=device).unsqueeze(0).expand(
+         bsz,
+         -1,
+     )
+@@ -162,7 +212,7 @@ def sample_anchor_positions(
+         )
+         gathered = torch.cat([gathered, pad], dim=1)
+     anchors = gathered[:, :max_n].sort(dim=1).values
+-    keep_mask = torch.arange(max_n, device=device).unsqueeze(0) < (
++    keep_mask = _arange(max_n, device=device).unsqueeze(0) < (
+         valid_counts.unsqueeze(1).clamp(max=max_n)
+     )
+     anchors = torch.where(keep_mask, anchors, torch.zeros_like(anchors))
+@@ -254,7 +304,7 @@ def create_position_ids(
+ ) -> torch.Tensor:
+     bsz, num_blocks = anchor_positions.shape
+     device = anchor_positions.device
+-    offsets = torch.arange(block_size, device=device).view(1, 1, -1)
++    offsets = _arange(block_size, device=device).view(1, 1, -1)
+     return (anchor_positions.unsqueeze(-1) + offsets).view(
+         bsz,
+         num_blocks * block_size,
+@@ -273,16 +323,19 @@ def create_noise_embed(
+     bsz = input_ids.shape[0]
+     num_blocks = anchor_positions.shape[1]
+     device = input_ids.device
++    # NPU IndexPut requires self + values same dtype; indices stay int32
++    # (from _arange).  input_ids may be int32 or int64; cast anchor_tokens
++    # and the fill value to torch.long to keep everything consistent.
+     noise_ids = torch.full(
+         (bsz, num_blocks * block_size),
+         mask_token_id,
+         dtype=torch.long,
+         device=device,
+     )
+-    block_starts = torch.arange(num_blocks, device=device) * block_size
++    block_starts = _arange(num_blocks, device=device) * block_size
+     block_starts = block_starts.unsqueeze(0).expand(bsz, -1)
+-    anchor_tokens = torch.gather(input_ids, 1, anchor_positions)
+-    flat_batch_idx = torch.arange(bsz, device=device).unsqueeze(1).expand(
++    anchor_tokens = torch.gather(input_ids, 1, anchor_positions).to(torch.long)
++    flat_batch_idx = _arange(bsz, device=device).unsqueeze(1).expand(
+         bsz,
+         num_blocks,
+     )
+diff --git a/deepspec/modeling/dspark/loss.py b/deepspec/modeling/dspark/loss.py
+index 88dd56b..3d863e6 100644
+--- a/deepspec/modeling/dspark/loss.py
++++ b/deepspec/modeling/dspark/loss.py
+@@ -14,7 +14,12 @@ def _all_reduce_loss_denominators(
+     world_size: int,
+ ) -> dict[str, torch.Tensor]:
+     denominators = {}
+-    for key in ("ce_loss_den", "l1_loss_den", "confidence_loss_den"):
++    for key in (
++        "ce_loss_den",
++        "l1_loss_den",
++        "tau_loss_den",
++        "confidence_loss_den",
++    ):
+         tensor = loss_terms[key].detach().clone()
+         if world_size > 1:
+             dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+@@ -57,32 +62,86 @@ def _compute_local_probabilistic_stats(
+     return tau_prob_sum, pos_accept_sums
+ 
+ 
+-def _compute_accept_rate_3d(
++@torch.no_grad()
++def compute_dspark_validation_stats(
++    outputs: DSparkForwardOutput,
++) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
++    """Return acceptance metric numerators and denominators for validation."""
++    accept_rate_3d, _ = _compute_probability_distance_3d(
++        outputs=outputs,
++        aligned_target_logits=outputs.aligned_target_logits,
++    )
++    if accept_rate_3d is None:
++        raise ValueError("aligned_target_logits is required for validation metrics")
++    valid_mask = outputs.eval_mask.to(torch.float32)
++    valid_blocks = outputs.block_keep_mask & outputs.eval_mask.any(dim=-1)
++    block_weights = valid_blocks.to(torch.float32)
++    tau_sum, pos_accept_sums = _compute_local_probabilistic_stats(
++        outputs=outputs,
++        accept_rate_3d=accept_rate_3d,
++        valid_block_weights=block_weights,
++    )
++    stats = {
++        f"accept_rate@{pos_idx}": (pos_accept_sums[pos_idx], valid_mask[..., pos_idx].sum())
++        for pos_idx in range(accept_rate_3d.shape[-1])
++    }
++    stats["tau"] = (tau_sum, block_weights.sum())
++    return stats
++
++
++def _compute_probability_distance_3d(
+     *,
+     outputs: DSparkForwardOutput,
+     aligned_target_logits: Optional[torch.Tensor],
+-) -> Optional[torch.Tensor]:
++) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+     if aligned_target_logits is None:
+-        return None
++        return None, None
+     draft_probs = torch.softmax(outputs.draft_logits.float(), dim=-1)
+     target_probs = torch.softmax(aligned_target_logits.float(), dim=-1)
+-    accept_rate_3d = 1.0 - 0.5 * (draft_probs - target_probs).abs().sum(dim=-1)
+-    return accept_rate_3d.clamp_(0.0, 1.0)
++    l1_dist_3d = (draft_probs - target_probs).abs().sum(dim=-1)
++    accept_rate_3d = (1.0 - 0.5 * l1_dist_3d).clamp(0.0, 1.0)
++    return accept_rate_3d, l1_dist_3d
++
++
++def _compute_local_tau_loss_term(
++    *,
++    outputs: DSparkForwardOutput,
++    accept_rate_3d: Optional[torch.Tensor],
++) -> tuple[torch.Tensor, torch.Tensor]:
++    """Return normalized expected-acceptance loss over valid draft blocks.
++
++    For a block with K valid draft positions and per-position acceptance
++    probabilities a_i, the expected accepted draft length is
++    sum(cumprod(a_i)). The normalized loss is 1 - expected_length / K.
++    """
++    zero = outputs.draft_logits.new_zeros((), dtype=torch.float32)
++    if accept_rate_3d is None:
++        return zero, zero
++
++    valid_mask = outputs.eval_mask.to(torch.float32)
++    valid_pred_tokens = outputs.eval_mask.any(dim=-1)
++    valid_blocks = outputs.block_keep_mask & valid_pred_tokens
++    valid_block_weights = valid_blocks.to(torch.float32)
++
++    valid_accept_rate = accept_rate_3d * valid_mask
++    expected_draft_accepted = valid_accept_rate.cumprod(dim=-1).sum(dim=-1)
++    valid_lengths = valid_mask.sum(dim=-1).clamp_min(1.0)
++    tau_loss_per_block = 1.0 - expected_draft_accepted / valid_lengths
++    tau_loss_num = (tau_loss_per_block * valid_block_weights).sum()
++    tau_loss_den = valid_block_weights.sum()
++    return tau_loss_num, tau_loss_den
+ 
+ 
+ def _compute_local_l1_term(
+     *,
+     outputs: DSparkForwardOutput,
+-    aligned_target_logits: Optional[torch.Tensor],
++    l1_dist_3d: Optional[torch.Tensor],
+     loss_weight_mask: torch.Tensor,
+ ) -> tuple[torch.Tensor, torch.Tensor]:
+     zero = outputs.draft_logits.new_zeros((), dtype=torch.float32)
+-    if aligned_target_logits is None:
++    if l1_dist_3d is None:
+         return zero, zero
+-    draft_probs = torch.softmax(outputs.draft_logits.float(), dim=-1)
+-    target_probs = torch.softmax(aligned_target_logits.float(), dim=-1)
+-    l1_dist_per_token = (draft_probs - target_probs).abs().sum(dim=-1)
+-    l1_loss_num = (l1_dist_per_token * loss_weight_mask).sum()
++    l1_loss_num = (l1_dist_3d * loss_weight_mask).sum()
+     l1_loss_den = loss_weight_mask.sum()
+     return l1_loss_num, l1_loss_den
+ 
+@@ -92,6 +151,7 @@ def _collect_local_terms(
+     outputs: DSparkForwardOutput,
+     loss_decay_gamma: Optional[float],
+     l1_loss_alpha: float,
++    tau_loss_alpha: float,
+ ) -> tuple[dict[str, torch.Tensor], bool]:
+     draft_logits = outputs.draft_logits
+     target_ids = outputs.target_ids
+@@ -113,7 +173,7 @@ def _collect_local_terms(
+     ce_loss_num = (loss_per_token * flat_weights).sum()
+     ce_loss_den = flat_weights.sum()
+     aligned_target_logits = outputs.aligned_target_logits
+-    accept_rate_3d = _compute_accept_rate_3d(
++    accept_rate_3d, l1_dist_3d = _compute_probability_distance_3d(
+         outputs=outputs,
+         aligned_target_logits=aligned_target_logits,
+     )
+@@ -124,13 +184,25 @@ def _collect_local_terms(
+     if l1_loss_alpha > 0:
+         l1_loss_num, l1_loss_den = _compute_local_l1_term(
+             outputs=outputs,
+-            aligned_target_logits=aligned_target_logits,
++            l1_dist_3d=l1_dist_3d,
+             loss_weight_mask=loss_weight_mask,
+         )
+     else:
+         l1_loss_num = zero
+         l1_loss_den = zero
+ 
++    assert tau_loss_alpha <= 0 or aligned_target_logits is not None, (
++        "aligned_target_logits is required when tau_loss_alpha > 0."
++    )
++    if tau_loss_alpha > 0:
++        tau_loss_num, tau_loss_den = _compute_local_tau_loss_term(
++            outputs=outputs,
++            accept_rate_3d=accept_rate_3d,
++        )
++    else:
++        tau_loss_num = zero
++        tau_loss_den = zero
++
+     with torch.no_grad():
+         pos_total_counts = eval_mask.to(torch.float32).sum(dim=(0, 1))
+         valid_pred_tokens = eval_mask.any(dim=-1)
+@@ -185,6 +257,8 @@ def _collect_local_terms(
+         "ce_loss_den": ce_loss_den,
+         "l1_loss_num": l1_loss_num,
+         "l1_loss_den": l1_loss_den,
++        "tau_loss_num": tau_loss_num,
++        "tau_loss_den": tau_loss_den,
+         "confidence_loss_num": confidence_loss_num,
+         "confidence_loss_den": confidence_loss_den,
+     }
+@@ -230,6 +304,7 @@ def _build_loss(
+     global_denominators: dict[str, torch.Tensor],
+     ce_loss_alpha: float,
+     l1_loss_alpha: float,
++    tau_loss_alpha: float,
+     confidence_head_alpha: float,
+     has_confidence: bool,
+     world_size: int,
+@@ -240,6 +315,11 @@ def _build_loss(
+         l1_loss = loss_terms["l1_loss_num"] / (
+             global_denominators["l1_loss_den"] + 1e-6
+         )
++    tau_loss = ce_loss.new_zeros(())
++    if global_denominators["tau_loss_den"].item() > 0:
++        tau_loss = loss_terms["tau_loss_num"] / (
++            global_denominators["tau_loss_den"] + 1e-6
++        )
+     confidence_loss = ce_loss.new_zeros(())
+     if has_confidence:
+         confidence_loss = loss_terms["confidence_loss_num"] / (
+@@ -248,6 +328,7 @@ def _build_loss(
+     return (
+         ce_loss_alpha * ce_loss
+         + l1_loss_alpha * l1_loss
++        + tau_loss_alpha * tau_loss
+         + confidence_head_alpha * confidence_loss
+     ) * world_size
+ 
+@@ -259,11 +340,13 @@ def compute_dspark_loss(
+     ce_loss_alpha: float,
+     l1_loss_alpha: float,
+     confidence_head_alpha: float,
++    tau_loss_alpha: float = 0.0,
+ ):
+     loss_terms, has_confidence = _collect_local_terms(
+         outputs=outputs,
+         loss_decay_gamma=loss_decay_gamma,
+         l1_loss_alpha=float(l1_loss_alpha),
++        tau_loss_alpha=float(tau_loss_alpha),
+     )
+     world_size = dist.get_world_size()
+     global_denominators = _all_reduce_loss_denominators(
+@@ -272,7 +355,9 @@ def compute_dspark_loss(
+     )
+     ce_loss_alpha = float(ce_loss_alpha)
+     l1_loss_alpha = float(l1_loss_alpha)
++    tau_loss_alpha = float(tau_loss_alpha)
+     confidence_head_alpha = float(confidence_head_alpha)
++    assert tau_loss_alpha >= 0.0, "tau_loss_alpha must be non-negative."
+ 
+     local_ce_loss = loss_terms["ce_loss_num"] / (loss_terms["ce_loss_den"] + 1e-6)
+     local_l1_loss = local_ce_loss.new_zeros(())
+@@ -280,6 +365,11 @@ def compute_dspark_loss(
+         local_l1_loss = loss_terms["l1_loss_num"] / (
+             loss_terms["l1_loss_den"] + 1e-6
+         )
++    local_tau_loss = local_ce_loss.new_zeros(())
++    if global_denominators["tau_loss_den"].item() > 0:
++        local_tau_loss = loss_terms["tau_loss_num"] / (
++            loss_terms["tau_loss_den"] + 1e-6
++        )
+     local_confidence_loss = local_ce_loss.new_zeros(())
+     if has_confidence:
+         local_confidence_loss = loss_terms["confidence_loss_num"] / (
+@@ -288,6 +378,7 @@ def compute_dspark_loss(
+     local_loss = (
+         ce_loss_alpha * local_ce_loss
+         + l1_loss_alpha * local_l1_loss
++        + tau_loss_alpha * local_tau_loss
+         + confidence_head_alpha * local_confidence_loss
+     )
+ 
+@@ -304,6 +395,13 @@ def compute_dspark_loss(
+             den=loss_terms["l1_loss_den"],
+             tag="train",
+         )
++    if global_denominators["tau_loss_den"].item() > 0:
++        add_metric(
++            "tau_loss",
++            loss_terms["tau_loss_num"],
++            den=loss_terms["tau_loss_den"],
++            tag="train",
++        )
+     if has_confidence:
+         add_metric(
+             "confidence_loss",
+@@ -322,6 +420,7 @@ def compute_dspark_loss(
+         global_denominators=global_denominators,
+         ce_loss_alpha=ce_loss_alpha,
+         l1_loss_alpha=l1_loss_alpha,
++        tau_loss_alpha=tau_loss_alpha,
+         confidence_head_alpha=confidence_head_alpha,
+         has_confidence=has_confidence,
+         world_size=world_size,
+@@ -331,4 +430,5 @@ def compute_dspark_loss(
+ 
+ __all__ = [
+     "compute_dspark_loss",
++    "compute_dspark_validation_stats",
+ ]
+diff --git a/deepspec/trainer/__init__.py b/deepspec/trainer/__init__.py
+index 5ed28b0..83f8c03 100644
+--- a/deepspec/trainer/__init__.py
++++ b/deepspec/trainer/__init__.py
+@@ -1,9 +1,25 @@
+ from .base_trainer import BaseTrainer
+-from .dspark_trainer import Gemma4DSparkTrainer, Qwen3DSparkTrainer
+-from .eagle3_trainer import Gemma4Eagle3Trainer, Qwen3Eagle3Trainer
++from .dspark_trainer import (
++    DeepSeekV4DSparkTrainer,
++    Gemma4DSparkTrainer,
++    Qwen3DSparkTrainer,
++)
++
++
++def __getattr__(name):
++    if name in {"Gemma4Eagle3Trainer", "Qwen3Eagle3Trainer"}:
++        from .eagle3_trainer import Gemma4Eagle3Trainer, Qwen3Eagle3Trainer
++
++        return {
++            "Gemma4Eagle3Trainer": Gemma4Eagle3Trainer,
++            "Qwen3Eagle3Trainer": Qwen3Eagle3Trainer,
++        }[name]
++    raise AttributeError(name)
++
+ 
+ __all__ = [
+     "BaseTrainer",
++    "DeepSeekV4DSparkTrainer",
+     "Gemma4Eagle3Trainer",
+     "Gemma4DSparkTrainer",
+     "Qwen3Eagle3Trainer",
+diff --git a/deepspec/trainer/base_trainer.py b/deepspec/trainer/base_trainer.py
+index 6b2eef1..8787e17 100644
+--- a/deepspec/trainer/base_trainer.py
++++ b/deepspec/trainer/base_trainer.py
+@@ -1,4 +1,4 @@
+-from contextlib import nullcontext
++import gc
+ import math
+ import os
+ 
+@@ -7,20 +7,33 @@ import torch.distributed as dist
+ from torch.distributed.device_mesh import init_device_mesh
+ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+ from torch.distributed.fsdp import MixedPrecision, ShardingStrategy
+-from torch.utils.data import DataLoader
++from torch.distributed.fsdp.wrap import ModuleWrapPolicy
++from torch.utils.data import DataLoader, Subset
+ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+ 
+-from deepspec.data import CacheDataset, validate_train_cache
++from deepspec.data import (
++    CacheDataset,
++    validate_train_cache,
++)
+ from deepspec.data.cuda_prefetcher import CUDAPrefetcher
+ from deepspec.utils import (
+     BF16Optimizer,
+     StatelessResumableDistributedSampler,
++    device_count,
++    device_type,
++    empty_cache,
+     ensure_dir,
+     init_dist,
+     is_global_main_process,
+     print_on_global_main,
+     print_on_local_main,
+ )
++from deepspec.utils.metrics import reset as reset_metrics
++from deepspec.utils.checkpoint_retention import (
++    retain_checkpoints,
++    update_best_checkpoint,
++    validate_checkpoint_retention_config,
++)
+ from deepspec.trainer.ckpt_manager import (
+     discover_latest_checkpoint,
+     load_resume_draft_model,
+@@ -29,6 +46,7 @@ from deepspec.trainer.ckpt_manager import (
+ )
+ import deepspec.utils.training_logger as training_logger
+ from deepspec.utils.hfai_suspend import SuspendController
++from deepspec.utils.profiler_context import ProfilerManager, TrainingProfilerManager
+ 
+ 
+ _PRECISION_DTYPES = {
+@@ -65,9 +83,9 @@ def _build_fsdp_kwargs(
+         sharding_strategy=sharding_strategy,
+     )
+     if sharding_strategy in _HYBRID_STRATEGIES:
+-        devices_per_node = torch.cuda.device_count()
++        devices_per_node = device_count()
+         fsdp_kwargs["device_mesh"] = init_device_mesh(
+-            "cuda",
++            device_type(),
+             (world_size // devices_per_node, devices_per_node),
+             mesh_dim_names=("replicate", "shard"),
+         )
+@@ -148,9 +166,15 @@ def _launch_eval(
+ class BaseTrainer:
+     data_collator_cls = None
+ 
+-    def __init__(self, local_rank, args):
++    def __init__(self, args):
+         self.args = args
+-        self.device, self.global_rank, self.world_size = init_dist(local_rank)
++        validate_checkpoint_retention_config(
++            keep_last=self.args.logging.keep_last_checkpoints,
++            keep_best=self.args.logging.keep_best_checkpoint,
++            metric_name=self.args.logging.best_checkpoint_metric,
++            greater_is_better=self.args.logging.greater_is_better,
++        )
++        self.device, self.global_rank, self.world_size = init_dist()
+         self.precision_dtype = _PRECISION_DTYPES[self.args.train.precision]
+         self.checkpoint_dir_root = self.args.logging.checkpoint_dir
+         self.resume_checkpoint_dir = discover_latest_checkpoint(
+@@ -159,6 +183,19 @@ class BaseTrainer:
+         self.suspend_controller = SuspendController(device=self.device)
+         self.next_micro_step = 0
+ 
++        # prof
++        self.enable_profiler = os.getenv("ENABLE_PROFILE", "False") == "True"
++        self.output_path = os.path.join(os.getenv("WORK_DIR", "."), os.getenv("RES_PATH", ""))
++        self.profiler = ProfilerManager(self.enable_profiler, self.output_path)
++        self.training_profiler = TrainingProfilerManager(
++            self.args.train.npu_profiling,
++            checkpoint_dir=self.checkpoint_dir_root,
++            rank=self.global_rank,
++            world_size=self.world_size,
++            experiment_name=self.args.exp_name,
++            device_type=device_type(),
++        )
++
+         if is_global_main_process(): ensure_dir(self.checkpoint_dir_root)
+         training_logger.init(
+             logging_steps=int(self.args.logging.logging_steps),
+@@ -175,16 +212,46 @@ class BaseTrainer:
+                 global_rank=self.global_rank,
+             )
+         self.model = self.draft_model
+-        if self.args.train.torch_compile:
++        if self.args.train.torch_compile and device_type() != "npu":
+             print_on_local_main("Compiling training model with torch.compile...")
+             self.model = torch.compile(self.model, dynamic=True)
+-        self.model = self._wrap_with_fsdp(self.model)
+-
+-        self.train_dataset = CacheDataset(cache_dir=self.args.data.target_cache_path)
+-        validate_train_cache(
+-            train_dataset=self.train_dataset,
+-            draft_model=self.draft_model,
+-            target_model_name_or_path=self.args.model.target_model_name_or_path,
++        elif self.args.train.torch_compile:
++            print_on_local_main(
++                "torch.compile is not yet supported on NPU — skipping compilation."
++            )
++        full_draft_total_numel = sum(
++            parameter.numel() for parameter in self.draft_model.parameters()
++        )
++        full_draft_trainable_numel = sum(
++            parameter.numel()
++            for parameter in self.draft_model.parameters()
++            if parameter.requires_grad
++        )
++        full_draft_parameter_bytes = sum(
++            parameter.numel() * parameter.element_size()
++            for parameter in self.draft_model.parameters()
++        )
++        if self.world_size > 1:
++            self.model = self._wrap_with_fsdp(self.model)
++            self._log_fsdp_parameter_sharding(
++                full_total_numel=full_draft_total_numel,
++                full_trainable_numel=full_draft_trainable_numel,
++                full_parameter_bytes=full_draft_parameter_bytes,
++            )
++        else:
++            print_on_local_main("Single-device — skipping FSDP wrap.")
++
++        dataset = self._build_train_dataset()
++        validation_fraction = float(getattr(self.args.data, "validation_fraction", 0.1))
++        if not 0.0 <= validation_fraction < 1.0:
++            raise ValueError("data.validation_fraction must be in [0, 1)")
++        split = int(len(dataset) * (1.0 - validation_fraction))
++        split = max(1, min(split, len(dataset)))
++        generator = torch.Generator().manual_seed(int(getattr(self.args, "seed", 42)))
++        indices = torch.randperm(len(dataset), generator=generator).tolist()
++        self.train_dataset = Subset(dataset, indices[:split])
++        self.validation_dataset = (
++            Subset(dataset, indices[split:]) if split < len(dataset) else None
+         )
+ 
+         (
+@@ -210,6 +277,9 @@ class BaseTrainer:
+             total_steps=self.max_train_steps,
+             warmup_ratio=float(self.args.train.warmup_ratio),
+             weight_decay=float(self.args.train.weight_decay),
++            cpu_offload=bool(
++                getattr(self.args.train, "optimizer_cpu_offload", False)
++            ),
+         )
+         if self.resume_checkpoint_dir is not None:
+             resume_state = load_training_state(
+@@ -238,6 +354,9 @@ class BaseTrainer:
+         print_on_local_main(f"  Local batch size = {self.args.train.local_batch_size}")
+         print_on_local_main(f"  Global batch size = {self.args.train.global_batch_size}")
+         print_on_local_main(f"  Gradient accumulation steps = {self.gradient_accumulation_steps}")
++        print_on_local_main(
++            f"  Optimizer CPU offload = {self.optimizer.cpu_offload}"
++        )
+         print_on_local_main(f"  Steps per epoch = {self.steps_per_epoch}")
+         print_on_local_main(f"  Max train steps = {self.max_train_steps}")
+ 
+@@ -277,14 +396,84 @@ class BaseTrainer:
+     def _build_draft_model(self, *, target_config, model_args):
+         raise NotImplementedError
+ 
++    def _fsdp_auto_wrap_classes(self):
++        return ()
++
++    def _fsdp_extra_kwargs(self):
++        return {}
++
+     def _wrap_with_fsdp(self, model):
+         fsdp_kwargs = _build_fsdp_kwargs(
+             sharding_strategy_name=self.args.train.sharding_strategy,
+             precision_dtype=self.precision_dtype,
+             world_size=self.world_size,
+         )
++        fsdp_kwargs["device_id"] = self.device
++        auto_wrap_classes = set(self._fsdp_auto_wrap_classes())
++        if auto_wrap_classes:
++            fsdp_kwargs["auto_wrap_policy"] = ModuleWrapPolicy(auto_wrap_classes)
++        fsdp_kwargs.update(self._fsdp_extra_kwargs())
+         return FSDP(model, **fsdp_kwargs)
+ 
++    def _log_fsdp_parameter_sharding(
++        self,
++        *,
++        full_total_numel: int,
++        full_trainable_numel: int,
++        full_parameter_bytes: int,
++    ) -> None:
++        local_total_numel = sum(
++            parameter.numel() for parameter in self.draft_model.parameters()
++        )
++        local_trainable_numel = sum(
++            parameter.numel()
++            for parameter in self.draft_model.parameters()
++            if parameter.requires_grad
++        )
++        local_parameter_bytes = sum(
++            parameter.numel() * parameter.element_size()
++            for parameter in self.draft_model.parameters()
++        )
++        local_fraction = (
++            float(local_total_numel) / float(full_total_numel)
++            if full_total_numel > 0
++            else 0.0
++        )
++        is_sharded = local_total_numel < full_total_numel
++        strategy = str(self.args.train.sharding_strategy)
++        print(
++            f"[rank {self.global_rank}] FSDP draft parameter view: "
++            f"strategy={strategy}, sharded={'yes' if is_sharded else 'no'}, "
++            f"local_total_numel={local_total_numel:,}/"
++            f"{full_total_numel:,} ({local_fraction:.2%}), "
++            f"local_trainable_numel={local_trainable_numel:,}/"
++            f"{full_trainable_numel:,}, "
++            f"local_parameter_gib={local_parameter_bytes / 1024**3:.2f}/"
++            f"{full_parameter_bytes / 1024**3:.2f}",
++            flush=True,
++        )
++
++        summed_local_numel = torch.tensor(
++            local_total_numel,
++            dtype=torch.int64,
++            device=self.device,
++        )
++        dist.all_reduce(summed_local_numel, op=dist.ReduceOp.SUM)
++        if is_global_main_process():
++            replication_factor = (
++                float(summed_local_numel.item()) / float(full_total_numel)
++                if full_total_numel > 0
++                else 0.0
++            )
++            print(
++                "FSDP draft parameter sharding summary: "
++                f"strategy={strategy}, world_size={self.world_size}, "
++                f"pre_wrap_total_numel={full_total_numel:,}, "
++                f"sum_rank_local_numel={summed_local_numel.item():,}, "
++                f"replication_factor={replication_factor:.4f}",
++                flush=True,
++            )
++
+     def _build_train_dataloader(self, start_offset_samples=0, num_samples=None):
+         sampler = StatelessResumableDistributedSampler(
+             dataset=self.train_dataset,
+@@ -294,21 +487,128 @@ class BaseTrainer:
+             start_global_offset_samples=start_offset_samples,
+             num_samples=num_samples,
+         )
+-        return DataLoader(
+-            self.train_dataset,
++        num_workers = int(self.args.data.num_workers)
++        loader_kwargs = dict(
++            dataset=self.train_dataset,
+             batch_size=int(self.args.train.local_batch_size),
+             sampler=sampler,
+             collate_fn=self.data_collator_cls(),
+-            num_workers=int(self.args.data.num_workers),
++            num_workers=num_workers,
+             pin_memory=True,
+             drop_last=True,
+-            persistent_workers=True,
+-            prefetch_factor=4,
+         )
++        if num_workers > 0:
++            loader_kwargs.update(persistent_workers=True, prefetch_factor=4)
++        return DataLoader(**loader_kwargs)
++
++    def _build_train_dataset(self):
++        """Build and validate the static target cache dataset."""
++        dataset = CacheDataset(cache_dir=self.args.data.target_cache_path)
++        validate_train_cache(
++            train_dataset=dataset,
++            draft_model=self.draft_model,
++        )
++        return dataset
+ 
+     def run_batch(self, batch):
+         raise NotImplementedError
+ 
++    def run_validation_batch(self, batch):
++        # Trainers without acceptance statistics can opt out of validation.
++        return {}
++
++    @torch.no_grad()
++    def validate(self) -> dict[str, float] | None:
++        """Evaluate acceptance metrics on the optional held-out dataset."""
++        if self.validation_dataset is None:
++            return None
++        dataset_size = len(self.validation_dataset)
++        global_batch_size = int(self.args.train.global_batch_size)
++        samples = (dataset_size // global_batch_size) * global_batch_size
++        if samples == 0:
++            print_on_local_main("Validation dataset is too small; skipping validation.")
++            return None
++        sampler = StatelessResumableDistributedSampler(
++            dataset=self.validation_dataset,
++            num_replicas=self.world_size,
++            rank=self.global_rank,
++            total_size=samples,
++        )
++        num_workers = int(self.args.data.num_workers)
++        loader = DataLoader(
++            self.validation_dataset,
++            batch_size=int(self.args.train.local_batch_size),
++            sampler=sampler,
++            collate_fn=self.data_collator_cls(),
++            num_workers=num_workers,
++            pin_memory=True,
++            drop_last=True,
++            persistent_workers=False,
++        )
++        was_training = self.model.training
++        reset_metrics()
++        self.model.eval()
++        totals: dict[str, torch.Tensor] = {}
++        for batch in CUDAPrefetcher(loader, self.device):
++            if batch is None:
++                continue
++            for name, (numerator, denominator) in self.run_validation_batch(batch).items():
++                pair = torch.stack((numerator.detach(), denominator.detach())).to(
++                    device=self.device, dtype=torch.float32
++                )
++                totals[name] = totals.get(name, torch.zeros_like(pair)) + pair
++        summary = {}
++        for name in sorted(totals):
++            pair = totals[name]
++            if self.world_size > 1:
++                dist.all_reduce(pair, op=dist.ReduceOp.SUM)
++            summary[f"validation/{name}"] = (
++                pair[0] / pair[1].clamp_min(1.0)
++            ).item()
++        reset_metrics()
++        if was_training:
++            self.model.train()
++        training_logger.log_validation(summary, global_step=self.global_step)
++        return summary
++
++    def _update_best_checkpoint(self, checkpoint_dir, summary):
++        if not summary:
++            return
++        keep_best = self.args.logging.keep_best_checkpoint
++        if not isinstance(keep_best, bool):
++            raise TypeError("logging.keep_best_checkpoint must be a boolean")
++        if not keep_best:
++            return
++        metric_name = str(self.args.logging.best_checkpoint_metric)
++        if metric_name not in summary:
++            available = ", ".join(sorted(summary))
++            raise KeyError(
++                f"Best checkpoint metric {metric_name!r} is unavailable; "
++                f"validation produced: {available}"
++            )
++        if is_global_main_process():
++            update_best_checkpoint(
++                self.checkpoint_dir_root,
++                checkpoint_dir,
++                metric_name=metric_name,
++                metric_value=summary[metric_name],
++                greater_is_better=self.args.logging.greater_is_better,
++            )
++        if self.world_size > 1:
++            dist.barrier()
++
++    def _prune_checkpoints(self):
++        if is_global_main_process():
++            removed = retain_checkpoints(
++                self.checkpoint_dir_root,
++                keep_last=self.args.logging.keep_last_checkpoints,
++                keep_best=self.args.logging.keep_best_checkpoint,
++            )
++            for checkpoint_dir in removed:
++                print_on_global_main(f"Removed old checkpoint {checkpoint_dir}")
++        if self.world_size > 1:
++            dist.barrier()
++
+     def _checkpoint_kwargs(self):
+         return dict(
+             model=self.model,
+@@ -333,17 +664,33 @@ class BaseTrainer:
+                 tensorboard_dir=self.args.logging.tensorboard_dir,
+                 exp_name=self.args.exp_name,
+             )
+-        dist.barrier()
++        if self.world_size > 1:
++            dist.barrier()
++
++        # FSDP full-state checkpointing can leave large temporary allocations
++        # in the accelerator cache after the state dict has moved to CPU.
++        gc.collect()
++        empty_cache()
++
++        if self.world_size > 1:
++            dist.barrier()
++
++        summary = self.validate()
++        self._update_best_checkpoint(checkpoint_dir, summary)
++        self._prune_checkpoints()
+         return checkpoint_dir
+ 
+     def _save_and_suspend(self):
+         print_on_global_main("Saving checkpoint before suspending...")
+         save_checkpoint(**self._checkpoint_kwargs())
+-        dist.barrier()
++        self._prune_checkpoints()
++        if self.world_size > 1:
++            dist.barrier()
+         if is_global_main_process():
+             print_on_global_main("Going to suspend...")
+             self.suspend_controller.go_suspend()
+-        dist.barrier()
++        if self.world_size > 1:
++            dist.barrier()
+ 
+     def train(self):
+         self.model.train()
+@@ -362,44 +709,71 @@ class BaseTrainer:
+         prefetcher = CUDAPrefetcher(dataloader, self.device)
+         training_logger.start_session(global_step=self.global_step)
+ 
+-        with self.suspend_controller.monitoring():
+-            for batch in prefetcher:
+-                should_sync = (
+-                    (self.next_micro_step + 1) % self.gradient_accumulation_steps == 0
+-                )
+-                sync_context = nullcontext() if should_sync else self.model.no_sync()
+-                with sync_context:
+-                    loss = self.run_batch(batch) / self.gradient_accumulation_steps
+-                    loss.backward()
+-                self.next_micro_step += 1
+-
+-                if not should_sync:
+-                    continue
+-
+-                grad_norm = FSDP.clip_grad_norm_(
+-                    self.model,
+-                    float(self.args.train.max_grad_norm),
+-                )
+-                self.optimizer.step()
+-                training_logger.on_optimizer_step(
+-                    global_step=self.global_step,
+-                    next_micro_step=self.next_micro_step,
+-                    micro_batches_per_epoch=self.micro_batches_per_epoch,
+-                    max_train_steps=self.max_train_steps,
+-                    learning_rate=self.optimizer.get_learning_rate(),
+-                    grad_norm=grad_norm.item(),
+-                )
+-
+-                if self.global_step % int(self.args.logging.checkpointing_steps) == 0:
+-                    self.save_and_eval_checkpoint()
+-
+-                if self.suspend_controller.requested():
+-                    self._save_and_suspend()
+-                    return
+-
+-        self.save_and_eval_checkpoint()
++        self.profiler.set_status(True)
++        self.training_profiler.start()
++
++        try:
++            with self.suspend_controller.monitoring():
++                for batch in prefetcher:
++                    should_sync = (
++                        (self.next_micro_step + 1) % self.gradient_accumulation_steps == 0
++                    )
++                    try:
++                        # Always synchronize FSDP gradients. FSDP.no_sync() retains
++                        # full, unsharded gradients across accumulation steps and can
++                        # cause OOM.
++                        loss = self.run_batch(batch) / self.gradient_accumulation_steps
++                        loss.backward()
++                        self.next_micro_step += 1
++
++                        if not should_sync:
++                            continue
++
++                        grad_norm = (
++                            FSDP.clip_grad_norm_(
++                                self.model,
++                                float(self.args.train.max_grad_norm),
++                            )
++                            if self.world_size > 1
++                            else torch.nn.utils.clip_grad_norm_(
++                                self.model.parameters(),
++                                float(self.args.train.max_grad_norm),
++                            )
++                        )
++                        self.optimizer.step()
++                        training_logger.on_optimizer_step(
++                            global_step=self.global_step,
++                            next_micro_step=self.next_micro_step,
++                            micro_batches_per_epoch=self.micro_batches_per_epoch,
++                            max_train_steps=self.max_train_steps,
++                            learning_rate=self.optimizer.get_learning_rate(),
++                            grad_norm=grad_norm.item(),
++                        )
++
++                        self.profiler.step()
++                        self.training_profiler.step()
++
++                        checkpoint_due = (
++                            self.global_step
++                            % int(self.args.logging.checkpointing_steps)
++                            == 0
++                        )
++                        if checkpoint_due:
++                            self.save_and_eval_checkpoint()
++
++                        if self.suspend_controller.requested():
++                            self._save_and_suspend()
++                            return
++                    except BaseException:
++                        raise
++
++            if self.global_step % int(self.args.logging.checkpointing_steps) != 0:
++                self.save_and_eval_checkpoint()
++        finally:
++            self.training_profiler.close_best_effort()
+ 
+     def clean_up(self):
+         training_logger.close()
+-        dist.barrier()
++        if self.world_size > 1:
++            dist.barrier()
+         dist.destroy_process_group()
+diff --git a/deepspec/trainer/ckpt_manager.py b/deepspec/trainer/ckpt_manager.py
+index 6b99f65..959539d 100644
+--- a/deepspec/trainer/ckpt_manager.py
++++ b/deepspec/trainer/ckpt_manager.py
+@@ -12,10 +12,12 @@ from torch.distributed.fsdp import FullStateDictConfig, StateDictType
+ 
+ from deepspec.utils import (
+     ensure_dir,
++    get_rng_state,
+     is_global_main_process,
+     print_on_global_main,
+     print_on_local_main,
+     safe_symlink,
++    set_rng_state,
+ )
+ 
+ 
+@@ -112,7 +114,9 @@ def load_training_state(
+     assert saved_local_batch_size == int(local_batch_size)
+ 
+     torch.set_rng_state(checkpoint["torch_rng"])
+-    torch.cuda.set_rng_state(checkpoint["torch_cuda_rng"])
++    rng_state = checkpoint.get("torch_accelerator_rng", checkpoint.get("torch_cuda_rng"))
++    if rng_state is not None:
++        set_rng_state(rng_state)
+     np.random.set_state(checkpoint["numpy_rng"])
+     random.setstate(checkpoint["python_rng"])
+ 
+@@ -156,7 +160,8 @@ def save_checkpoint(
+     if is_global_main_process():
+         ensure_dir(checkpoint_dir)
+         save_train_config(train_config=train_config, checkpoint_dir=checkpoint_dir)
+-    dist.barrier()
++    if dist.get_world_size() > 1:
++        dist.barrier()
+     _save_model_checkpoint(
+         model=model,
+         draft_model=draft_model,
+@@ -174,14 +179,16 @@ def save_checkpoint(
+         training_state,
+         _rank_training_state_path(checkpoint_dir, global_rank),
+     )
+-    dist.barrier()
++    if dist.get_world_size() > 1:
++        dist.barrier()
+     if is_global_main_process():
+         safe_symlink(
+             checkpoint_dir,
+             os.path.join(checkpoint_dir_root, "step_latest"),
+         )
+         print_on_global_main(f"Saved checkpoint to {checkpoint_dir}")
+-    dist.barrier()
++    if dist.get_world_size() > 1:
++        dist.barrier()
+     return checkpoint_dir
+ 
+ 
+@@ -213,14 +220,18 @@ def _serialize_training_state(
+         "world_size": int(world_size),
+         "local_batch_size": int(local_batch_size),
+         "torch_rng": torch.get_rng_state(),
+-        "torch_cuda_rng": torch.cuda.get_rng_state(),
++        "torch_accelerator_rng": get_rng_state(),
+         "numpy_rng": np.random.get_state(),
+         "python_rng": random.getstate(),
+     }
+ 
+ 
+ def _full_model_state_dict(model):
+-    assert isinstance(model, FSDP), "training model must be wrapped in FSDP"
++    if not isinstance(model, FSDP):
++        # Single-device / no FSDP wrapping.
++        state_dict = model.state_dict()
++        # Move to CPU to match FSDP's offload behaviour.
++        return {k: v.cpu() for k, v in state_dict.items()}
+     state_dict_config = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+     with FSDP.state_dict_type(
+         model,
+diff --git a/deepspec/trainer/dspark_trainer.py b/deepspec/trainer/dspark_trainer.py
+index 487e99a..34e8f35 100644
+--- a/deepspec/trainer/dspark_trainer.py
++++ b/deepspec/trainer/dspark_trainer.py
+@@ -1,9 +1,22 @@
++import json
++import os
++
++import torch
++from safetensors import safe_open
++from transformers import AutoConfig, AutoTokenizer
++
+ from deepspec.data import CacheCollator
++from deepspec.modeling.dspark.deepseek_v4.config import (
++    build_draft_config as build_deepseek_v4_draft_config,
++)
+ from deepspec.modeling.dspark.gemma4 import Gemma4DSparkModel
+ from deepspec.modeling.dspark.gemma4.config import (
+     build_draft_config as build_gemma4_draft_config,
+ )
+-from deepspec.modeling.dspark.loss import compute_dspark_loss
++from deepspec.modeling.dspark.loss import (
++    compute_dspark_loss,
++    compute_dspark_validation_stats,
++)
+ from deepspec.modeling.dspark.qwen3 import Qwen3DSparkModel
+ from deepspec.modeling.dspark.qwen3.config import (
+     build_draft_config as build_qwen3_draft_config,
+@@ -11,6 +24,48 @@ from deepspec.modeling.dspark.qwen3.config import (
+ from deepspec.trainer.base_trainer import BaseTrainer
+ 
+ 
++def _load_target_weights_from_safetensors(
++    *,
++    weight_dir: str,
++    index_path: str | None = None,
++) -> dict[str, object]:
++    """Load only embed_tokens and lm_head weights from DeepSeek-V4 safetensors.
++
++    Avoids loading the full ~275 GB model by reading individual tensors
++    directly from shard files.
++    """
++    # Load the weight index to map weight names → shard files.
++    if index_path is None:
++        index_path = os.path.join(weight_dir, "model.safetensors.index.json")
++    if not os.path.exists(index_path):
++        raise FileNotFoundError(f"Weight index not found: {index_path}")
++    with open(index_path) as f:
++        idx = json.load(f)
++    weight_map = idx.get("weight_map", {})
++
++    def _load_one(name: str):
++        if name not in weight_map:
++            raise FileNotFoundError(
++                f"Weight '{name}' not found in index {index_path}. "
++                f"Make sure the index covers all shards."
++            )
++        shard_file = weight_map[name]
++        # The index may use relative paths (e.g. "model-00045-of-00046.safetensors").
++        shard = os.path.join(weight_dir, shard_file)
++        if not os.path.exists(shard):
++            raise FileNotFoundError(
++                f"Shard file not found: {shard} (for weight '{name}'). "
++                f"Download the missing safetensors file."
++            )
++        with safe_open(shard, framework="pt") as sf:
++            return sf.get_tensor(name)
++
++    return {
++        "embed_tokens": _load_one("embed.weight"),
++        "lm_head": _load_one("head.weight"),
++    }
++
++
+ class Qwen3DSparkTrainer(BaseTrainer):
+     data_collator_cls = CacheCollator
+ 
+@@ -21,19 +76,26 @@ class Qwen3DSparkTrainer(BaseTrainer):
+         )
+         return Qwen3DSparkModel(draft_config)
+ 
+-    # Training step.
+-    def run_batch(self, batch):
+-        outputs = self.model(
++    def _forward_batch(self, batch):
++        return self.model(
+             input_ids=batch["input_ids"],
+             target_hidden_states=batch["target_hidden_states"],
+             loss_mask=batch["loss_mask"],
+             target_last_hidden_states=batch["target_last_hidden_states"],
+         )
++
++    def run_validation_batch(self, batch):
++        return compute_dspark_validation_stats(self._forward_batch(batch))
++
++    # Training step.
++    def run_batch(self, batch):
++        outputs = self._forward_batch(batch)
+         loss = compute_dspark_loss(
+             outputs=outputs,
+             loss_decay_gamma=self.args.model.loss_decay_gamma,
+             ce_loss_alpha=float(self.args.model.ce_loss_alpha),
+             l1_loss_alpha=float(self.args.model.l1_loss_alpha),
++            tau_loss_alpha=float(getattr(self.args.model, "tau_loss_alpha", 0.0)),
+             confidence_head_alpha=float(self.args.model.confidence_head_alpha),
+         )
+         return loss
+@@ -46,3 +108,124 @@ class Gemma4DSparkTrainer(Qwen3DSparkTrainer):
+             model_args=model_args,
+         )
+         return Gemma4DSparkModel(draft_config)
++
++
++class DeepSeekV4DSparkTrainer(Qwen3DSparkTrainer):
++    """DSpark trainer for DeepSeek-V4 Flash — native MLA + MoE + HC draft.
++
++    Uses :class:`~deepspec.modeling.dspark.deepseek_v4.modeling.DeepSeekV4DSparkModel`
++    cloned from the target model architecture with reduced layers.  Only
++    ``embed_tokens`` and ``lm_head`` weights are loaded from the target
++    model (via safetensors shards, not the full 275 GB checkpoint).
++
++    Weight directory: ``DEEPSPEC_DSV4_WEIGHT_DIR`` env var or
++    ``/workspace/deepseek-v4-flash``.
++    """
++
++    def _fsdp_extra_kwargs(self):
++        if not self._rank0_only_initialization:
++            return {}
++        return {
++            "param_init_fn": self._materialize_meta_module,
++            "sync_module_states": True,
++        }
++
++    def _materialize_meta_module(self, module):
++        # Rank 0 owns the initialized weights. Other ranks only need storage
++        # before FSDP broadcasts each wrapped module and keeps its local shard.
++        module.to_empty(device=self.device, recurse=False)
++
++    def _fsdp_auto_wrap_classes(self):
++        from deepspec.modeling.dspark.deepseek_v4.modeling import (
++            DeepSeekV4DSparkDecoderLayer,
++        )
++
++        return (DeepSeekV4DSparkDecoderLayer,)
++
++    def _build_draft_model(self, *, target_config, model_args):
++        from deepspec.modeling.dspark.deepseek_v4.modeling import DeepSeekV4DSparkModel
++
++        draft_config = build_deepseek_v4_draft_config(
++            target_config=target_config,
++            model_args=model_args,
++        )
++        return DeepSeekV4DSparkModel(draft_config)
++
++    def build_models(self):
++        model_args = self.args.model
++        self._rank0_only_initialization = (
++            self.world_size > 1 and self.resume_checkpoint_dir is None
++        )
++
++        # Config & tokenizer — uses the local HF config directory (lightweight).
++        tokenizer = AutoTokenizer.from_pretrained(
++            model_args.target_model_name_or_path,
++            trust_remote_code=True,
++        )
++        target_config = AutoConfig.from_pretrained(
++            model_args.target_model_name_or_path,
++            trust_remote_code=True,
++        )
++
++        if self._rank0_only_initialization:
++            # Only global rank 0 allocates and initializes real parameters.
++            # Other ranks build metadata-only modules that FSDP materializes,
++            # synchronizes from rank 0, and shards one wrapped unit at a time.
++            init_device = "cpu" if self.global_rank == 0 else "meta"
++            previous_default_dtype = torch.get_default_dtype()
++            try:
++                torch.set_default_dtype(self.precision_dtype)
++                with torch.device(init_device):
++                    draft_model = self._build_draft_model(
++                        target_config=target_config,
++                        model_args=model_args,
++                    )
++            finally:
++                torch.set_default_dtype(previous_default_dtype)
++            # Preserve the previous `.to(dtype=...)` behaviour for parameters
++            # and buffers that request an explicit construction dtype.
++            draft_model = draft_model.to(dtype=self.precision_dtype)
++        else:
++            # Preserve the existing single-device and resume loading paths.
++            draft_model = self._build_draft_model(
++                target_config=target_config,
++                model_args=model_args,
++            )
++            draft_model = draft_model.to(
++                device=self.device,
++                dtype=self.precision_dtype,
++            )
++
++        # Replace HC operators with AscendC fused kernels when available.
++        if self.device.type == "npu":
++            try:
++                from deepspec.modeling.dspark.deepseek_v4.fused_hc import (
++                    install_fused_hc_kernels,
++                )
++                install_fused_hc_kernels("ascendc")
++            except RuntimeError:
++                pass  # AscendC not available — keep native fallback
++
++        # Load only embed_tokens + lm_head from safetensors shards.
++        # Derive the weight dir from the configured target model path so the
++        # local model directory (which contains the full safetensors index and
++        # shards) is used; env vars remain available as explicit overrides.
++        weight_dir = os.environ.get("DEEPSPEC_DSV4_WEIGHT_DIR", None) or str(
++            model_args.target_model_name_or_path
++        )
++        _default_index = os.path.join(str(model_args.target_model_name_or_path), "model.safetensors.index.json")
++        _full_index = os.environ.get("DEEPSPEC_DSV4_INDEX_PATH", _default_index)
++        if not self._rank0_only_initialization or self.global_rank == 0:
++            weights = _load_target_weights_from_safetensors(
++                weight_dir=weight_dir,
++                index_path=_full_index,
++            )
++
++            # Copy weights and freeze — bypass initialize_embeddings_and_head
++            # because we pass raw tensors, not nn.Module wrappers.
++            with torch.no_grad():
++                draft_model.embed_tokens.weight.copy_(weights["embed_tokens"])
++                draft_model.lm_head.weight.copy_(weights["lm_head"])
++            del weights
++        draft_model.set_embedding_head_trainable(False)
++        return draft_model, tokenizer
+diff --git a/deepspec/utils/__init__.py b/deepspec/utils/__init__.py
+index cdf9aff..0c05fe0 100644
+--- a/deepspec/utils/__init__.py
++++ b/deepspec/utils/__init__.py
+@@ -4,8 +4,22 @@ import numpy as np
+ import torch
+ 
+ from .config import CustomJSONEncoder, jsonable, load_config, parse_opts_to_config
++from .device import (
++    accelerator_backend,
++    accelerator_module,
++    current_device_index,
++    device_type,
++    empty_cache,
++    get_rng_state,
++    is_npu_available,
++    make_device,
++    manual_seed_all,
++    set_device,
++    set_rng_state,
++)
+ from .distributed import (
+     StatelessResumableDistributedSampler,
++    device_count,
+     init_dist,
+     is_global_main_process,
+     is_local_main_process,
+@@ -21,7 +35,7 @@ def seed_all(seed):
+     torch.manual_seed(seed)
+     random.seed(seed)
+     np.random.seed(seed)
+-    torch.cuda.manual_seed_all(seed)
++    manual_seed_all(seed)
+ 
+ def get_git_sha(detail_info=False):
+     import subprocess
+@@ -67,21 +81,33 @@ __all__ = [
+     "BF16Optimizer",
+     "CustomJSONEncoder",
+     "StatelessResumableDistributedSampler",
++    "accelerator_backend",
++    "accelerator_module",
+     "add_metric",
++    "current_device_index",
++    "device_count",
++    "device_type",
++    "empty_cache",
+     "ensure_dir",
+     "flush",
+     "get_git_diff",
+     "get_git_sha",
++    "get_rng_state",
+     "init_dist",
+     "is_global_main_process",
+     "is_local_main_process",
++    "is_npu_available",
+     "jsonable",
+     "load_config",
+     "main_process_first",
++    "make_device",
++    "manual_seed_all",
+     "parse_opts_to_config",
+     "print_on_global_main",
+     "print_on_local_main",
+     "reset",
+     "safe_symlink",
+     "seed_all",
++    "set_device",
++    "set_rng_state",
+ ]
+diff --git a/deepspec/utils/config.py b/deepspec/utils/config.py
+index 5520324..00ec424 100644
+--- a/deepspec/utils/config.py
++++ b/deepspec/utils/config.py
+@@ -8,6 +8,30 @@ import torch
+ import yaml
+ 
+ 
++_CONFIG_DEFAULTS = {
++    "train": {
++        "npu_profiling": {
++            "enabled": False,
++            "wait": 0,
++            "warmup": 1,
++            "active": 3,
++            "repeat": 1,
++            "skip_first": 0,
++            "output_dir": None,
++            "with_stack": False,
++            "record_shapes": False,
++            "profile_memory": False,
++        },
++    },
++    "logging": {
++        "keep_last_checkpoints": 3,
++        "keep_best_checkpoint": True,
++        "best_checkpoint_metric": "validation/tau",
++        "greater_is_better": True,
++    },
++}
++
++
+ class ConfigNode(dict):
+     def __getattr__(self, item):
+         try:
+@@ -81,6 +105,17 @@ def _parse_scalar(value):
+     return yaml.safe_load(value)
+ 
+ 
++def _merge_defaults(config, defaults):
++    for key, value in defaults.items():
++        if isinstance(value, dict):
++            current = config.setdefault(key, {})
++            if not isinstance(current, dict):
++                raise TypeError(f"Config section {key!r} must be a mapping")
++            _merge_defaults(current, value)
++        else:
++            config.setdefault(key, value)
++
++
+ def load_config(path):
+     path = os.path.abspath(path)
+     module_name = Path(path).stem
+@@ -95,6 +130,7 @@ def load_config(path):
+         if isinstance(value, ModuleType):
+             continue
+         config[name] = value
++    _merge_defaults(config, _CONFIG_DEFAULTS)
+     return to_config_node(config)
+ 
+ 
+diff --git a/deepspec/utils/distributed.py b/deepspec/utils/distributed.py
+index 868bb2d..ca2ba47 100644
+--- a/deepspec/utils/distributed.py
++++ b/deepspec/utils/distributed.py
+@@ -8,25 +8,108 @@ import torch
+ import torch.distributed as dist
+ from torch.utils.data import Sampler
+ 
++from .device import current_device_index
+ 
+-def init_dist(local_rank: int, timeout_minutes: int = 60):
+-    local_world_size = torch.cuda.device_count()
+-    node_rank = int(os.environ["RANK"])
+-    node_world_size = int(os.environ["WORLD_SIZE"])
+-    rank = node_rank * local_world_size + local_rank
+-    world_size = node_world_size * local_world_size
+-    init_method = f"tcp://{os.environ['MASTER_ADDR']}:{os.environ['MASTER_PORT']}"
+-    torch.cuda.set_device(local_rank)
+-    device = torch.device("cuda", local_rank)
+-
+-    dist.init_process_group(
+-        backend="nccl",
+-        init_method=init_method,
++
++def _detect_device():
++    """Return ``(device_type, backend, local_world_size_fn)`` for the current
++    accelerator.
++
++    * NPU (Ascend)  → ``("npu", "hccl", torch.npu.device_count)``
++    * CUDA (NVIDIA) → ``("cuda", "nccl", torch.cuda.device_count)``
++    * CPU (fallback) → ``("cpu", "gloo", lambda: 1)``
++    """
++    # Env-var override: DEEPSPEC_DEVICE=cpu|cuda|npu
++    _forced = os.environ.get("DEEPSPEC_DEVICE", "").lower()
++    if _forced == "cpu":
++        return "cpu", "gloo", lambda: 1
++    if _forced == "cuda":
++        return "cuda", "nccl", torch.cuda.device_count
++
++    try:
++        import torch_npu  # noqa: F401
++        if torch.npu.is_available() and torch.npu.device_count() > 0:
++            return "npu", "hccl", torch.npu.device_count
++    except ImportError:
++        pass
++    if torch.cuda.is_available():
++        return "cuda", "nccl", torch.cuda.device_count
++    return "cpu", "gloo", lambda: 1
++
++
++def _set_device(device_type: str, device_index: int):
++    """Set the default device for *device_type* to *device_index*."""
++    if device_type == "npu":
++        torch.npu.set_device(device_index)
++    elif device_type == "cuda":
++        torch.cuda.set_device(device_index)
++
++
++def _torch_device(device_type: str, device_index: int) -> torch.device:
++    return torch.device(device_type, device_index)
++
++
++def _current_device_index(device_type: str) -> int:
++    if device_type == "npu":
++        return torch.npu.current_device()
++    if device_type == "cuda":
++        return torch.cuda.current_device()
++    return 0
++
++
++# ---- public API ----
++
++
++def device_count() -> int:
++    """Number of available accelerator devices (NPU / CUDA / CPU)."""
++    _, _, fn = _detect_device()
++    return fn()
++
++
++def init_dist(local_rank=None, timeout_minutes: int = 60):
++    """Initialise the torch distributed process group.
++
++    Supports two launch modes:
++
++    * **torchrun** (recommended): omit *local_rank*; rank info is read from
++      ``LOCAL_RANK``, ``RANK``, ``WORLD_SIZE`` environment variables.
++    * **legacy spawn**: pass *local_rank* explicitly; ``RANK`` / ``WORLD_SIZE``
++      are interpreted as *node* rank / *node* count.
++
++    Returns ``(device, global_rank, world_size)``.
++    """
++    device_type, backend, local_world_size_fn = _detect_device()
++
++    if local_rank is not None:
++        # Legacy torch.multiprocessing.spawn mode.
++        local_world_size = local_world_size_fn()
++        node_rank = int(os.environ["RANK"])
++        node_world_size = int(os.environ["WORLD_SIZE"])
++        rank = node_rank * local_world_size + int(local_rank)
++        world_size = node_world_size * local_world_size
++        init_method = f"tcp://{os.environ['MASTER_ADDR']}:{os.environ['MASTER_PORT']}"
++    else:
++        # torchrun mode — all rank info comes from environment variables.
++        local_rank = int(os.environ["LOCAL_RANK"])
++        rank = int(os.environ["RANK"])
++        world_size = int(os.environ["WORLD_SIZE"])
++        local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", 0)) or local_world_size_fn()
++
++    device = _torch_device(device_type, local_rank)
++    _set_device(device_type, local_rank)
++
++    dist_init_kwargs = dict(
++        backend=backend,
+         rank=rank,
+         world_size=world_size,
+         timeout=timedelta(minutes=timeout_minutes),
+-        device_id=device,
++        device_id=device if device_type != "cpu" else None,
+     )
++    # Only pass init_method in legacy spawn mode; torchrun sets it via env vars.
++    if local_rank is not None and "init_method" in dir():
++        dist_init_kwargs["init_method"] = init_method
++
++    dist.init_process_group(**{k: v for k, v in dist_init_kwargs.items() if v is not None})
+     return device, rank, world_size
+ 
+ 
+@@ -35,7 +118,11 @@ def is_global_main_process():
+ 
+ 
+ def is_local_main_process():
+-    return torch.cuda.current_device() == 0
++    # With torchrun LOCAL_RANK is always set; with legacy spawn it may not be.
++    local_rank = os.environ.get("LOCAL_RANK")
++    if local_rank is not None:
++        return int(local_rank) == 0
++    return current_device_index() == 0
+ 
+ 
+ def print_on_global_main(*args, **kwargs):
+@@ -59,6 +146,7 @@ def main_process_first():
+         dist.barrier()
+         yield
+ 
++
+ class StatelessResumableDistributedSampler(Sampler):
+     """Deterministic distributed sampler that streams across epoch boundaries.
+ 
+diff --git a/deepspec/utils/metrics.py b/deepspec/utils/metrics.py
+index 5f7eb38..f4734d8 100644
+--- a/deepspec/utils/metrics.py
++++ b/deepspec/utils/metrics.py
+@@ -3,6 +3,8 @@ import re
+ import torch
+ import torch.distributed as dist
+ 
++from .device import make_device
++
+ 
+ _REDUCTION_PATTERN = re.compile(r"^(dp_)?(mean|sum|max|min|last)$")
+ _DEFAULT_RATIO_REDUCTION = "dp_sum"
+@@ -19,12 +21,14 @@ def _detach_scalar(value):
+ 
+ def _clone_to_reduce_device(value: torch.Tensor) -> torch.Tensor:
+     tensor = value.detach().clone().to(torch.float32)
+-    if dist.get_backend() == "nccl" and not tensor.is_cuda:
+-        tensor = tensor.to(torch.device("cuda", torch.cuda.current_device()))
++    if dist.get_backend() in {"nccl", "hccl"} and tensor.device.type == "cpu":
++        tensor = tensor.to(make_device())
+     return tensor
+ 
+ 
+ def _reduce_dp_value(value: torch.Tensor, op_name: str) -> torch.Tensor:
++    if dist.get_world_size() <= 1:
++        return value
+     if op_name == "sum" or op_name == "mean":
+         dist.all_reduce(value, op=dist.ReduceOp.SUM)
+         if op_name == "mean":
+@@ -71,6 +75,8 @@ def _schema():
+ 
+ def _assert_schema_consistent():
+     local_schema = _schema()
++    if dist.get_world_size() <= 1:
++        return
+     gathered = [None for _ in range(dist.get_world_size())]
+     dist.all_gather_object(gathered, local_schema)
+     reference = gathered[0]
+diff --git a/deepspec/utils/optim.py b/deepspec/utils/optim.py
+index 5e4341e..302cfc1 100644
+--- a/deepspec/utils/optim.py
++++ b/deepspec/utils/optim.py
+@@ -88,12 +88,13 @@ class BF16Optimizer:
+         total_steps,
+         warmup_ratio,
+         weight_decay=0.0,
++        cpu_offload=False,
+     ):
+         self.model = model
++        self.cpu_offload = bool(cpu_offload)
+         self.model_params = [p for p in model.parameters() if p.requires_grad]
+-        self.fp32_params = [
+-            p.detach().clone().to(torch.float32) for p in self.model_params
+-        ]
++        self.fp32_params = [self._make_master_param(p) for p in self.model_params]
++        self._fp32_grad_buffers = [None] * len(self.model_params)
+         for param in self.fp32_params:
+             param.requires_grad = True
+         self.optimizer = torch.optim.AdamW(
+@@ -105,21 +106,93 @@ class BF16Optimizer:
+             warmup_steps=int(warmup_ratio * total_steps),
+         )
+ 
+-    def step(self):
++    def _make_master_param(self, model_param):
++        if not self.cpu_offload:
++            return model_param.detach().clone().to(torch.float32)
++
++        master_param = self._empty_cpu_buffer(model_param)
++        master_param.copy_(model_param.detach(), non_blocking=False)
++        return master_param
++
++    @staticmethod
++    def _empty_cpu_buffer(tensor):
++        pin_memory = tensor.device.type != "cpu"
++        try:
++            return torch.empty(
++                tensor.shape,
++                dtype=torch.float32,
++                device="cpu",
++                pin_memory=pin_memory,
++            )
++        except RuntimeError:
++            # Pinned allocation may be unavailable in CPU-only environments or
++            # when the host's locked-memory limit is exhausted.
++            return torch.empty(tensor.shape, dtype=torch.float32, device="cpu")
++
++    @staticmethod
++    def _synchronize_device(device):
++        if device.type == "cpu":
++            return
++        accelerator = getattr(torch, "accelerator", None)
++        if accelerator is not None and hasattr(accelerator, "synchronize"):
++            accelerator.synchronize(device)
++            return
++        backend = getattr(torch, device.type, None)
++        if backend is None or not hasattr(backend, "synchronize"):
++            raise RuntimeError(f"Cannot synchronize accelerator device {device}.")
++        backend.synchronize(device)
++
++    def _copy_model_grads_to_master(self):
++        devices_to_sync = set()
++        with torch.no_grad():
++            for index, (model_param, master_param) in enumerate(
++                zip(self.model_params, self.fp32_params)
++            ):
++                if model_param.grad is None:
++                    master_param.grad = None
++                    continue
++
++                if not self.cpu_offload:
++                    master_param.grad = model_param.grad.detach().to(torch.float32)
++                    continue
++
++                grad_buffer = self._fp32_grad_buffers[index]
++                if grad_buffer is None:
++                    grad_buffer = self._empty_cpu_buffer(model_param.grad)
++                    self._fp32_grad_buffers[index] = grad_buffer
++                non_blocking = grad_buffer.is_pinned()
++                grad_buffer.copy_(model_param.grad.detach(), non_blocking=non_blocking)
++                master_param.grad = grad_buffer
++                if non_blocking:
++                    devices_to_sync.add(model_param.device)
++
++        for device in devices_to_sync:
++            self._synchronize_device(device)
++
++    def _copy_master_params_to_model(self):
++        devices_to_sync = set()
+         with torch.no_grad():
+-            for model_param, master_param in zip(self.model_params, self.fp32_params):
+-                master_param.grad = (
+-                    model_param.grad.detach().to(torch.float32)
+-                    if model_param.grad is not None
+-                    else None
++            for model_param, master_param in zip(
++                self.model_params, self.fp32_params
++            ):
++                non_blocking = self.cpu_offload and master_param.is_pinned()
++                model_param.copy_(
++                    master_param,
++                    non_blocking=non_blocking,
+                 )
++                model_param.grad = None
++                if non_blocking:
++                    devices_to_sync.add(model_param.device)
++
++        for device in devices_to_sync:
++            self._synchronize_device(device)
++
++    def step(self):
++        self._copy_model_grads_to_master()
+         self.optimizer.step()
+-        self.optimizer.zero_grad()
++        self.optimizer.zero_grad(set_to_none=True)
+         self.scheduler.step()
+-        with torch.no_grad():
+-            for model_param, master_param in zip(self.model_params, self.fp32_params):
+-                model_param.data.copy_(master_param.data.to(model_param.dtype))
+-                model_param.grad = None
++        self._copy_master_params_to_model()
+ 
+     def state_dict(self):
+         return {
+@@ -134,9 +207,7 @@ class BF16Optimizer:
+         fp32_params = state_dict["fp32_params"]
+         for dst, src in zip(self.fp32_params, fp32_params):
+             dst.data.copy_(src.to(dst.device))
+-        with torch.no_grad():
+-            for model_param, master_param in zip(self.model_params, self.fp32_params):
+-                model_param.data.copy_(master_param.data.to(model_param.dtype))
++        self._copy_master_params_to_model()
+ 
+     def get_learning_rate(self):
+         return self.optimizer.param_groups[0]["lr"]
+diff --git a/deepspec/utils/training_logger.py b/deepspec/utils/training_logger.py
+index b901a17..1526a82 100644
+--- a/deepspec/utils/training_logger.py
++++ b/deepspec/utils/training_logger.py
+@@ -56,6 +56,14 @@ def on_optimizer_step(
+     return summary
+ 
+ 
++def log_validation(summary: dict[str, float], *, global_step: int) -> None:
++    if not is_global_main_process() or not summary:
++        return
++    _write_scalars(summary, global_step=global_step)
++    metrics = " ".join(f"{name}={value:.6f}" for name, value in sorted(summary.items()))
++    print_on_global_main(f"validation step={global_step} {metrics}")
++
++
+ def close() -> None:
+     global _writer
+     if _writer is not None:
+diff --git a/eval.py b/eval.py
+index a35e7ea..900d022 100644
+--- a/eval.py
++++ b/eval.py
+@@ -1,13 +1,15 @@
+ from __future__ import annotations
+ import argparse
+ import json
++import os
+ import torch
+ from transformers import AutoConfig
+-from deepspec.eval.dspark import Gemma4DSparkEvaluator, Qwen3DSparkEvaluator
++from deepspec.eval.dspark import DeepSeekV4DSparkEvaluator, Gemma4DSparkEvaluator, Qwen3DSparkEvaluator
+ from deepspec.eval.eagle3 import Gemma4Eagle3Evaluator, Qwen3Eagle3Evaluator
+ from deepspec.utils import CustomJSONEncoder
+ 
+ EVALUATORS = {
++    "DeepSeekV4DSparkModel": DeepSeekV4DSparkEvaluator,
+     "Qwen3DSparkModel": Qwen3DSparkEvaluator,
+     "Gemma4DSparkModel": Gemma4DSparkEvaluator,
+     "Qwen3Eagle3Model": Qwen3Eagle3Evaluator,
+@@ -47,19 +49,15 @@ def parse_args():
+     return args
+ 
+ 
+-def main(local_rank: int, args):
+-    if local_rank == 0:
++def main():
++    args = parse_args()
++    if int(os.environ.get("LOCAL_RANK", 0)) == 0:
+         print(json.dumps(args, indent=4, cls=CustomJSONEncoder), flush=True)
+     draft_config = AutoConfig.from_pretrained(args.draft_name_or_path)
+     evaluator_cls = EVALUATORS[draft_config.architectures[0]]
+-    evaluator = evaluator_cls(local_rank, args)
++    evaluator = evaluator_cls(args)
+     evaluator.evaluate()
+     evaluator.clean_up()
+ 
+ if __name__ == "__main__":
+-    args = parse_args()
+-    torch.multiprocessing.spawn(
+-        main,
+-        args=(args,),
+-        nprocs=torch.cuda.device_count(),
+-    )
++    main()
+diff --git a/requirements.txt b/requirements.txt
+index 3031663..abfcc07 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1,6 +1,6 @@
+-# Install the CUDA build of torch that matches your machine if the default wheel
+-# is not appropriate for your environment.
+-torch==2.9.1
++# torch and torch_npu are NOT included here: they must be installed as a
++# version-matched pair compatible with the local CANN package. On NPU, follow
++# README_NPU.md and install them from the Ascend PyTorch download page first.
+ transformers==5.10.2
+ numpy==2.4.4
+ PyYAML==6.0.3
+@@ -11,7 +11,7 @@ triton==3.5.1
+ typing_extensions==4.15.0
+ sentencepiece==0.2.1
+ safetensors==0.7.0
+-prettytable==3.17.0
++prettytable==3.18.0
+ 
+ # Data preparation dependencies.
+ datasets==4.8.5
+diff --git a/scripts/eval/eval.sh b/scripts/eval/eval.sh
+index c207012..3adba1d 100644
+--- a/scripts/eval/eval.sh
++++ b/scripts/eval/eval.sh
+@@ -1,19 +1,31 @@
+-# Local launch mirrors the repo's node launcher, not standard torchrun
+-# semantics. eval.py spawns one worker per visible GPU by itself.
+-# Here RANK/WORLD_SIZE mean node_rank/node_count, so WORLD_SIZE=1 is a
+-# single-node local run; total GPU workers come from CUDA_VISIBLE_DEVICES.
+-export CUDA_VISIBLE_DEVICES=0,1,2,3
+-export MASTER_ADDR=127.0.0.1
+-export MASTER_PORT=29500
+-export RANK=0
+-export WORLD_SIZE=1
++#!/usr/bin/env bash
++#
++# Launch evaluation with torchrun.
++#
++# torchrun sets LOCAL_RANK / RANK / WORLD_SIZE / LOCAL_WORLD_SIZE
++# automatically; eval.py reads them via init_dist().
++
++# ---- device selection ----
++export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
++export ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES}}
++
++# Count devices for torchrun (NPU or CUDA).
++if python3 -c "import torch; torch.npu.is_available()" 2>/dev/null; then
++    NPROCS=$(python3 -c "import torch; print(torch.npu.device_count())")
++else
++    NPROCS=$(python3 -c "import torch; print(torch.cuda.device_count())")
++fi
++NPROCS=${NPROCS:-1}
+ 
+ # Match this to the target model used by the draft checkpoint.
+-target_name_or_path=Qwen/Qwen3-4B
++target_name_or_path=${TARGET_NAME_OR_PATH:-deepseek-ai/DeepSeek-V4-Flash}
+ 
+ # Training writes checkpoints under ~/checkpoints/<project_name>/<exp_name>/step_*.
+ # Use step_latest for the most recent checkpoint, or replace it with step_<N>.
+-draft_name_or_path=${HOME}/checkpoints/deepspec/dspark_block7_qwen3_4b/step_latest
+-python eval.py \
+-    --target_name_or_path ${target_name_or_path} \
+-    --draft_name_or_path ${draft_name_or_path}
++draft_name_or_path=${DRAFT_NAME_OR_PATH:-${HOME}/checkpoints/deepspec/dspark_block7_deepseek_v4_flash/step_latest}
++
++torchrun \
++    --nproc-per-node="${NPROCS}" \
++    eval.py \
++    --target_name_or_path "${target_name_or_path}" \
++    --draft_name_or_path "${draft_name_or_path}"
+diff --git a/scripts/train/train.sh b/scripts/train/train.sh
+index 05a0618..f923855 100644
+--- a/scripts/train/train.sh
++++ b/scripts/train/train.sh
+@@ -1,45 +1,175 @@
+ #!/usr/bin/env bash
++set -euo pipefail
++
++# Prepare the desired Python and accelerator runtime before running this script.
++# train.py expects torchrun; this script wraps it with parameterized configs.
++export ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
+ 
+-# Local launch mirrors the repo's node launcher, not standard
+-# torchrun semantics. train.py spawns one worker per visible GPU by itself.
+-# Here RANK/WORLD_SIZE mean node_rank/node_count, so WORLD_SIZE=1 is a
+-# single-node local run; total GPU workers come from CUDA_VISIBLE_DEVICES.
+-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
+ export MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
+ export MASTER_PORT=${MASTER_PORT:-29500}
+-export RANK=${RANK:-0}
+-export WORLD_SIZE=${WORLD_SIZE:-1}
+-
+-# Available public configs:
+-## dflash
+-#   config/dflash/dflash_gemma4_12b.py
+-#   config/dflash/dflash_qwen3_4b.py
+-#   config/dflash/dflash_qwen3_8b.py
+-#   config/dflash/dflash_qwen3_14b.py
+-## dspark
+-#   config/dspark/dspark_gemma4_12b.py
+-#   config/dspark/dspark_qwen3_4b.py
+-#   config/dspark/dspark_qwen3_8b.py
+-#   config/dspark/dspark_qwen3_14b.py
+-## eagle3
+-#   config/eagle3/eagle3_gemma4_12b.py
+-#   config/eagle3/eagle3_qwen3_4b.py
+-#   config/eagle3/eagle3_qwen3_8b.py
+-#   config/eagle3/eagle3_qwen3_14b.py
+-
+-target_cache_dir=${target_cache_dir:-${HOME}/.cache/deepspec/qwen3_4b_target_cache}
+-
+-# --opts overrides any config field by dotted key path: --opts "<key.path>=<value>".
+-# Values are parsed as Python scalars (int/float/bool/str). Repeat the flag to set
+-# multiple fields, e.g.:
+-#   --opts "data.target_cache_path=${target_cache_dir}" \
+-#   --opts "train.lr=3e-4" \
+-#   --opts "train.local_batch_size=2"
+-#
+-# local_batch_size is the per-GPU micro-batch size. Raise it to better utilize GPUs
+-# with more memory (e.g. 4 or 8 on 80GB cards), or keep it at 1 if you hit OOM.
+-# Override it without editing the config via:
+-#   --opts "train.local_batch_size=4"
+-python train.py \
+-    --config config/dspark/dspark_qwen3_4b.py \
++export ENABLE_PROFILE=False
++
++# Optional launcher preset. The training config remains Python; this YAML only
++# supplies shell-level defaults for the launcher.
++CONFIG_YAML=${CONFIG_YAML:-${config_yaml:-}}
++if [[ -n "${CONFIG_YAML}" ]]; then
++    if [[ ! -f "${CONFIG_YAML}" ]]; then
++        echo "missing launcher YAML: ${CONFIG_YAML}" >&2
++        exit 2
++    fi
++    eval "$(python3 - "${CONFIG_YAML}" <<'PY'
++import shlex
++import sys
++
++import yaml
++
++with open(sys.argv[1], encoding="utf-8") as stream:
++    config = yaml.safe_load(stream) or {}
++
++def emit(value, prefix=""):
++    if isinstance(value, dict):
++        for name, child in value.items():
++            emit(child, f"{prefix}{name}_")
++    elif value is not None:
++        key = prefix[:-1].lower()
++        value = shlex.quote(str(value))
++        print(f"{key}={value}")
++        if key.upper() != key:
++            print(f"{key.upper()}={value}")
++
++emit(config)
++PY
++)"
++fi
++
++# Values from the selected YAML are authoritative.  Existing environment
++# variables are only fallbacks for fields omitted by that YAML.
++ascend_rt_visible_devices=${ascend_rt_visible_devices:-${ASCEND_RT_VISIBLE_DEVICES}}
++master_addr=${master_addr:-${MASTER_ADDR}}
++master_port=${master_port:-${MASTER_PORT}}
++pytorch_npu_alloc_conf=${pytorch_npu_alloc_conf:-${PYTORCH_NPU_ALLOC_CONF:-}}
++export ASCEND_RT_VISIBLE_DEVICES=${ascend_rt_visible_devices}
++export MASTER_ADDR=${master_addr}
++export MASTER_PORT=${master_port}
++export PYTORCH_NPU_ALLOC_CONF=${pytorch_npu_alloc_conf}
++
++# Count devices: NPU or CUDA.
++if python3 -c "import torch; torch.npu.is_available()" 2>/dev/null; then
++    NPROCS=$(python3 -c "import torch; print(torch.npu.device_count())")
++else
++    NPROCS=$(python3 -c "import torch; print(torch.cuda.device_count())")
++fi
++NPROCS=${NPROCS:-1}
++
++# ``torchrun`` owns RANK/WORLD_SIZE/LOCAL_RANK.  These are launcher inputs,
++# while the paths below are user-configurable environment variables.
++config_path=${config_path:-${CONFIG_PATH:-config/dspark/dspark_deepseek_v4_flash.py}}
++target_model_path=${target_model_path:-${TARGET_MODEL_PATH:-deepseek-ai/DeepSeek-V4-Flash}}
++base_tb_dir=${base_tb_dir:-${BASE_TB_DIR:-${HOME}/tensorboard}}
++base_ckpt_dir=${base_ckpt_dir:-${BASE_CKPT_DIR:-${HOME}/checkpoints}}
++export CONFIG_PATH=${config_path}
++export TARGET_MODEL_PATH=${target_model_path}
++export BASE_TB_DIR=${base_tb_dir}
++export BASE_CKPT_DIR=${base_ckpt_dir}
++target_cache_dir=${target_cache_dir:-${HOME}/.cache/deepspec/deepseek_v4_target_cache}
++target_layer_ids=${target_layer_ids:-40,41,42}
++global_batch_size=${global_batch_size:-512}
++num_train_epochs=${num_train_epochs:-}
++max_train_steps=${max_train_steps:-}
++data_max_length=${data_max_length:-4096}
++num_workers=${num_workers:-4}
++logging_steps=${logging_steps:-10}
++checkpointing_steps=${checkpointing_steps:-}
++exp_name=${exp_name:-}
++n_routed_experts=${n_routed_experts:-}
++tau_loss_alpha=${tau_loss_alpha:-}
++sharding_strategy=${sharding_strategy:-}
++
++dataset_size=${dataset_size:-}
++validation_fraction=${validation_fraction:-0.1}
++target_layer_ids_opt=$(python3 - "${target_layer_ids}" <<'PY'
++import sys
++
++import yaml
++
++value = yaml.safe_load(sys.argv[1])
++if isinstance(value, str):
++    value = [item.strip() for item in value.split(",") if item.strip()]
++if not isinstance(value, (list, tuple)) or not value:
++    raise ValueError("target_layer_ids must be a non-empty YAML list or comma-separated string")
++print("[" + ",".join(str(int(item)) for item in value) + "]")
++PY
++)
++if [[ -z "${dataset_size}" && -f "${target_cache_dir}/manifest.json" ]]; then
++    dataset_size=$(python3 - "${target_cache_dir}/manifest.json" <<'PY'
++import json
++import sys
++
++with open(sys.argv[1], encoding="utf-8") as stream:
++    print(int(json.load(stream)["num_samples"]))
++PY
++)
++fi
++
++if [[ -n "${dataset_size}" && -n "${num_train_epochs}" ]]; then
++    train_size=$(python3 - "${dataset_size}" "${validation_fraction}" <<'PY'
++import sys
++
++size = int(sys.argv[1])
++fraction = float(sys.argv[2])
++print(max(1, min(size, int(size * (1.0 - fraction)))))
++PY
++)
++    steps_per_epoch=$((train_size / global_batch_size))
++    if (( steps_per_epoch > 0 )); then
++        max_train_steps=${max_train_steps:-$((steps_per_epoch * num_train_epochs))}
++        checkpointing_steps=${checkpointing_steps:-$((steps_per_epoch / 3))}
++        (( checkpointing_steps > 0 )) || checkpointing_steps=1
++    fi
++fi
++
++if [[ -z "${checkpointing_steps}" ]]; then
++    checkpointing_steps=3000
++fi
++
++run_time=$(TZ=Asia/Shanghai date +%Y%m%d_%H%M%S)
++exp_name=${exp_name:-deepspec_offline_${run_time}}
++
++cmd=(
++    torchrun
++    --nproc-per-node="${NPROCS}"
++    train.py
++    --config "${config_path}"
++    --opts "model.target_model_name_or_path=${target_model_path}"
+     --opts "data.target_cache_path=${target_cache_dir}"
++    --opts "data.max_length=${data_max_length}"
++    --opts "data.num_workers=${num_workers}"
++    --opts "data.validation_fraction=${validation_fraction}"
++    --opts "train.global_batch_size=${global_batch_size}"
++    --opts "logging.logging_steps=${logging_steps}"
++    --opts "logging.checkpointing_steps=${checkpointing_steps}"
++)
++
++if [[ -n "${target_layer_ids}" ]]; then
++    cmd+=(--opts "model.target_layer_ids=${target_layer_ids_opt}")
++fi
++if [[ -n "${max_train_steps}" ]]; then
++    cmd+=(--opts "train.max_train_steps=${max_train_steps}")
++fi
++if [[ -n "${num_train_epochs}" ]]; then
++    cmd+=(--opts "train.num_train_epochs=${num_train_epochs}")
++fi
++if [[ -n "${exp_name}" ]]; then
++    cmd+=(--opts "exp_name=${exp_name}")
++fi
++if [[ -n "${n_routed_experts}" ]]; then
++    cmd+=(--opts "model.n_routed_experts=${n_routed_experts}")
++fi
++if [[ -n "${tau_loss_alpha}" ]]; then
++    cmd+=(--opts "model.tau_loss_alpha=${tau_loss_alpha}")
++fi
++if [[ -n "${sharding_strategy}" ]]; then
++    cmd+=(--opts "train.sharding_strategy=${sharding_strategy}")
++fi
++
++"${cmd[@]}"
+diff --git a/deepspec/data/target_cache_dataset.py b/deepspec/data/target_cache_dataset.py
+index d6e7b98..e546133 100644
+--- a/deepspec/data/target_cache_dataset.py
++++ b/deepspec/data/target_cache_dataset.py
+@@ -200,7 +200,7 @@ def validate_target_cache_manifest(*, cache_dir: str, manifest):
+     )
+ 
+ 
+-def validate_train_cache(*, train_dataset, draft_model, target_model_name_or_path):
++def validate_train_cache(*, train_dataset, draft_model, target_model_name_or_path=None):
+     manifest = train_dataset.manifest
+     expected_layer_ids = [int(layer_id) for layer_id in draft_model.target_layer_ids]
+     assert [int(layer_id) for layer_id in manifest["target_layer_ids"]] == expected_layer_ids, (
+@@ -211,11 +211,6 @@ def validate_train_cache(*, train_dataset, draft_model, target_model_name_or_pat
+         "Target cache hidden_size does not match draft model hidden size: "
+         f"{manifest['hidden_size']} != {draft_model.config.hidden_size}"
+     )
+-    cache_target_model_name = manifest["target_model_name_or_path"]
+-    assert str(cache_target_model_name) == str(target_model_name_or_path), (
+-        "Target cache target_model_name_or_path does not match training config: "
+-        f"{cache_target_model_name} != {target_model_name_or_path}"
+-    )
+ 
+ 
+ def _tensor_to_bytes(tensor: torch.Tensor, dtype: torch.dtype):
+diff --git a/train.py b/train.py
+index 40d9e07..35685d0 100644
+--- a/train.py
++++ b/train.py
+@@ -28,12 +28,13 @@ def parse_args():
+     return config
+ 
+ 
+-def main(local_rank):
++def main():
+     args = parse_args()
+     seed_all(int(args.seed))
+-    if local_rank == 0:
++    # Print config only on the local main process (torchrun sets LOCAL_RANK=0).
++    if int(os.environ.get("LOCAL_RANK", 0)) == 0:
+         print(json.dumps(args, indent=4, cls=CustomJSONEncoder), flush=True)
+-    trainer = args.train.trainer_cls(local_rank, args)
++    trainer = args.train.trainer_cls(args)
+     trainer.train()
+     trainer.clean_up()
+ 
+@@ -42,4 +43,4 @@ if __name__ == "__main__":
+     if os.path.exists(".git"):
+         print(f"git status:", "\n\n".join(get_git_sha(detail_info=True)))
+         print("git diff:", get_git_diff())
+-    torch.multiprocessing.spawn(main, nprocs=torch.cuda.device_count())
++    main()

@@ -1,0 +1,22 @@
+# Common launcher defaults for offline training. Runtime-derived values such
+# as experiment name and checkpoint interval are computed by train.sh.
+config_path: config/dspark/dspark_deepseek_v4_flash.py
+target_model_path: /path/to/deepseek_v4_int8_w8a8
+target_cache_dir: /path/to/deepseek_v4_target_cache
+data_source: static
+global_batch_size: 512
+num_train_epochs: 10
+data_max_length: 4096
+validation_fraction: 0.1
+target_layer_ids: [40, 41, 42]
+num_workers: 4
+n_routed_experts: null
+tau_loss_alpha: null
+sharding_strategy: full_shard
+logging_steps: 10
+base_tb_dir: /workspace/tensorboard
+base_ckpt_dir: /workspace/checkpoints
+master_addr: 127.0.0.1
+master_port: 29500
+ascend_rt_visible_devices: 0,1,2,3,4,5,6,7
+pytorch_npu_alloc_conf: expandable_segments:True
