@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="640" viewBox="0 0 1400 640" role="img" aria-labelledby="title desc">
+  <title id="title">AgentENV 与 AgenticRL 的运行流程</title>
+  <desc id="desc">RolloutManager 向自定义 rollout 发送任务并接收训练样本。rollout 编排 AgentENV 中先后创建的 Agent 和 Verifier sandbox。Agent 通过 Adapter 请求 vLLM；Adapter 将 token 和 logprob 交回轨迹处理，Verifier 返回测试结果用于计算奖励。TorchTitan 消费训练数据并向 vLLM 发布权重。图中补丁及测试结果均由 rollout 侧编排传递。</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 Z" fill="#303744"/>
+    </marker>
+    <style>
+      text { font-family: 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', sans-serif; fill: #242b35; }
+      .name { font-size: 22px; font-weight: 600; text-anchor: middle; }
+      .note { font-size: 17px; text-anchor: middle; fill: #515966; }
+      .label { font-size: 17px; text-anchor: middle; }
+      .box { fill: white; stroke: #303744; stroke-width: 2; }
+      .flow { fill: none; stroke: #303744; stroke-width: 1.6; marker-end: url(#arrow); }
+    </style>
+  </defs>
+  <rect width="1400" height="640" fill="white"/>
+
+  <!-- Task sampling and custom rollout. -->
+  <text x="152" y="46" class="label">SWE-Gym bundle</text>
+  <path d="M 152 60 V 121" class="flow"/>
+  <rect x="45" y="125" width="215" height="100" class="box"/>
+  <text x="152" y="166" class="name">RolloutManager</text>
+  <text x="152" y="199" class="note">任务采样 / 数据汇集</text>
+
+  <path d="M 264 151 H 416" class="flow"/>
+  <text x="340" y="138" class="label">任务输入</text>
+  <path d="M 416 200 H 264" class="flow"/>
+  <text x="340" y="224" class="label">训练样本</text>
+  <rect x="420" y="125" width="265" height="100" class="box"/>
+  <text x="552" y="154" class="name">Custom rollout</text>
+  <text x="552" y="183" class="note">generate()</text>
+  <text x="552" y="209" class="note">轨迹与奖励汇总</text>
+
+  <!-- Environment boundary; sandbox roles are shown together but run sequentially. -->
+  <rect x="850" y="65" width="510" height="235" fill="none" stroke="#537a70" stroke-width="1.5" stroke-dasharray="6 5"/>
+  <text x="875" y="101" class="name" style="fill:#3f655b;text-anchor:start">AgentENV · CPU 环境服务</text>
+  <rect x="875" y="135" width="205" height="100" class="box" style="stroke:#537a70"/>
+  <text x="977" y="174" class="name">Agent sandbox</text>
+  <text x="977" y="207" class="note">Codex / 工具执行</text>
+  <rect x="1135" y="135" width="200" height="100" class="box" style="stroke:#537a70"/>
+  <text x="1235" y="174" class="name">Verifier sandbox</text>
+  <text x="1235" y="207" class="note">干净环境 / 测试</text>
+  <path d="M 1084 184 H 1131" class="flow"/>
+  <text x="1107" y="170" class="label" style="font-size:15px">patch</text>
+  <text x="1155" y="261" class="note" style="font-size:16px">同一模板 · 独立工作区</text>
+  <text x="1155" y="285" class="note" style="font-size:16px">先求解，后评测</text>
+
+  <path d="M 689 151 H 871" class="flow"/>
+  <text x="778" y="135" class="label">环境创建与执行</text>
+  <path d="M 1235 131 V 25 H 625 V 121" class="flow"/>
+  <rect x="728" y="13" width="194" height="24" fill="white"/>
+  <text x="825" y="31" class="label">测试结果 → reward</text>
+
+  <!-- Model calls and the sampled-token return path. -->
+  <path d="M 977 239 V 436" class="flow" marker-start="url(#arrow)"/>
+  <rect x="989" y="345" width="196" height="26" fill="white"/>
+  <text x="1087" y="365" class="label">模型请求 / 响应</text>
+  <rect x="900" y="440" width="225" height="100" class="box"/>
+  <text x="1012" y="480" class="name">Adapter</text>
+  <text x="1012" y="514" class="note">Turn Disposition</text>
+  <path d="M 930 436 V 335 H 552 V 229" class="flow"/>
+  <text x="742" y="323" class="label">采样 token / logprob</text>
+
+  <!-- The existing RL training and inference loop. -->
+  <path d="M 152 229 V 451" class="flow"/>
+  <text x="206" y="351" class="label">训练数据</text>
+  <rect x="45" y="455" width="215" height="115" class="box" style="stroke:#aa6656"/>
+  <text x="152" y="500" class="name">TorchTitan</text>
+  <text x="152" y="536" class="note">RL 训练 · NPU</text>
+  <rect x="420" y="455" width="265" height="115" class="box" style="stroke:#667bb0"/>
+  <text x="552" y="500" class="name">vLLM</text>
+  <text x="552" y="536" class="note">Router / 推理实例 · NPU</text>
+  <path d="M 264 516 H 416" class="flow"/>
+  <text x="340" y="500" class="label">权重更新</text>
+  <path d="M 896 476 H 689" class="flow"/>
+  <text x="792" y="461" class="label">prompt token IDs</text>
+  <path d="M 689 522 H 896" class="flow"/>
+  <text x="792" y="546" class="label">tokens + logprobs</text>
+
+  <text x="45" y="614" style="font-size:16px;fill:#656d77">箭头表示逻辑数据流；sandbox 生命周期、补丁传递与评测由 custom rollout 编排。</text>
+</svg>

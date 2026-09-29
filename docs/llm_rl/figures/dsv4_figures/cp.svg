@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="1180" viewBox="0 0 1400 1180" role="img" aria-labelledby="title desc"><title id="title">CP 与 Routing Replay 协同方案</title><desc id="desc">推理记录路由并恢复逻辑顺序，路由与全局token对齐后沿模型唯一CP映射分配给rank0和rank1。每个rank按输入位置g重放专家ID，按g+1计算目标loss，重计算复用路由，最后以全局分母聚合。</desc><defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#52657D"/></marker></defs><rect width="1400" height="1180" fill="#F7F9FC"/><g font-family="Microsoft YaHei, Noto Sans CJK SC, Arial, sans-serif">
+<text x="52" y="66" font-size="34" fill="#172B46" font-weight="700" text-anchor="start">CP 与 Routing Replay 协同方案</text>
+<text x="52" y="106" font-size="21" fill="#52657D" font-weight="400" text-anchor="start">T=8，CP_degree=2；x0–x3 为 prompt，x4–x7 为 response。橙色虚线表示 Routing Replay 适配方案。</text>
+<rect x="52" y="139" width="1296" height="100" rx="14" fill="#FFF7E9" stroke="#DDA84E" stroke-width="2" stroke-dasharray="8 6"/>
+<text x="78" y="179" font-size="24" fill="#A96617" font-weight="700" text-anchor="start">推理记录 Top-K 专家 IDs → 恢复请求内逻辑顺序 → VIME 按训练样本顺序打包</text>
+<text x="78" y="214" font-size="20" fill="#52657D" font-weight="400" text-anchor="start">保留样本、输入位置、MoE 层和权重版本；推理若有分片，先逆重排、去 padding 与复制行。</text>
+<path d="M 700 240 L 700 270" fill="none" stroke="#A96617" stroke-width="2.5" marker-end="url(#arrow)" stroke-dasharray="8 6"/>
+<rect x="52" y="281" width="1296" height="183" rx="14" fill="#FFFFFF" stroke="#D6E0EC" stroke-width="2"/>
+<text x="78" y="319" font-size="23" fill="#172B46" font-weight="700" text-anchor="start">全局 token 与路由逐行对应</text>
+<text x="1320" y="319" font-size="18" fill="#52657D" font-weight="400" text-anchor="end">Rg = 输入位置 g 在各 MoE 层的专家 IDs</text>
+<rect x="80" y="336" width="137" height="52" rx="14" fill="#E8F0FB" stroke="#2563A6" stroke-width="2"/>
+<text x="148" y="371" font-size="23" fill="#172B46" font-weight="700" text-anchor="middle">x0</text>
+<rect x="80" y="400" width="137" height="42" rx="14" fill="#FFF7E9" stroke="#DDA84E" stroke-width="2" stroke-dasharray="8 6"/>
+<text x="148" y="429" font-size="21" fill="#A96617" font-weight="700" text-anchor="middle">R0</text>
+<rect x="235" y="336" width="137" height="52" rx="14" fill="#E8F0FB" stroke="#2563A6" stroke-width="2"/>
+<text x="303" y="371" font-size="23" fill="#172B46" font-weight="700" text-anchor="middle">x1</text>
+<rect x="235" y="400" width="137" height="42" rx="14" fill="#FFF7E9" stroke="#DDA84E" stroke-width="2" stroke-dasharray="8 6"/>
+<text x="303" y="429" font-size="21" fill="#A96617" font-weight="700" text-anchor="middle">R1</text>
+<rect x="390" y="336" width="137" height="52" rx="14" fill="#E8F0FB" stroke="#2563A6" stroke-width="2"/>
+<text x="458" y="371" font-size="23" fill="#172B46" font-weight="700" text-anchor="middle">x2</text>
+<rect x="390" y="400" width="137" height="42" rx="14" fill="#FFF7E9" stroke="#DDA84E" stroke-width="2" stroke-dasharray="8 6"/>
+<text x="458" y="429" font-size="21" fill="#A96617" font-weight="700" text-anchor="middle">R2</text>
+<rect x="545" y="336" width="137" height="52" rx="14" fill="#E8F0FB" stroke="#2563A6" stroke-width="2"/>
+<text x="613" y="371" font-size="23" fill="#172B46" font-weight="700" text-anchor="middle">x3</text>
+<rect x="545" y="400" width="137" height="42" rx="14" fill="#FFF7E9" stroke="#DDA84E" stroke-width="2" stroke-dasharray="8 6"/>
+<text x="613" y="429" font-size="21" fill="#A96617" font-weight="700" text-anchor="middle">R3</text>
+<rect x="700" y="336" width="137" height="52" rx="14" fill="#DDF3EE" stroke="#107F79" stroke-width="2"/>
+<text x="768" y="371" font-size="23" fill="#172B46" font-weight="700" text-anchor="middle">x4</text>
+<rect x="700" y="400" width="137" height="42" rx="14" fill="#FFF7E9" stroke="#DDA84E" stroke-width="2" stroke-dasharray="8 6"/>
+<text x="768" y="429" font-size="21" fill="#A96617" font-weight="700" text-anchor="middle">R4</text>
+<rect x="855" y="336" width="137" height="52" rx="14" fill="#DDF3EE" stroke="#107F79" stroke-width="2"/>
+<text x="923" y="371" font-size="23" fill="#172B46" font-weight="700" text-anchor="middle">x5</text>
+<rect x="855" y="400" width="137" height="42" rx="14" fill="#FFF7E9" stroke="#DDA84E" stroke-width="2" stroke-dasharray="8 6"/>
+<text x="923" y="429" font-size="21" fill="#A96617" font-weight="700" text-anchor="middle">R5</text>
+<rect x="1010" y="336" width="137" height="52" rx="14" fill="#DDF3EE" stroke="#107F79" stroke-width="2"/>
+<text x="1078" y="371" font-size="23" fill="#172B46" font-weight="700" text-anchor="middle">x6</text>
+<rect x="1010" y="400" width="137" height="42" rx="14" fill="#FFF7E9" stroke="#DDA84E" stroke-width="2" stroke-dasharray="8 6"/>
+<text x="1078" y="429" font-size="21" fill="#A96617" font-weight="700" text-anchor="middle">R6</text>
+<rect x="1165" y="336" width="137" height="52" rx="14" fill="#DDF3EE" stroke="#107F79" stroke-width="2"/>
+<text x="1233" y="371" font-size="23" fill="#172B46" font-weight="700" text-anchor="middle">x7</text>
+<rect x="1165" y="400" width="137" height="42" rx="14" fill="#FFF7E9" stroke="#DDA84E" stroke-width="2" stroke-dasharray="8 6"/>
+<text x="1233" y="429" font-size="21" fill="#A96617" font-weight="700" text-anchor="middle">无记录</text>
+<path d="M 700 466 L 700 496" fill="none" stroke="#2563A6" stroke-width="2.5" marker-end="url(#arrow)"/>
+<rect x="150" y="509" width="1100" height="107" rx="14" fill="#EDF2F9" stroke="#D6E0EC" stroke-width="2"/>
+<text x="700" y="548" font-size="23" fill="#172B46" font-weight="700" text-anchor="middle">模型构建 attention / 压缩元数据，唯一一次切分输入，提供 local_to_global 映射</text>
+<text x="700" y="588" font-size="23" fill="#2563A6" font-weight="700" text-anchor="middle">本地行 j → 全局输入位置 g：路由取 R[g]，监督目标取 token[g+1]</text>
+<path d="M 445 618 L 365 655" fill="none" stroke="#2563A6" stroke-width="2.5" marker-end="url(#arrow)"/>
+<path d="M 955 618 L 1035 655" fill="none" stroke="#2563A6" stroke-width="2.5" marker-end="url(#arrow)"/>
+<rect x="52" y="668" width="620" height="292" rx="14" fill="#FFFFFF" stroke="#2563A6" stroke-width="2"/>
+<text x="74" y="707" font-size="23" fill="#2563A6" font-weight="700" text-anchor="start">CP rank 0  |  本地输入：x0, x1, x2, x3</text>
+<rect x="70" y="725" width="584" height="116" rx="14" fill="#FFF7E9" stroke="#DDA84E" stroke-width="2" stroke-dasharray="8 6"/>
+<text x="87" y="758" font-size="22" fill="#A96617" font-weight="700" text-anchor="start">本地路由：R0, R1, R2, R3</text>
+<text x="87" y="792" font-size="19" fill="#172B46" font-weight="400" text-anchor="start">MoE dispatch 前重放 IDs；当前 gate 分数保留梯度</text>
+<text x="87" y="824" font-size="19" fill="#172B46" font-weight="400" text-anchor="start">训练前向与 checkpoint 重计算复用相同路由</text>
+<text x="76" y="881" font-size="23" fill="#2563A6" font-weight="700" text-anchor="start">g=3 → target x4</text>
+<text x="76" y="925" font-size="21" fill="#172B46" font-weight="400" text-anchor="start">本地 loss 分子：ℓ(x4)</text>
+<rect x="728" y="668" width="620" height="292" rx="14" fill="#FFFFFF" stroke="#107F79" stroke-width="2"/>
+<text x="750" y="707" font-size="23" fill="#107F79" font-weight="700" text-anchor="start">CP rank 1  |  本地输入：x4, x5, x6, x7</text>
+<rect x="746" y="725" width="584" height="116" rx="14" fill="#FFF7E9" stroke="#DDA84E" stroke-width="2" stroke-dasharray="8 6"/>
+<text x="763" y="758" font-size="22" fill="#A96617" font-weight="700" text-anchor="start">本地路由：R4, R5, R6, 无记录</text>
+<text x="763" y="792" font-size="19" fill="#172B46" font-weight="400" text-anchor="start">MoE dispatch 前重放 IDs；当前 gate 分数保留梯度</text>
+<text x="763" y="824" font-size="19" fill="#172B46" font-weight="400" text-anchor="start">训练前向与 checkpoint 重计算复用相同路由</text>
+<text x="752" y="881" font-size="23" fill="#107F79" font-weight="700" text-anchor="start">g=4,5,6 → target x5,x6,x7</text>
+<text x="752" y="925" font-size="21" fill="#172B46" font-weight="400" text-anchor="start">本地 loss 分子：ℓ(x5) + ℓ(x6) + ℓ(x7)</text>
+<text x="700" y="997" font-size="22" fill="#A96617" font-weight="700" text-anchor="middle">边界示例：rank 0 的 g=3 使用 R3，但预测的是 rank 1 输入中的 x4。</text>
+<path d="M 135 962 L 135 1030" fill="none" stroke="#2563A6" stroke-width="2.5" marker-end="url(#arrow)"/>
+<path d="M 1265 962 L 1265 1030" fill="none" stroke="#2563A6" stroke-width="2.5" marker-end="url(#arrow)"/>
+<rect x="52" y="1043" width="1296" height="103" rx="14" fill="#EAF4F2" stroke="#107F79" stroke-width="2"/>
+<text x="78" y="1083" font-size="25" fill="#107F79" font-weight="700" text-anchor="start">全局归一化：L = [ℓ(x4) + ℓ(x5) + ℓ(x6) + ℓ(x7)] / 4</text>
+<text x="78" y="1122" font-size="21" fill="#172B46" font-weight="400" text-anchor="start">有效 target 只计一次；保留本地 logits，梯度按并行后端合并，避免额外乘除 CP_degree。</text>
+</g></svg>
