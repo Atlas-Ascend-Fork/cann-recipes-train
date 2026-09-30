@@ -20,7 +20,6 @@ repos:
             docs/llm_pretrain/figures/ascend950/long_context/fsdp-cp-layout\.webp|
             docs/llm_pretrain/figures/ascend950/long_context/kv-allgather\.webp|
             docs/llm_pretrain/figures/ascend950/high_availability/elastic-training-loss\.jpg|
-            docs/llm_pretrain/figures/ascend950/high_availability/replica-rejoin-loss\.jpg|
             docs/llm_pretrain/figures/ascend950/training_agents/host-baseline-profile\.webp|
             docs/llm_pretrain/figures/ascend950/training_agents/host-optimized-profile\.webp
           )$

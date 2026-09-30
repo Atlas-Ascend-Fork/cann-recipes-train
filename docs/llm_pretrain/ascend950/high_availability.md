@@ -116,10 +116,16 @@ NPU 侧的适配包括设备与通信恢复、训练现场清理和状态承接�
 
 *图 10：TorchFT 开启与关闭的训练精度对照*
 
-2. TorchFT 故障恢复精度对照。 开启 TorchFT 并注入单副本故障，以无故障训练为基线，比较存活副本恢复训练与替换副本接续的结果。
-![replica rejoin loss](../figures/ascend950/high_availability/replica-rejoin-loss.jpg)
+2. TorchFT 故障恢复精度对照。 使用 128die 进行 DeepSeek-V4 Flash 训练，划分为两个副本（replica1 和 replica2）。replica2 在训练中途退出后，replica1 继续训练，两个副本的 loss 变化如下图所示：
+![replica rejoin loss](../figures/ascend950/high_availability/replica-rejoin-loss.png)
 
 *图 11：TorchFT 历史重放策略的恢复精度对照*
+
+3. TorchFT 开关性能对照。 以 DeepSeek-V4 Flash 128die 训练为例，对比开启与关闭 TorchFT 时的吞吐量（TPS）。从图中可见，训练后期吞吐量趋于稳定时，开启 TorchFT 后的吞吐量较基线下降幅度在 5% 以内。
+
+![torchft throughput comparison](../figures/ascend950/high_availability/torchft-throughput-comparison.png)
+
+*图 12：TorchFT 开启与关闭的训练吞吐量对照*
 
 ## 4. SDC 检测
 
@@ -142,7 +148,7 @@ SDC（Silent Data Corruption，静默数据损坏）指未被常规错误机制�
 
 上述原生能力面向 eager 模式，而编译训练需要把校验纳入训练图，并让梯度检测与训练步对齐。为此，TorchTitan-NPU 复用昇腾原生检测算法，扩展了对 `torch.compile` 的支持。当前的编译适配面向使用 Inductor 的标准 NPU 训练流程，不支持流水线并行。
 
-检测流程如图 12 所示：
+检测流程如图 13 所示：
 
 1. **1.编译图预置校验。** 首次编译时，通过图变换（Graph Pass）在支持的 BF16 矩阵乘法后插入 Checksum，使校验路径随训练图一同编译。
 2. **2.梯度检测与累积边界对齐。** 每个梯度累积窗口完成反向传播后，对选定参数提交检测。检测对象是完整的累积梯度，因此检测节奏与参数更新保持一致。
@@ -152,7 +158,7 @@ HCCL 检测独立于上述触发过程，在模型构建完成后启用，覆盖
 
 ![sdc detection](../figures/ascend950/high_availability/sdc-detection.webp)
 
-*图 12：SDC 检测流程*
+*图 13：SDC 检测流程*
 
 ### 4.3 实验结果
 
@@ -168,13 +174,13 @@ MoE 训练出现 Loss spike（loss 突增）后，可以通过 checkpoint 恢复
 
 前瞻路由参考了 DeepSeek-V4 技术报告中的 [Anticipatory Routing（§4.2.3）](https://arxiv.org/html/2606.19348v1)：提前读取后续训练数据，计算并缓存各 MoE 层的 Top-k 专家索引；等这些数据参与训练时，再回放已缓存的索引。这样，模型计算和参数更新使用当前权重，专家选择则来自较早时刻的权重。该方案预期通过在时间上错开路由选择与参数更新，降低 Loss spike 复发的概率。
 
-图 13 以同一批数据 Dₜ 为例，展示路由的缓存与回放：在 t−Δt 时刻，使用权重 θ(t−Δt) 预计算路由 Rₜ；到第 t 步训练时，回放 Rₜ 确定专家选择，并使用当前权重 θ(t) 完成计算与参数更新。
+图 14 以同一批数据 Dₜ 为例，展示路由的缓存与回放：在 t−Δt 时刻，使用权重 θ(t−Δt) 预计算路由 Rₜ；到第 t 步训练时，回放 Rₜ 确定专家选择，并使用当前权重 θ(t) 完成计算与参数更新。
 
 ![anticipatory routing](../figures/ascend950/high_availability/anticipatory-routing.png)
 
-*图 13：Router Cache / Replay 原理*
+*图 14：Router Cache / Replay 原理*
 
-回滚与前瞻路由按以下顺序衔接（图 14）：
+回滚与前瞻路由按以下顺序衔接（图 15）：
 
 1. **1.恢复 checkpoint。** 选择异常发生前的有效恢复点，恢复模型、优化器、学习率进度和数据位置，并从该位置开始建立前瞻路由窗口。
 2. **2.预填充路由窗口（WARMUP）。** 提前读取后续若干批数据，用恢复后的权重执行前向计算，将路由索引与对应数据关联后缓存。此阶段不执行反向传播，也不更新参数。
@@ -183,7 +189,7 @@ MoE 训练出现 Loss spike（loss 突增）后，可以通过 checkpoint 恢复
 
 ![routing replay](../figures/ascend950/high_availability/routing-replay.webp)
 
-*图 14：Loss spike 回滚与前瞻路由流程*
+*图 15：Loss spike 回滚与前瞻路由流程*
 
 ### 5.2 实验结果
 
