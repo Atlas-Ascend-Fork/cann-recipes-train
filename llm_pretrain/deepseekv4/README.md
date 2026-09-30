@@ -81,6 +81,7 @@ gunzip -c dsv4_train_torchtitan_cann9.0.0_v3.0.tar.gz | docker load
 dsv4_train_torchtitan:cann9.0.0_v3.0
 ```
 
+
 ## 启动Docker容器
 
 dsv4_train_torchtitan:cann9.0.0_v3.0镜像支持DeepSeek-V4-Flash模型和DeepSeek-V4-Pro模型，以该镜像的docker启动举例，执行如下命令启动容器：
@@ -275,6 +276,15 @@ bash run_train_dsv4_flash_A5_MXFP8_pretrain.sh
 - 数据集：默认使用 `torchtitan-npu` 自带的 `c4_test`（`tests/assets/c4_test`）。
 - tokenizer：`HF_ASSETS_PATH` 指向前文已下载的 `/data/models/DeepSeek-V4-Flash` 目录即可（需包含 `tokenizer.json` 与 `tokenizer_config.json`），本样例默认随机初始化，无需权重转换。
 
+### 环境配置
+
+镜像版本如下：
+
+```shell
+dsv4_train_torchtitan:cann9.0.0_v3.0
+```
+
+
 ### 启动训练
 
 下载 torchtitan-npu：
@@ -283,6 +293,11 @@ bash run_train_dsv4_flash_A5_MXFP8_pretrain.sh
 git clone https://gitcode.com/cann/torchtitan-npu.git
 cd torchtitan-npu
 git checkout deprecated_master_260831
+```
+然后按照requirments里面重装一下所需依赖：
+
+```bash
+pip install -r requirements.txt
 ```
 
 将 HiF8 样例脚本拷贝至 `torchtitan-npu` 的 `scripts` 目录：
