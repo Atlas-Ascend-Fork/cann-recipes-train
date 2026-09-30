@@ -1,4 +1,4 @@
-# 低精度量化训练实践
+# 基于DeepSeek的昇腾950低精度量化训练实践
 
 [返回总览](../ascend950_superpod_moe_pretrain_system_reference.md)
 
