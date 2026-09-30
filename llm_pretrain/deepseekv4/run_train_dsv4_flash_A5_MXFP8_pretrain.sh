@@ -12,11 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ps -ef |grep -i python |grep -i [name] |grep -v grep |awk '{print $2}' |xargs -t -I {} kill -9 {}
-ps -ef |grep -i torchrun |grep -i [name] |grep -v grep |awk '{print $2}' |xargs -t -I {} kill -9 {}
-ps -ef |grep -i ray |grep -i [name] |grep -v grep |awk '{print $2}' |xargs -t -I {} kill -9 {}
-ps -ef |grep -i vllm |grep -i [name] |grep -v grep |awk '{print $2}' |xargs -t -I {} kill -9 {}
-
 # TODO change to your environment
 source /usr/local/Ascend/cann/set_env.sh
 

@@ -3,11 +3,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-ps -ef |grep -i python |grep -i [name] |grep -v grep |awk '{print $2}' |xargs -t -I {} kill -9 {}
-ps -ef |grep -i torchrun |grep -i [name] |grep -v grep |awk '{print $2}' |xargs -t -I {} kill -9 {}
-ps -ef |grep -i ray |grep -i [name] |grep -v grep |awk '{print $2}' |xargs -t -I {} kill -9 {}
-ps -ef |grep -i vllm |grep -i [name] |grep -v grep |awk '{print $2}' |xargs -t -I {} kill -9 {}
-
 # TODO change to your environment
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 source /usr/local/Ascend/nnal/atb/set_env.sh
