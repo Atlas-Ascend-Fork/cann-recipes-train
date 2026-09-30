@@ -30,7 +30,7 @@
 - [2026/09] 新增 [鲲鹏CPU、昇腾950与灵衢协同的 Agentic RL 训练实践](docs/llm_rl/kunpeng_ascend_agentic_rl_infrastructure.md)，支持 AgentENV 沙箱与多 Harness 训练，实现 DSV4 Flash 训推bitwise对齐 MXFP8/MXFP4 低精度训练与长序列等特性。
 - [2026/09] 新增 [基于昇腾950超节点的万亿MoE模型预训练系统参考实践](docs/llm_pretrain/ascend950_superpod_moe_pretrain_system_reference.md)，围绕**超大规模、超长序列、多模态、高可用训练及训练开发者效率提升**等复杂场景提供系统参考实践。
 - [2026/09] 新增 [DeepSeek-V4.1-Flash 模型CPT/SFT支持](llm_pretrain/deepseek_v4_1/README.md)样例，基于 TorchTitan-NPU + TorchAO-NPU，在 **Ascend950 64 卡**集群完成全参模型低精度训练复现
-- [2026/09] 新增 [Qwen3.6-27B 模型 AscendC 算子生成监督微调支持](llm_sft/qwen36_ascendc/torchtitan/README.md)，包括 [TorchTitan-NPU 样例](llm_sft/qwen36_ascendc/torchtitan/README.md)和 [MindSpeed-MM 样例](llm_sft/qwen36_ascendc/mindspeed-mm/README.md)
+- [2026/09] 新增 Qwen3.6-27B 和 DeepSeek-V4-Flash-0731 模型 AscendC 算子生成监督微调支持，包括 Qwen3.6-27B 的 [TorchTitan-NPU 样例](llm_sft/qwen36_ascendc/torchtitan/README.md)、[MindSpeed-MM 样例](llm_sft/qwen36_ascendc/mindspeed-mm/README.md)，以及 DeepSeek-V4-Flash-0731 的 [MindSpeed-LLM LoRA 样例](llm_sft/dsv4_flash_ascendc/mindspeed-llm/README.md)
 - [2026/08] 新增 [DeepSeek-V4-Flash HiF8 低精度预训练](llm_pretrain/deepseekv4/README.md#deepseek-v4-flash-a5-hif8-%E4%BD%8E%E7%B2%BE%E5%BA%A6%E8%AE%AD%E7%BB%83)样例，在 Atlas A5 上使能单卡 HiF8 低精度预训练
 - [2026/05] 新增 [DeepSeek-V4-Pro 模型续训练支持](llm_pretrain/deepseekv4/README.md)，基于 TorchTitan-NPU + AutoFuse，使能 **训练入图、AutoFuse**
 - [2026/04] 新增 [DeepSeek-V3 MXFP8/HiF8 低精度预训练](llm_pretrain/DeepSeekV3/README.md)样例，在 Atlas A5 上完成 8K 序列低精度预训练复现

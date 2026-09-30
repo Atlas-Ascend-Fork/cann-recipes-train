@@ -1,0 +1,2533 @@
+diff --git a/3rdparty/MindSpeed b/3rdparty/MindSpeed
+index 7969e1c6b61c44fdb09d20607561824675bb216f..65634689bed75ee9b6df666d526f7f16051a3db5 160000
+--- a/3rdparty/MindSpeed
++++ b/3rdparty/MindSpeed
+@@ -1 +1 @@
+-Subproject commit 7969e1c6b61c44fdb09d20607561824675bb216f
++Subproject commit 65634689bed75ee9b6df666d526f7f16051a3db5
+diff --git a/convert_ckpt_v2.py b/convert_ckpt_v2.py
+index f19b364edfbbef55a49ca33a89c5d07d2ed5ab9d..5e310bddecf5e8cc6fdae7274e1669b2f3405642 100644
+--- a/convert_ckpt_v2.py
++++ b/convert_ckpt_v2.py
+@@ -100,11 +100,21 @@ def get_args():
+     parser.add_argument('--moe-grouped-gemm', action='store_true', help='Use moe grouped gemm.')
+     parser.add_argument("--noop-layers", type=str, default=None, help='Specity the noop layers.')
+     parser.add_argument('--mtp-num-layers', type=int, default=0, help='Multi-Token prediction layer num')
+-    pipeline_distribution_group.add_argument(
+-        '--num-layer-list',
+-        type=str,
+-        help='A PP layer-count list, separated by commas; mutually exclusive with --pipeline-model-parallel-layout.',
+-    )
++    parser.add_argument(
++        '--deepseek4-backbone-only',
++        action='store_true',
++        help='Convert only the 43-layer DeepSeek-V4 backbone and ignore attached dSPARK modules.',
++    )
++    parser.add_argument(
++        '--validate-flash-0731',
++        action='store_true',
++        help='Validate Flash-0731 conversion inputs/outputs and finalize merged backbone metadata.',
++    )
++    pipeline_distribution_group.add_argument(
++        '--num-layer-list',
++        type=str,
++        help='A PP layer-count list, separated by commas; mutually exclusive with --pipeline-model-parallel-layout.',
++    )
+     parser.add_argument(
+         "--moe-tp-extend-ep",
+         action='store_true',
+diff --git a/examples/mcore/deepseek4_flash/ckpt_convert_deepseek4_flash_0731_hf2mcore.sh b/examples/mcore/deepseek4_flash/ckpt_convert_deepseek4_flash_0731_hf2mcore.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..34b1ed3b3b684f7dc64ecf90bd074575cad5ca02
+--- /dev/null
++++ b/examples/mcore/deepseek4_flash/ckpt_convert_deepseek4_flash_0731_hf2mcore.sh
+@@ -0,0 +1,53 @@
++#!/bin/bash
++set -euo pipefail
++
++# dSPARK is the attached speculative-decoding module; this script converts the
++# 43-layer target-model backbone used by the LoRA training configuration.
++
++SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
++REPO_ROOT=$(cd "${SCRIPT_DIR}/../../.." && pwd)
++
++if [[ $# -ne 2 ]]; then
++    echo "Usage: bash $0 <DeepSeek-V4-Flash-0731-BF16-HF-dir> <output-MCore-dir>" >&2
++    exit 2
++fi
++
++INPUT_BF16_DIR=$(realpath "$1")
++OUTPUT_MCORE_DIR=$(realpath -m "$2")
++
++TARGET_TP=${TARGET_TP:-1}
++TARGET_PP=${TARGET_PP:-2}
++TARGET_EP=${TARGET_EP:-16}
++
++if [[ -n "${CANN_ENV_SCRIPT:-}" ]]; then
++    # shellcheck disable=SC1090
++    source "${CANN_ENV_SCRIPT}"
++elif [[ -f /usr/local/Ascend/cann/set_env.sh ]]; then
++    # shellcheck disable=SC1091
++    source /usr/local/Ascend/cann/set_env.sh
++elif [[ -f /usr/local/Ascend/ascend-toolkit/set_env.sh ]]; then
++    # shellcheck disable=SC1091
++    source /usr/local/Ascend/ascend-toolkit/set_env.sh
++elif [[ -z "${ASCEND_HOME_PATH:-}" ]]; then
++    echo "CANN environment is not loaded. Set CANN_ENV_SCRIPT to the correct set_env.sh." >&2
++    exit 1
++fi
++
++export PYTHONPATH="${REPO_ROOT}/3rdparty/MindSpeed:${REPO_ROOT}/3rdparty/Megatron-LM:${PYTHONPATH:-}"
++
++cd "${REPO_ROOT}"
++python convert_ckpt_v2.py \
++    --load-model-type hf \
++    --save-model-type mg \
++    --model-type-hf deepseek4 \
++    --load-dir "${INPUT_BF16_DIR}" \
++    --save-dir "${OUTPUT_MCORE_DIR}" \
++    --target-tensor-parallel-size "${TARGET_TP}" \
++    --target-pipeline-parallel-size "${TARGET_PP}" \
++    --target-expert-parallel-size "${TARGET_EP}" \
++    --expert-tensor-parallel-size 1 \
++    --noop-layers 43 \
++    --mtp-num-layers 0 \
++    --deepseek4-backbone-only \
++    --validate-flash-0731 \
++    --moe-grouped-gemm
+diff --git a/examples/mcore/deepseek4_flash/ckpt_convert_deepseek4_flash_lora_mcore2hf.sh b/examples/mcore/deepseek4_flash/ckpt_convert_deepseek4_flash_lora_mcore2hf.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..453e98e574703c762ac89a1a66a8c01417c138f8
+--- /dev/null
++++ b/examples/mcore/deepseek4_flash/ckpt_convert_deepseek4_flash_lora_mcore2hf.sh
+@@ -0,0 +1,61 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++# DeepSeek-V4-Flash-0731 LoRA-only MCore checkpoint -> merged BF16 HF backbone.
++SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
++REPO_ROOT=$(cd "${SCRIPT_DIR}/../../.." && pwd)
++
++# Use the exact training base and BF16 HF metadata. Choose a new or empty output directory.
++CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/usr/local/Ascend/cann/set_env.sh}"
++BASE_MCORE="${BASE_MCORE:-/data/models/DeepSeek-V4-Flash-0731-mcore}"
++LORA_MCORE="${LORA_MCORE:-/data/checkpoints/dsv4_flash_0731_nothink_64k_complete}"
++HF_META="${HF_META:-/data/models/DeepSeek-V4-Flash-0731-BF16}"
++OUT_HF="${OUT_HF:-/data/models/DeepSeek-V4-Flash-0731-lora-hf}"
++
++# Match the LoRA rank, alpha, and target modules used for training.
++LORA_R="${LORA_R:-32}"
++LORA_ALPHA="${LORA_ALPHA:-64}"
++LORA_TARGET_MODULES=(
++    linear_q
++    linear_kv
++    linear_fc1
++    linear_fc2
++    linear_q_up_proj
++    linear_o_down_proj
++    linear_o_up_proj
++)
++
++# The converter uses one NPU for the FP32 LoRA matrix multiplications.
++CONVERT_DEVICE="${CONVERT_DEVICE:-0}"
++PYTHON_BIN="${PYTHON_BIN:-python}"
++
++# CANN's set_env.sh may inspect unset shell variables, so source it without nounset.
++set +u
++# shellcheck disable=SC1090
++source "${CANN_ENV_SCRIPT}"
++set -u
++
++export PYTHONPATH="${REPO_ROOT}/3rdparty/MindSpeed:${REPO_ROOT}/3rdparty/Megatron-LM:${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
++export ASCEND_RT_VISIBLE_DEVICES="${CONVERT_DEVICE}"
++export CUDA_DEVICE_MAX_CONNECTIONS=1
++export PYTORCH_NPU_ALLOC_CONF="${PYTORCH_NPU_ALLOC_CONF:-expandable_segments:True}"
++
++cd "${REPO_ROOT}"
++
++"${PYTHON_BIN}" convert_ckpt_v2.py \
++    --load-model-type mg \
++    --save-model-type hf \
++    --model-type-hf deepseek4 \
++    --load-dir "${BASE_MCORE}" \
++    --lora-load "${LORA_MCORE}" \
++    --save-dir "${OUT_HF}" \
++    --hf-cfg-dir "${HF_META}" \
++    --noop-layers 43 \
++    --mtp-num-layers 0 \
++    --deepseek4-backbone-only \
++    --validate-flash-0731 \
++    --moe-grouped-gemm \
++    --expert-tensor-parallel-size 1 \
++    --lora-r "${LORA_R}" \
++    --lora-alpha "${LORA_ALPHA}" \
++    --lora-target-modules "${LORA_TARGET_MODULES[@]}"
+diff --git a/examples/mcore/deepseek4_flash/ckpt_dequant_deepseek4_flash_0731_to_bf16.sh b/examples/mcore/deepseek4_flash/ckpt_dequant_deepseek4_flash_0731_to_bf16.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..b5912e483e9b86f394d9a56c166a9ed8e1bf6d06
+--- /dev/null
++++ b/examples/mcore/deepseek4_flash/ckpt_dequant_deepseek4_flash_0731_to_bf16.sh
+@@ -0,0 +1,23 @@
++#!/bin/bash
++set -euo pipefail
++
++# DeepSeek-V4-Flash-0731 mixed FP8/FP4 weights -> BF16 HuggingFace checkpoint.
++
++SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
++REPO_ROOT=$(cd "${SCRIPT_DIR}/../../.." && pwd)
++
++if [[ $# -ne 2 ]]; then
++    echo "Usage: bash $0 <DeepSeek-V4-Flash-0731-HF-dir> <output-BF16-HF-dir>" >&2
++    exit 2
++fi
++
++INPUT_HF_DIR=$(realpath "$1")
++OUTPUT_BF16_DIR=$(realpath -m "$2")
++
++cd "${REPO_ROOT}"
++python tests/tools/ckpt_dequant/deepseekv4_ckpt_dequant.py \
++    --input_fp8_hf_path "${INPUT_HF_DIR}" \
++    --output_hf_path "${OUTPUT_BF16_DIR}" \
++    --quant_type bfloat16 \
++    --strict \
++    --validate-flash-0731
+diff --git a/examples/mcore/deepseek4_flash/lora_finetune_deepseek4_flash_0731_nothink_64k_A3_ptd.sh b/examples/mcore/deepseek4_flash/lora_finetune_deepseek4_flash_0731_nothink_64k_A3_ptd.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..77ffd3ee3d5d5c11fc1c712f29a41e98f1f2b622
+--- /dev/null
++++ b/examples/mcore/deepseek4_flash/lora_finetune_deepseek4_flash_0731_nothink_64k_A3_ptd.sh
+@@ -0,0 +1,280 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++# Standalone Flash-0731 no-think LoRA training: two A3 nodes, 16 dies per node.
++# Run in the MindSpeed-LLM training environment on both nodes:
++# MASTER_ADDR=<node-0-IP> NODE_RANK=0 bash this_script.sh <TP1-PP2-EP16-BF16-MCore-dir>
++# Use NODE_RANK=1 on node 1. Dataset/checkpoint paths must be accessible on both.
++# To resume, set RESUME_DIR to the saved LoRA checkpoint root; keep the same backbone argument.
++SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
++REPO_ROOT=$(cd "${SCRIPT_DIR}/../../.." && pwd)
++PYTHON_BIN="${PYTHON_BIN:-python}"
++CKPT_LOAD_DIR="${1:?Pass the TP1-PP2-EP16 BF16 backbone MCore checkpoint directory}"
++RESUME_DIR="${RESUME_DIR:-}"
++
++# Distributed configuration.
++NPUS_PER_NODE=16
++NNODES=2
++: "${MASTER_ADDR:?Set MASTER_ADDR to the training IP of node 0}"
++: "${NODE_RANK:?Set NODE_RANK to 0 or 1 on the corresponding node}"
++MASTER_PORT="${MASTER_PORT:-6000}"
++
++# Checkpoint, data and log paths.
++TOKENIZER_PATH="${TOKENIZER_PATH:-/data/models/deepseek_v4_int8_w8a8}"
++DATA_OUTPUT_DIR="${DATA_OUTPUT_DIR:-/data/datasets/dsv4_flash_0731_nothink_64k}"
++DATA_PATH="${DATA_OUTPUT_DIR}/alpaca"
++CKPT_SAVE_DIR="${CKPT_SAVE_DIR:-${RESUME_DIR:-/data/checkpoints/dsv4_flash_0731_nothink_64k}}"
++LOG_DIR="${LOG_DIR:-${REPO_ROOT}/logs/deepseek4_flash_0731_nothink_64k}"
++LOG_FILE="${LOG_DIR}/train_node${NODE_RANK}_$(date +%Y%m%d_%H%M%S).log"
++
++# Model parallelism and batch sizes.
++TP=1
++PP=2
++EP=16
++CP=16
++CP_TYPE=kvallgather_cp_algo
++NUM_LAYERS=44
++SEQ_LEN=65536
++MBS=1
++GBS="${GBS:-8}"
++
++# Training hyperparameters.
++TRAIN_EPOCHS=5
++LR="${LR:-1e-5}"
++MIN_LR="${MIN_LR:-1e-7}"
++WEIGHT_DECAY=0.0
++CLIP_GRAD=1.0
++SEED=42
++DATALOADER_WORKERS=8
++
++LORA_R=32
++LORA_ALPHA=64
++
++# The preparation script records the sample count after whole-row length filtering.
++EXPECTED_SAMPLES=$("${PYTHON_BIN}" "${REPO_ROOT}/mindspeed_llm/tasks/preprocess/prepare_deepseek4_data.py" \
++    count "${DATA_OUTPUT_DIR}/dataset_manifest.json")
++STEPS_PER_EPOCH=$(((EXPECTED_SAMPLES + GBS - 1) / GBS))
++TRAIN_ITERS="${TRAIN_ITERS:-$((STEPS_PER_EPOCH * TRAIN_EPOCHS))}"
++SAVE_INTERVAL="${SAVE_INTERVAL:-${STEPS_PER_EPOCH}}"
++WARMUP_ITERS=$((TRAIN_ITERS / 10))
++
++# Runtime environment. Keep CANN setup before the training-specific exports.
++if [[ -n "${CANN_ENV_SCRIPT:-}" ]]; then
++    set +u
++    source "${CANN_ENV_SCRIPT}"
++    set -u
++fi
++export PYTHONPATH="${REPO_ROOT}/3rdparty/MindSpeed:${REPO_ROOT}/3rdparty/Megatron-LM:${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
++export HCCL_CONNECT_TIMEOUT=7200
++export HCCL_EXEC_TIMEOUT=7200
++export ACL_DEVICE_SYNC_TIMEOUT=7200
++export CUDA_DEVICE_MAX_CONNECTIONS=1
++export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
++export TASK_QUEUE_ENABLE=1
++export CPU_AFFINITY_CONF=1
++export HCCL_ALGO="alltoall=level0:NA;level1:pipeline"
++mkdir -p "${CKPT_SAVE_DIR}" "${LOG_DIR}"
++cd "${REPO_ROOT}"
++
++DISTRIBUTED_ARGS=(
++    --nproc_per_node "${NPUS_PER_NODE}"
++    --nnodes "${NNODES}"
++    --node_rank "${NODE_RANK}"
++    --master_addr "${MASTER_ADDR}"
++    --master_port "${MASTER_PORT}"
++)
++
++DSA_ARGS=(
++    --enable-dsa-indexer
++    --index-n-heads 64
++    --index-head-dim 128
++    --index-topk 512
++    --enable-mhc
++    --use-fused-mhc
++    --hc-mult 4
++    --kv-compress
++    --use-fused-lightning-indexer-loss
++    --use-fused-lightning-indexer
++    --use-sparse-flash-attn
++    # Preserve the original indexer-loss setting and fused attention path.
++    --indexer-loss-coeff 1.0
++)
++
++MLA_ARGS=(
++    --multi-latent-attention
++    --qk-pos-emb-head-dim 64
++    --qk-head-dim 512
++    --q-lora-rank 1024
++    --o-lora-rank 1024
++    --kv-lora-rank 512
++    --v-head-dim 128
++    --qk-layernorm
++    --mla-fa-without-pad
++)
++
++CA_ARGS=(
++    --o-groups 8
++    --sliding-window-size 128
++    --original-seq-len 65536
++    --rope-factor 16
++    --compress-rope-theta 160000.0
++    --max-batch-size 4
++    --compress-ratios 0 0 4 128 4 128 4 128 4 128 4 128 4 128 4 128 4 128 4 128 4 128 4 128 4 128 4 128 4 128 4 128 4 128 4 128 4 128 4 128 4 128 4
++)
++
++MOE_ARGS=(
++    --moe-grouped-gemm
++    --moe-permutation-async-comm
++    # 仓内 MoE LoRA 要求 alltoall_seq；此限制本身不要求固定序列长度。
++    --moe-token-dispatcher-type alltoall_seq
++    --moe-layer-freq 1
++    --first-k-dense-replace -1
++    --num-experts 256
++    --moe-router-topk 6
++    --moe-ffn-hidden-size 2048
++    --moe-router-load-balancing-type none
++    --moe-router-group-topk 1
++    --moe-router-num-groups 1
++    --moe-router-topk-scaling-factor 1.5
++    # Fixed 64K padding must not contribute an auxiliary routing objective.
++    --moe-aux-loss-coeff 0.0
++    --moe-router-score-function sqrtsoftplus
++    --moe-router-enable-expert-bias
++    # Use the pretrained bias without changing it during LoRA SFT.
++    --moe-router-bias-update-rate 0.0
++    --moe-shared-expert-intermediate-size 2048
++    --moe-router-dtype fp32
++    --n-hash-layers 3
++    --moe-permute-fusion
++)
++
++MEM_ARGS=(
++    --recompute-granularity full
++    --recompute-method uniform
++    --recompute-num-layers 1
++    --swap-optimizer
++)
++
++ROPE_ARGS=(
++    --beta-fast 32
++    --beta-slow 1
++    --rope-scaling-factor 40
++    --rope-scaling-mscale 1.0
++    --rope-scaling-mscale-all-dim 1.0
++    --rope-scaling-original-max-position-embeddings "${SEQ_LEN}"
++    --rope-scaling-type yarn
++)
++
++GPT_ARGS=(
++    --noop-layers 43
++    --transformer-impl local
++    --spec mindspeed_llm.tasks.models.spec.deepseek4_spec layer_spec
++    --manual-gc
++    --manual-gc-interval 50
++    --empty-unused-memory-level 1
++    --use-distributed-optimizer
++    --use-flash-attn
++    --use-mcore-models
++    --tensor-model-parallel-size "${TP}"
++    --pipeline-model-parallel-size "${PP}"
++    --expert-model-parallel-size "${EP}"
++    --expert-tensor-parallel-size 1
++    --sequence-parallel
++    --context-parallel-size "${CP}"
++    --context-parallel-algo "${CP_TYPE}"
++    --num-layers "${NUM_LAYERS}"
++    --hidden-size 4096
++    --ffn-hidden-size 4096
++    --num-attention-heads 64
++    --tokenizer-type PretrainedFromHF
++    --tokenizer-name-or-path "${TOKENIZER_PATH}"
++    --seq-length "${SEQ_LEN}"
++    --max-position-embeddings 163840
++    --micro-batch-size "${MBS}"
++    --global-batch-size "${GBS}"
++    --make-vocab-size-divisible-by 1
++    --lr "${LR}"
++    --train-iters "${TRAIN_ITERS}"
++    --lr-decay-style cosine
++    --seed "${SEED}"
++    --num-workers "${DATALOADER_WORKERS}"
++    --untie-embeddings-and-output-weights
++    --disable-bias-linear
++    --attention-dropout 0.0
++    --init-method-std 0.02
++    --hidden-dropout 0.0
++    --position-embedding-type deepseek4
++    --normalization RMSNorm
++    --use-fused-swiglu
++    --use-fused-rmsnorm
++    --swiglu
++    --swiglu-limit 10.0
++    --no-masked-softmax-fusion
++    --attention-softmax-in-fp32
++    --min-lr "${MIN_LR}"
++    --weight-decay "${WEIGHT_DECAY}"
++    --lr-warmup-iters "${WARMUP_ITERS}"
++    --clip-grad "${CLIP_GRAD}"
++    --adam-beta1 0.9
++    --adam-beta2 0.999
++    --initial-loss-scale 65536
++    --vocab-size 129280
++    --padded-vocab-size 129280
++    --rotary-base 10000
++    --norm-epsilon 1e-6
++    --bf16
++    --distributed-timeout-minutes 120
++    --no-shared-storage
++    --no-gradient-accumulation-fusion
++)
++
++DATA_ARGS=(
++    --data-path "${DATA_PATH}"
++    --split 100,0,0
++)
++
++OUTPUT_ARGS=(
++    --log-interval 1
++    --save-interval "${SAVE_INTERVAL}"
++    --eval-interval "${SAVE_INTERVAL}"
++    --save "${CKPT_SAVE_DIR}"
++    --load "${CKPT_LOAD_DIR}"
++    --eval-iters 0
++    --ckpt-format torch
++)
++
++# Always save optimizer/RNG state. Only a fresh run resets training progress.
++LOAD_ARGS=(--finetune --no-load-optim --no-load-rng)
++if [[ -n "${RESUME_DIR}" ]]; then
++    LOAD_ARGS=(--lora-load "${RESUME_DIR}" --use-checkpoint-opt_param-scheduler)
++fi
++
++FINETUNE_ARGS=(
++    --stage sft
++    --is-instruction-dataset
++    --handler-name AlpacaStyleInstructionHandler
++    --prompt-type deepseek4
++    --enable-thinking false
++    --lora-r "${LORA_R}"
++    --lora-alpha "${LORA_ALPHA}"
++    --lora-fusion
++    --lora-ckpt-filter
++    --lora-target-modules linear_q linear_kv linear_fc1 linear_fc2 linear_q_up_proj linear_o_down_proj linear_o_up_proj
++)
++
++# Use the 64K no-think indexed data produced by prepare_data.sh.
++# The CP label fix acts at runtime; existing correctly encoded data can be reused.
++echo "64K no-think LoRA: samples=${EXPECTED_SAMPLES}, epochs=${TRAIN_EPOCHS}, steps=${TRAIN_ITERS}, node=${NODE_RANK}"
++"${PYTHON_BIN}" -m torch.distributed.launch "${DISTRIBUTED_ARGS[@]}" posttrain_gpt.py \
++    "${GPT_ARGS[@]}" \
++    "${DATA_ARGS[@]}" \
++    "${OUTPUT_ARGS[@]}" \
++    "${LOAD_ARGS[@]}" \
++    "${MLA_ARGS[@]}" \
++    "${ROPE_ARGS[@]}" \
++    "${MOE_ARGS[@]}" \
++    "${DSA_ARGS[@]}" \
++    "${CA_ARGS[@]}" \
++    "${MEM_ARGS[@]}" \
++    "${FINETUNE_ARGS[@]}" \
++    --distributed-backend nccl 2>&1 | tee "${LOG_FILE}"
+diff --git a/examples/mcore/deepseek4_flash/lora_finetune_deepseek4_flash_0731_nothink_dynamic_64k_A3_ptd.sh b/examples/mcore/deepseek4_flash/lora_finetune_deepseek4_flash_0731_nothink_dynamic_64k_A3_ptd.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..14b6245698688ba4724f502b176d059842fe48e8
+--- /dev/null
++++ b/examples/mcore/deepseek4_flash/lora_finetune_deepseek4_flash_0731_nothink_dynamic_64k_A3_ptd.sh
+@@ -0,0 +1,289 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++# Flash-0731 no-think LoRA with dynamic padding: two A3 nodes, 16 dies per node.
++# Reuse the ordinary 64K indexed data; each sample is padded to a CP/compressor-aligned length.
++# Run in the MindSpeed-LLM training environment on both nodes:
++# MASTER_ADDR=<node-0-IP> NODE_RANK=0 bash this_script.sh <TP1-PP2-EP16-BF16-MCore-dir>
++# Use NODE_RANK=1 on node 1. Dataset/checkpoint paths must be accessible on both.
++# To resume, set RESUME_DIR to the saved LoRA checkpoint root; keep the same backbone argument.
++SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
++REPO_ROOT=$(cd "${SCRIPT_DIR}/../../.." && pwd)
++PYTHON_BIN="${PYTHON_BIN:-python}"
++CKPT_LOAD_DIR="${1:?Pass the TP1-PP2-EP16 BF16 backbone MCore checkpoint directory}"
++RESUME_DIR="${RESUME_DIR:-}"
++
++# Distributed configuration.
++NPUS_PER_NODE=16
++NNODES=2
++: "${MASTER_ADDR:?Set MASTER_ADDR to the training IP of node 0}"
++: "${NODE_RANK:?Set NODE_RANK to 0 or 1 on the corresponding node}"
++MASTER_PORT="${MASTER_PORT:-6000}"
++
++# Checkpoint, data and log paths.
++TOKENIZER_PATH="${TOKENIZER_PATH:-/data/models/deepseek_v4_bf16}"
++DATA_OUTPUT_DIR="${DATA_OUTPUT_DIR:-/data/datasets/dsv4_flash_0731_nothink_64k}"
++DATA_PATH="${DATA_OUTPUT_DIR}/alpaca"
++CKPT_SAVE_DIR="${CKPT_SAVE_DIR:-${RESUME_DIR:-/data/checkpoints/dsv4_flash_0731_nothink_dynamic_64k}}"
++LOG_DIR="${LOG_DIR:-${REPO_ROOT}/logs/deepseek4_flash_0731_nothink_dynamic_64k}"
++LOG_FILE="${LOG_DIR}/train_node${NODE_RANK}_$(date +%Y%m%d_%H%M%S).log"
++
++# Model parallelism and batch sizes.
++TP=1
++PP=2
++EP=16
++CP=16
++CP_TYPE=kvallgather_cp_algo
++NUM_LAYERS=44
++SEQ_LEN=65536
++MBS=1
++GBS="${GBS:-8}"
++
++# Training hyperparameters.
++TRAIN_EPOCHS=5
++LR="${LR:-1e-5}"
++MIN_LR="${MIN_LR:-1e-7}"
++WEIGHT_DECAY=0.0
++CLIP_GRAD=1.0
++SEED=42
++DATALOADER_WORKERS=8
++
++LORA_R="${LORA_R:-32}"
++LORA_ALPHA="${LORA_ALPHA:-64}"
++
++# The preparation script records the sample count after whole-row length filtering.
++EXPECTED_SAMPLES=$("${PYTHON_BIN}" "${REPO_ROOT}/mindspeed_llm/tasks/preprocess/prepare_deepseek4_data.py" \
++    count "${DATA_OUTPUT_DIR}/dataset_manifest.json")
++STEPS_PER_EPOCH=$(((EXPECTED_SAMPLES + GBS - 1) / GBS))
++TRAIN_ITERS="${TRAIN_ITERS:-$((STEPS_PER_EPOCH * TRAIN_EPOCHS))}"
++SAVE_INTERVAL="${SAVE_INTERVAL:-${STEPS_PER_EPOCH}}"
++WARMUP_ITERS=$((TRAIN_ITERS / 10))
++
++# Runtime environment. Keep CANN setup before the training-specific exports.
++if [[ -n "${CANN_ENV_SCRIPT:-}" ]]; then
++    set +u
++    source "${CANN_ENV_SCRIPT}"
++    set -u
++fi
++export PYTHONPATH="${REPO_ROOT}/3rdparty/MindSpeed:${REPO_ROOT}/3rdparty/Megatron-LM:${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
++export HCCL_CONNECT_TIMEOUT=7200
++export HCCL_EXEC_TIMEOUT=7200
++export ACL_DEVICE_SYNC_TIMEOUT=7200
++export CUDA_DEVICE_MAX_CONNECTIONS=1
++export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
++export TASK_QUEUE_ENABLE=1
++export CPU_AFFINITY_CONF=1
++export HCCL_ALGO="alltoall=level0:NA;level1:pipeline"
++mkdir -p "${CKPT_SAVE_DIR}" "${LOG_DIR}"
++cd "${REPO_ROOT}"
++
++DISTRIBUTED_ARGS=(
++    --nproc_per_node "${NPUS_PER_NODE}"
++    --nnodes "${NNODES}"
++    --node_rank "${NODE_RANK}"
++    --master_addr "${MASTER_ADDR}"
++    --master_port "${MASTER_PORT}"
++)
++
++DSA_ARGS=(
++    --enable-dsa-indexer
++    --index-n-heads 64
++    --index-head-dim 128
++    --index-topk 512
++    --enable-mhc
++    --use-fused-mhc
++    --hc-mult 4
++    --kv-compress
++    --use-fused-lightning-indexer-loss
++    --use-fused-lightning-indexer
++    --use-sparse-flash-attn
++    # Preserve the original indexer-loss setting and fused attention path.
++    --indexer-loss-coeff 1.0
++)
++
++MLA_ARGS=(
++    --multi-latent-attention
++    --qk-pos-emb-head-dim 64
++    --qk-head-dim 512
++    --q-lora-rank 1024
++    --o-lora-rank 1024
++    --kv-lora-rank 512
++    --v-head-dim 128
++    --qk-layernorm
++    --mla-fa-without-pad
++)
++
++CA_ARGS=(
++    --o-groups 8
++    --sliding-window-size 128
++    --original-seq-len 65536
++    --rope-factor 16
++    --compress-rope-theta 160000.0
++    --max-batch-size 4
++    --compress-ratios 0 0 4 128 4 128 4 128 4 128 4 128 4 128 4 128 4 128 4 128 4 128 4 128 4 128 4 128 4 128 4 128 4 128 4 128 4 128 4 128 4 128 4
++)
++
++MOE_ARGS=(
++    --moe-grouped-gemm
++    --moe-permutation-async-comm
++    # 仓内 MoE LoRA 要求 alltoall_seq；此限制本身不要求固定序列长度。
++    --moe-token-dispatcher-type alltoall_seq
++    --moe-layer-freq 1
++    --first-k-dense-replace -1
++    --num-experts 256
++    --moe-router-topk 6
++    --moe-ffn-hidden-size 2048
++    --moe-router-load-balancing-type none
++    --moe-router-group-topk 1
++    --moe-router-num-groups 1
++    --moe-router-topk-scaling-factor 1.5
++    # Keep the fixed-length run's routing objective; dynamic padding still adds padding tokens.
++    --moe-aux-loss-coeff 0.0
++    --moe-router-score-function sqrtsoftplus
++    --moe-router-enable-expert-bias
++    # Use the pretrained bias without changing it during LoRA SFT.
++    --moe-router-bias-update-rate 0.0
++    --moe-shared-expert-intermediate-size 2048
++    --moe-router-dtype fp32
++    --n-hash-layers 3
++    --moe-permute-fusion
++)
++
++MEM_ARGS=(
++    --recompute-granularity full
++    --recompute-method uniform
++    --recompute-num-layers 1
++    --swap-optimizer
++)
++
++ROPE_ARGS=(
++    --beta-fast 32
++    --beta-slow 1
++    --rope-scaling-factor 40
++    --rope-scaling-mscale 1.0
++    --rope-scaling-mscale-all-dim 1.0
++    --rope-scaling-original-max-position-embeddings "${SEQ_LEN}"
++    --rope-scaling-type yarn
++)
++
++GPT_ARGS=(
++    --noop-layers 43
++    --transformer-impl local
++    --spec mindspeed_llm.tasks.models.spec.deepseek4_spec layer_spec
++    --manual-gc
++    --manual-gc-interval 50
++    --empty-unused-memory-level 1
++    --use-distributed-optimizer
++    --use-flash-attn
++    --use-mcore-models
++    --tensor-model-parallel-size "${TP}"
++    --pipeline-model-parallel-size "${PP}"
++    --expert-model-parallel-size "${EP}"
++    --expert-tensor-parallel-size 1
++    --sequence-parallel
++    --context-parallel-size "${CP}"
++    --context-parallel-algo "${CP_TYPE}"
++    --num-layers "${NUM_LAYERS}"
++    --hidden-size 4096
++    --ffn-hidden-size 4096
++    --num-attention-heads 64
++    --tokenizer-type PretrainedFromHF
++    --tokenizer-name-or-path "${TOKENIZER_PATH}"
++    --seq-length "${SEQ_LEN}"
++    --max-position-embeddings 163840
++    --micro-batch-size "${MBS}"
++    --global-batch-size "${GBS}"
++    --make-vocab-size-divisible-by 1
++    --lr "${LR}"
++    --train-iters "${TRAIN_ITERS}"
++    --lr-decay-style cosine
++    --seed "${SEED}"
++    --num-workers "${DATALOADER_WORKERS}"
++    --untie-embeddings-and-output-weights
++    --disable-bias-linear
++    --attention-dropout 0.0
++    --init-method-std 0.02
++    --hidden-dropout 0.0
++    --position-embedding-type deepseek4
++    --normalization RMSNorm
++    --use-fused-swiglu
++    --use-fused-rmsnorm
++    --swiglu
++    --swiglu-limit 10.0
++    --no-masked-softmax-fusion
++    --attention-softmax-in-fp32
++    --min-lr "${MIN_LR}"
++    --weight-decay "${WEIGHT_DECAY}"
++    --lr-warmup-iters "${WARMUP_ITERS}"
++    --clip-grad "${CLIP_GRAD}"
++    --adam-beta1 0.9
++    --adam-beta2 0.999
++    --initial-loss-scale 65536
++    --vocab-size 129280
++    --padded-vocab-size 129280
++    --rotary-base 10000
++    --norm-epsilon 1e-6
++    --bf16
++    --distributed-timeout-minutes 120
++    --no-shared-storage
++    --no-gradient-accumulation-fusion
++)
++
++# A short validation run can use EXIT_INTERVAL=30 without changing the LR schedule.
++if [[ -n "${EXIT_INTERVAL:-}" ]]; then
++    GPT_ARGS+=(--exit-interval "${EXIT_INTERVAL}")
++fi
++
++DATA_ARGS=(
++    --data-path "${DATA_PATH}"
++    --split 100,0,0
++)
++
++OUTPUT_ARGS=(
++    --log-interval 1
++    --save-interval "${SAVE_INTERVAL}"
++    --eval-interval "${SAVE_INTERVAL}"
++    --save "${CKPT_SAVE_DIR}"
++    --load "${CKPT_LOAD_DIR}"
++    --eval-iters 0
++    --ckpt-format torch
++)
++
++# Always save optimizer/RNG state. Only a fresh run resets training progress.
++LOAD_ARGS=(--finetune --no-load-optim --no-load-rng)
++if [[ -n "${RESUME_DIR}" ]]; then
++    LOAD_ARGS=(--lora-load "${RESUME_DIR}" --use-checkpoint-opt_param-scheduler)
++fi
++
++FINETUNE_ARGS=(
++    --stage sft
++    --is-instruction-dataset
++    --handler-name AlpacaStyleInstructionHandler
++    --prompt-type deepseek4
++    --enable-thinking false
++    --no-pad-to-seq-lengths
++    # Two CP chunks per rank, each aligned to the largest compression ratio (128).
++    --pad-to-multiple-of "$((2 * CP * 128))"
++    --lora-r "${LORA_R}"
++    --lora-alpha "${LORA_ALPHA}"
++    --lora-fusion
++    --lora-ckpt-filter
++    --lora-target-modules linear_q linear_kv linear_fc1 linear_fc2 linear_q_up_proj linear_o_down_proj linear_o_up_proj
++)
++
++# Use the 64K no-think indexed data produced by prepare_data.sh.
++# The CP label fix acts at runtime; existing correctly encoded data can be reused.
++echo "Dynamic-padding 64K no-think LoRA: samples=${EXPECTED_SAMPLES}, epochs=${TRAIN_EPOCHS}, steps=${TRAIN_ITERS}, node=${NODE_RANK}"
++"${PYTHON_BIN}" -m torch.distributed.launch "${DISTRIBUTED_ARGS[@]}" posttrain_gpt.py \
++    "${GPT_ARGS[@]}" \
++    "${DATA_ARGS[@]}" \
++    "${OUTPUT_ARGS[@]}" \
++    "${LOAD_ARGS[@]}" \
++    "${MLA_ARGS[@]}" \
++    "${ROPE_ARGS[@]}" \
++    "${MOE_ARGS[@]}" \
++    "${DSA_ARGS[@]}" \
++    "${CA_ARGS[@]}" \
++    "${MEM_ARGS[@]}" \
++    "${FINETUNE_ARGS[@]}" \
++    --distributed-backend nccl 2>&1 | tee "${LOG_FILE}"
+diff --git a/examples/mcore/deepseek4_flash/prepare_data.sh b/examples/mcore/deepseek4_flash/prepare_data.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..0c09c8874a81bb4c172c83e83d2942298515277e
+--- /dev/null
++++ b/examples/mcore/deepseek4_flash/prepare_data.sh
+@@ -0,0 +1,259 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
++REPO_ROOT=$(cd "${SCRIPT_DIR}/../../.." && pwd)
++VERIFY_SCRIPT="${REPO_ROOT}/mindspeed_llm/tasks/preprocess/verify_deepseek4_data.py"
++PREPARE_SCRIPT="${REPO_ROOT}/mindspeed_llm/tasks/preprocess/prepare_deepseek4_data.py"
++
++JSONL_INPUTS=()
++TOKENIZER_PATH=""
++DATA_OUTPUT_DIR=""
++SEQ_LEN=32768
++
++# skip: keep every row unchanged and exclude the complete row when its
++#       prompt + answer token count is >= SEQ_LEN.
++# error: stop if any row would be truncated by preprocessing.
++OVERLENGTH_POLICY="skip"
++PREPROCESS_WORKERS=8
++PYTHON_BIN="${PYTHON_BIN:-python}"
++
++usage() {
++    cat <<'EOF'
++Usage:
++  bash examples/mcore/deepseek4_flash/prepare_data.sh \
++    --input INPUT_JSONL [--input INPUT_JSONL ...] \
++    --tokenizer-name-or-path TOKENIZER_PATH \
++    --output-dir DATA_OUTPUT_DIR [options]
++
++Options:
++  --seq-length N             preprocessing and training sequence length (default: 32768)
++  --overlength-policy VALUE  skip (default) or error
++  --workers N                preprocessing workers (default: 8)
++
++Each JSONL row must contain instruction, input and output string fields.
++Multiple inputs are concatenated in the order given.
++
++The script never truncates a row in place. With policy=skip, an over-length
++row is omitted as a whole and the original JSON text remains unchanged.
++Use the printed DATA_PATH for training, and keep the training sequence length
++equal to --seq-length. Use a matching output directory when changing this value.
++EOF
++}
++
++while [[ $# -gt 0 ]]; do
++    case "$1" in
++        --input|--tokenizer-name-or-path|--output-dir|--seq-length|--overlength-policy|--workers)
++            [[ $# -ge 2 ]] || { echo "ERROR: $1 needs a value" >&2; exit 2; }
++            case "$1" in
++                --input) JSONL_INPUTS+=("$2") ;;
++                --tokenizer-name-or-path) TOKENIZER_PATH=$2 ;;
++                --output-dir) DATA_OUTPUT_DIR=$2 ;;
++                --seq-length) SEQ_LEN=$2 ;;
++                --overlength-policy) OVERLENGTH_POLICY=$2 ;;
++                --workers) PREPROCESS_WORKERS=$2 ;;
++            esac
++            shift 2
++            ;;
++        -h|--help)
++            usage
++            exit 0
++            ;;
++        *)
++            usage >&2
++            echo "ERROR: unknown argument: $1" >&2
++            exit 2
++            ;;
++    esac
++done
++
++if [[ "${#JSONL_INPUTS[@]}" -eq 0 || -z "${TOKENIZER_PATH}" || -z "${DATA_OUTPUT_DIR}" ]]; then
++    usage >&2
++    exit 2
++fi
++
++[[ "${SEQ_LEN}" =~ ^[1-9][0-9]*$ ]] || {
++    echo "ERROR: SEQ_LEN must be a positive integer: ${SEQ_LEN}" >&2
++    exit 2
++}
++[[ "${OVERLENGTH_POLICY}" == "skip" || "${OVERLENGTH_POLICY}" == "error" ]] || {
++    echo "ERROR: OVERLENGTH_POLICY must be skip or error: ${OVERLENGTH_POLICY}" >&2
++    exit 2
++}
++[[ "${PREPROCESS_WORKERS}" =~ ^[1-9][0-9]*$ ]] || {
++    echo "ERROR: PREPROCESS_WORKERS must be a positive integer: ${PREPROCESS_WORKERS}" >&2
++    exit 2
++}
++TOKENIZER_PATH=$(realpath -m "${TOKENIZER_PATH}")
++DATA_OUTPUT_DIR=$(realpath -m "${DATA_OUTPUT_DIR}")
++DATA_PARENT_DIR=$(dirname "${DATA_OUTPUT_DIR}")
++[[ "${DATA_OUTPUT_DIR}" != "/" && "${DATA_PARENT_DIR}" != "/" ]] || {
++    echo "ERROR: DATA_OUTPUT_DIR is too broad: ${DATA_OUTPUT_DIR}" >&2
++    exit 2
++}
++MERGED_JSONL_PATH="${DATA_OUTPUT_DIR}.merged.jsonl"
++FILTERED_JSONL_PATH="${DATA_OUTPUT_DIR}.seq${SEQ_LEN}.filtered.jsonl"
++DATA_PATH="${DATA_OUTPUT_DIR}/alpaca"
++PACKED_DATA_PATH="${DATA_PATH}_packed"
++
++for index in "${!JSONL_INPUTS[@]}"; do
++    JSONL_INPUTS[$index]=$(realpath -m "${JSONL_INPUTS[$index]}")
++    [[ -f "${JSONL_INPUTS[$index]}" ]] || {
++        echo "ERROR: input JSONL not found: ${JSONL_INPUTS[$index]}" >&2
++        exit 1
++    }
++done
++for input_path in "${JSONL_INPUTS[@]}"; do
++    if [[ "${input_path}" == "${DATA_OUTPUT_DIR}" || "${input_path}" == "${DATA_OUTPUT_DIR}"/* ]]; then
++        echo "ERROR: an input JSONL must not be inside DATA_OUTPUT_DIR: ${input_path}" >&2
++        exit 2
++    fi
++done
++if [[ "${REPO_ROOT}" == "${DATA_OUTPUT_DIR}" || "${REPO_ROOT}" == "${DATA_OUTPUT_DIR}"/* ||
++      "${TOKENIZER_PATH}" == "${DATA_OUTPUT_DIR}" || "${TOKENIZER_PATH}" == "${DATA_OUTPUT_DIR}"/* ]]; then
++    echo "ERROR: DATA_OUTPUT_DIR must not contain the repository or tokenizer: ${DATA_OUTPUT_DIR}" >&2
++    exit 2
++fi
++if [[ -e "${DATA_OUTPUT_DIR}" && ! -d "${DATA_OUTPUT_DIR}" ]]; then
++    echo "ERROR: DATA_OUTPUT_DIR exists but is not a directory: ${DATA_OUTPUT_DIR}" >&2
++    exit 2
++fi
++[[ -f "${TOKENIZER_PATH}/tokenizer.json" ]] || {
++    echo "ERROR: tokenizer.json not found under: ${TOKENIZER_PATH}" >&2
++    exit 1
++}
++
++mkdir -p "${DATA_PARENT_DIR}"
++export PYTHONPATH="${REPO_ROOT}/3rdparty/MindSpeed:${REPO_ROOT}/3rdparty/Megatron-LM:${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
++
++echo "Data preparation: inputs=${#JSONL_INPUTS[@]}, seq_length=${SEQ_LEN}, overlength=${OVERLENGTH_POLICY}"
++echo "Output directory: ${DATA_OUTPUT_DIR}"
++
++merge_jsonl_inputs() {
++    "${PYTHON_BIN}" "${PREPARE_SCRIPT}" merge "${MERGED_JSONL_PATH}" "${JSONL_INPUTS[@]}"
++}
++
++if [[ "${#JSONL_INPUTS[@]}" -eq 1 ]]; then
++    PREPROCESS_INPUT_PATH="${JSONL_INPUTS[0]}"
++    echo "Using one input JSONL directly: ${PREPROCESS_INPUT_PATH}"
++else
++    merge_jsonl_inputs
++    PREPROCESS_INPUT_PATH="${MERGED_JSONL_PATH}"
++fi
++
++PREPROCESS_INPUT_SHA256=$(sha256sum "${PREPROCESS_INPUT_PATH}" | awk '{print $1}')
++EXPECTED_SAMPLES=$(awk 'END { print NR + 0 }' "${PREPROCESS_INPUT_PATH}")
++[[ "${EXPECTED_SAMPLES}" -gt 0 ]] || {
++    echo "ERROR: input JSONL has no rows: ${PREPROCESS_INPUT_PATH}" >&2
++    exit 1
++}
++
++preflight_args=(
++    --raw-data "${PREPROCESS_INPUT_PATH}"
++    --expected-raw-sha256 "${PREPROCESS_INPUT_SHA256}"
++    --expected-samples "${EXPECTED_SAMPLES}"
++    --tokenizer-path "${TOKENIZER_PATH}"
++    --seq-length "${SEQ_LEN}"
++    --preflight-only
++)
++if [[ "${OVERLENGTH_POLICY}" == "skip" ]]; then
++    preflight_args+=(--filter-overlength-to "${FILTERED_JSONL_PATH}")
++fi
++"${PYTHON_BIN}" "${VERIFY_SCRIPT}" "${preflight_args[@]}"
++
++if [[ "${OVERLENGTH_POLICY}" == "skip" ]]; then
++    PREPROCESS_INPUT_PATH="${FILTERED_JSONL_PATH}"
++    PREPROCESS_INPUT_SHA256=$(sha256sum "${PREPROCESS_INPUT_PATH}" | awk '{print $1}')
++    EXPECTED_SAMPLES=$(awk 'END { print NR + 0 }' "${PREPROCESS_INPUT_PATH}")
++    [[ "${EXPECTED_SAMPLES}" -gt 0 ]] || {
++        echo "ERROR: all rows exceed SEQ_LEN=${SEQ_LEN}" >&2
++        exit 1
++    }
++fi
++
++dataset_files=()
++for key in input_ids attention_mask labels; do
++    dataset_files+=("${PACKED_DATA_PATH}_${key}_document.bin" "${PACKED_DATA_PATH}_${key}_document.idx")
++done
++
++ready_files=0
++for path in "${dataset_files[@]}"; do
++    [[ -s "${path}" ]] && ready_files=$((ready_files + 1))
++done
++
++annotate_manifest() {
++    local manifest_path=$1
++    "${PYTHON_BIN}" "${PREPARE_SCRIPT}" annotate "${manifest_path}" "${OVERLENGTH_POLICY}" "${JSONL_INPUTS[@]}"
++}
++
++print_summary() {
++    "${PYTHON_BIN}" "${PREPARE_SCRIPT}" summary "${DATA_OUTPUT_DIR}/dataset_manifest.json" "${DATA_PATH}"
++}
++
++if [[ "${ready_files}" -eq "${#dataset_files[@]}" && -s "${DATA_OUTPUT_DIR}/dataset_manifest.json" ]]; then
++    if "${PYTHON_BIN}" "${VERIFY_SCRIPT}" \
++        --raw-data "${PREPROCESS_INPUT_PATH}" \
++        --expected-raw-sha256 "${PREPROCESS_INPUT_SHA256}" \
++        --expected-samples "${EXPECTED_SAMPLES}" \
++        --tokenizer-path "${TOKENIZER_PATH}" \
++        --data-prefix "${PACKED_DATA_PATH}" \
++        --seq-length "${SEQ_LEN}" \
++        --manifest "${DATA_OUTPUT_DIR}/dataset_manifest.json"; then
++        annotate_manifest "${DATA_OUTPUT_DIR}/dataset_manifest.json"
++        print_summary
++        echo "Existing indexed dataset passed validation; nothing was rebuilt."
++        exit 0
++    fi
++    echo "Existing dataset does not match the current inputs; rebuilding safely."
++fi
++
++stage_dir=$(mktemp -d "${DATA_OUTPUT_DIR}.tmp.XXXXXX")
++cleanup_stage() {
++    if [[ -n "${stage_dir:-}" && -d "${stage_dir}" && "${stage_dir}" == "${DATA_OUTPUT_DIR}.tmp."* ]]; then
++        rm -rf -- "${stage_dir}"
++    fi
++}
++trap cleanup_stage EXIT
++
++cd "${REPO_ROOT}"
++"${PYTHON_BIN}" ./preprocess_data.py \
++    --input "${PREPROCESS_INPUT_PATH}" \
++    --tokenizer-name-or-path "${TOKENIZER_PATH}" \
++    --output-prefix "${stage_dir}/alpaca" \
++    --handler-name AlpacaStyleInstructionHandler \
++    --tokenizer-type PretrainedFromHF \
++    --seq-length "${SEQ_LEN}" \
++    --workers "${PREPROCESS_WORKERS}" \
++    --log-interval 100 \
++    --prompt-type deepseek4 \
++    --enable-thinking false
++
++stage_prefix="${stage_dir}/alpaca_packed"
++"${PYTHON_BIN}" "${VERIFY_SCRIPT}" \
++    --raw-data "${PREPROCESS_INPUT_PATH}" \
++    --expected-raw-sha256 "${PREPROCESS_INPUT_SHA256}" \
++    --expected-samples "${EXPECTED_SAMPLES}" \
++    --tokenizer-path "${TOKENIZER_PATH}" \
++    --data-prefix "${stage_prefix}" \
++    --seq-length "${SEQ_LEN}" \
++    --manifest "${stage_dir}/dataset_manifest.json"
++annotate_manifest "${stage_dir}/dataset_manifest.json"
++
++backup_dir=""
++if [[ -d "${DATA_OUTPUT_DIR}" ]]; then
++    backup_dir="${DATA_OUTPUT_DIR}.backup.$(date +%Y%m%d_%H%M%S).$$"
++    mv -- "${DATA_OUTPUT_DIR}" "${backup_dir}"
++fi
++if ! mv -- "${stage_dir}" "${DATA_OUTPUT_DIR}"; then
++    if [[ -n "${backup_dir}" && -d "${backup_dir}" && ! -e "${DATA_OUTPUT_DIR}" ]]; then
++        mv -- "${backup_dir}" "${DATA_OUTPUT_DIR}"
++    fi
++    echo "ERROR: failed to install generated dataset" >&2
++    exit 1
++fi
++stage_dir=""
++
++print_summary
++if [[ -n "${backup_dir}" ]]; then
++    echo "Previous dataset backup: ${backup_dir}"
++fi
+diff --git a/mindspeed_llm/core/context_parallel/get_batch_utils.py b/mindspeed_llm/core/context_parallel/get_batch_utils.py
+index a9dca5933e29f24bfee497527cfa1e96efce8c40..efcc202123d48b13ae76d4b196809f54dccdc89b 100644
+--- a/mindspeed_llm/core/context_parallel/get_batch_utils.py
++++ b/mindspeed_llm/core/context_parallel/get_batch_utils.py
+@@ -14,6 +14,15 @@ from mindspeed.core.context_parallel.get_batch_utils import (
+ from mindspeed_llm.training.utils import _get_batch_on_this_cp_rank_in_ulysses_cp
+ 
+ 
++def is_deepseek4_sft_cp(args):
++    """DeepSeek4 SFT shifts next-token targets before context-parallel slicing."""
++    return (
++        args.context_parallel_size > 1
++        and getattr(args, 'stage', None) == 'sft'
++        and getattr(args, 'prompt_type', None) == 'deepseek4'
++    )
++
++
+ def get_batch_on_this_cp_rank(batch):
+     """Slice batch input along sequence dimension into multiple chunks,
+     which are parallelized across GPUs in a context parallel group.
+diff --git a/mindspeed_llm/core/fusions/fused_bias_swiglu.py b/mindspeed_llm/core/fusions/fused_bias_swiglu.py
+index 3099ce7d93e94b276a06096322bb8823ca497f7a..e88f099b39e2495c8cfc3aa954aecea763171d20 100644
+--- a/mindspeed_llm/core/fusions/fused_bias_swiglu.py
++++ b/mindspeed_llm/core/fusions/fused_bias_swiglu.py
+@@ -12,13 +12,10 @@ def get_swiglu_limit():
+     return getattr(args, 'swiglu_limit', 0)
+ 
+ 
+-def fused_swiglu_with_limit(x, limit=0):
+-    # use limit from global vars
+-    global _SWIGLU_LIMIT
+-    if _SWIGLU_LIMIT is None:
+-        _SWIGLU_LIMIT = get_swiglu_limit()
+-    else:
+-        limit = _SWIGLU_LIMIT
++def fused_swiglu_with_limit(x, limit=None):
++    # Resolve the limit on every call so the first forward and recomputation agree.
++    if limit is None:
++        limit = get_swiglu_limit()
+     if limit > 0:
+         y_1, y_2 = torch.chunk(x, 2, dim=-1)
+         y_1 = y_1.clamp(min=None, max=limit)
+diff --git a/mindspeed_llm/core/models/deepseek4/deepseek4_model.py b/mindspeed_llm/core/models/deepseek4/deepseek4_model.py
+index cae051fdfaac4fe55a76c3c241e2623c611380e7..f3551a05c3af953c8eaa338d1fea190e4d9fc541 100644
+--- a/mindspeed_llm/core/models/deepseek4/deepseek4_model.py
++++ b/mindspeed_llm/core/models/deepseek4/deepseek4_model.py
+@@ -28,6 +28,7 @@ from megatron.core.transformer.identity_op import IdentityOp
+ from mindspeed.core.context_parallel.get_batch_utils import get_actual_seq_len
+ from mindspeed.utils import compute_qkv_index, get_position_ids
+ from mindspeed_llm.core.tensor_parallel.layers import SegmentedColumnParallelLinear
++from mindspeed_llm.core.context_parallel.get_batch_utils import is_deepseek4_sft_cp
+ from mindspeed_llm.training.utils import set_actual_seq_len_list, _CAN_RECORD_REGISTRY, check_model_inputs
+ from mindspeed_llm.core.models.common.chunk_loss import chunk_loss, calculate_lm_loss
+ from mindspeed_llm.tasks.models.transformer.deepseek4.mhc import hc_repeat
+@@ -392,7 +393,7 @@ class DeepSeek4Model(MegatronCoreGPTModel):
+             if labels is None:
+                 # [s b h] => [b s h]
+                 return logits.transpose(0, 1).contiguous()
+-            if args.is_instruction_dataset:
++            if args.is_instruction_dataset and not is_deepseek4_sft_cp(args):
+                 labels = labels[:, 1:].contiguous()
+                 logits = logits[:-1, :, :].contiguous()
+             loss = self.compute_language_model_loss(labels, logits)
+diff --git a/mindspeed_llm/core/transformer/multi_token_prediction.py b/mindspeed_llm/core/transformer/multi_token_prediction.py
+index aa328fc84051eee76f8eaedc93af626d9399e2f4..7e39361b6d5ced904e1737f8d01b861481bcc1e7 100644
+--- a/mindspeed_llm/core/transformer/multi_token_prediction.py
++++ b/mindspeed_llm/core/transformer/multi_token_prediction.py
+@@ -23,6 +23,7 @@ from megatron.training.utils import get_batch_on_this_cp_rank
+ 
+ from mindspeed.core.context_parallel.get_batch_utils import set_actual_seq_len, get_actual_seq_len
+ from mindspeed_llm.training.utils import get_mtp_batch_list
++from mindspeed_llm.core.context_parallel.get_batch_utils import is_deepseek4_sft_cp
+ from mindspeed_llm.tasks.models.transformer.deepseek4.mhc import get_mhc_spec, hc_repeat
+ 
+ 
+@@ -260,7 +261,7 @@ def mtp_block_forward(
+ 
+         num_tokens = torch.sum(loss_mask)
+ 
+-        if args.is_instruction_dataset:
++        if args.is_instruction_dataset and not is_deepseek4_sft_cp(args):
+             mtp_labels = labels[:, 1:].contiguous()
+             mtp_logits = mtp_logits[:-1, :, :].contiguous()
+             mtp_loss_mask = loss_mask[..., 1:].view(-1).float()
+diff --git a/mindspeed_llm/features_manager/transformer/mhc_feature.py b/mindspeed_llm/features_manager/transformer/mhc_feature.py
+index 843de2124c72bab3743ae64d3562de2ed9333a92..6cd396a62ae78a8430f3513b96594ee067046da3 100644
+--- a/mindspeed_llm/features_manager/transformer/mhc_feature.py
++++ b/mindspeed_llm/features_manager/transformer/mhc_feature.py
+@@ -34,6 +34,23 @@ class MHCFeature(MindSpeedFeature):
+                 'megatron.core.pipeline_parallel.schedules.get_tensor_shapes', get_tensor_shapes_in_mhc
+             )
+ 
++            if int(getattr(args, 'pipeline_model_parallel_size', 1)) > 1 and (
++                args.no_pad_to_seq_lengths or args.variable_seq_lengths
++            ):
++                # mHC sends 4-D activations; Megatron's native shape exchange assumes 3-D.
++                from mindspeed.core.pipeline_parallel.variable_seq_length.adaptor import (
++                    mindspeed_communicate,
++                    mindspeed_commuticate_shapes,
++                )
++
++                patch_manager.register_patch(
++                    'megatron.core.pipeline_parallel.p2p_communication._communicate', mindspeed_communicate
++                )
++                patch_manager.register_patch(
++                    'megatron.core.pipeline_parallel.p2p_communication._communicate_shapes',
++                    mindspeed_commuticate_shapes,
++                )
++
+             if (
+                 getattr(args, "num_layers_per_virtual_pipeline_stage", False)
+                 and args.num_layers_per_virtual_pipeline_stage is not None
+diff --git a/mindspeed_llm/tasks/checkpoint/convert_ckpt_deepseek4.py b/mindspeed_llm/tasks/checkpoint/convert_ckpt_deepseek4.py
+index 6b47ad1c3ca4eeafaaf852c098784f954593d75b..93e35ef32de40f0034e4168654e6c2b6273d1439 100644
+--- a/mindspeed_llm/tasks/checkpoint/convert_ckpt_deepseek4.py
++++ b/mindspeed_llm/tasks/checkpoint/convert_ckpt_deepseek4.py
+@@ -4,12 +4,15 @@ import argparse
+ import json
+ import logging as logger
+ import os
++import re
+ from collections import defaultdict
+ from itertools import product
++from pathlib import Path
+ from typing import Dict, List, Set, Tuple, Optional, Any, Union
+ 
+ import torch
+ import safetensors.torch
++from safetensors import safe_open
+ 
+ from .convert_hf2mg import Hf2MgConvert
+ from .convert_mg2hf import Mg2HfConvert, load_data, TENSOR_SIZE
+@@ -54,15 +57,57 @@ class DeepSeek4Hf2MgConvert(Hf2MgConvert):
+         self.n_hash_layers = self.load_model.n_hash_layers
+         self.num_layers = self.load_model.num_layers
+         self.num_experts = self.load_model.num_experts
++        # MTP / dSPARK
++        self.mtp_num_layers = int(getattr(args, "mtp_num_layers", 0) or 0)
++        if self.mtp_num_layers < 0:
++            raise ValueError("mtp_num_layers must be >= 0")
++
++        self.deepseek4_backbone_only = bool(getattr(args, "deepseek4_backbone_only", False))
++        dspark_target_layer_ids = list(getattr(self.load_model, "dspark_target_layer_ids", []) or [])
+         self.compress_ratios = list(self.load_model.compress_ratios)
+-        expected_compress_ratios = self.num_layers + self.load_model.num_nextn_predict_layers
+-        # DeepSeek-V4-0731 configs append two reserved zero entries. They do not
+-        # correspond to transformer or MTP layers, so discard only this known
+-        # suffix while retaining the strict validation for all other layouts.
+-        if len(self.compress_ratios) == expected_compress_ratios + 2 and self.compress_ratios[-2:] == [0, 0]:
+-            self.compress_ratios = self.compress_ratios[:-2]
+-        if len(self.compress_ratios) != expected_compress_ratios:
+-            raise ValueError("compress-ratios length must equal num-layers add mtp-layers.")
++
++        if dspark_target_layer_ids:
++            if not self.deepseek4_backbone_only:
++                raise ValueError(
++                    "This DeepSeek-V4 checkpoint contains dSPARK modules, which are not supported by the "
++                    "current MCore converter. Use --deepseek4-backbone-only with --mtp-num-layers 0 "
++                    "to convert only the target-model backbone."
++                )
++            if self.mtp_num_layers != 0:
++                raise ValueError("--deepseek4-backbone-only requires --mtp-num-layers 0.")
++            expected_ratios = self.num_layers + len(dspark_target_layer_ids)
++            if len(self.compress_ratios) != expected_ratios:
++                raise ValueError(
++                    "For a dSPARK checkpoint, compress-ratios length must equal num-layers plus "
++                    "the number of dSPARK target layers."
++                )
++            if any(layer_id < 0 or layer_id >= self.num_layers for layer_id in dspark_target_layer_ids):
++                raise ValueError("dSPARK target layer IDs must refer to target-model backbone layers.")
++            logger.warning(
++                "Converting only the %d-layer DeepSeek-V4 backbone; ignoring %d attached dSPARK modules.",
++                self.num_layers,
++                len(dspark_target_layer_ids),
++            )
++            self.compress_ratios = self.compress_ratios[: self.num_layers]
++            self._validate_backbone_index_keys()
++            # Override copied HuggingFace metadata in the saved checkpoint args.
++            # The training checkpoint contains the target backbone only; retaining
++            # non-zero speculative-layer metadata would make that topology ambiguous.
++            self.num_nextn_predict_layers = 0
++            self.dspark_target_layer_ids = []
++        else:
++            if self.deepseek4_backbone_only:
++                raise ValueError("--deepseek4-backbone-only requires a checkpoint with dSPARK metadata.")
++            expected_compress_ratios = self.num_layers + self.load_model.num_nextn_predict_layers
++            # Some DeepSeek-V4 configs append two reserved zero entries. They
++            # do not correspond to transformer or MTP layers, so discard only
++            # this known suffix while retaining strict validation for every
++            # other non-dSPARK layout. A dSPARK checkpoint is handled above:
++            # its attached modules are deliberately not ordinary MTP layers.
++            if len(self.compress_ratios) == expected_compress_ratios + 2 and self.compress_ratios[-2:] == [0, 0]:
++                self.compress_ratios = self.compress_ratios[:-2]
++            if len(self.compress_ratios) != expected_compress_ratios:
++                raise ValueError("compress-ratios length must equal num-layers add mtp-layers.")
+ 
+         self.num_layer_list = getattr(args, "num_layer_list", None)
+         self.noop_layers = getattr(args, "noop_layers", None)
+@@ -93,11 +138,6 @@ class DeepSeek4Hf2MgConvert(Hf2MgConvert):
+ 
+         self.expert_tp_size = getattr(args, "expert_tensor_parallel_size", 1) or 1
+ 
+-        # MTP
+-        self.mtp_num_layers = int(getattr(args, "mtp_num_layers", 0) or 0)
+-        if self.mtp_num_layers < 0:
+-            raise ValueError("mtp_num_layers must be >= 0")
+-
+         if not os.path.exists(self.hf_model_path):
+             raise FileNotFoundError(f"Model path does not exist: {self.hf_model_path}")
+ 
+@@ -110,6 +150,76 @@ class DeepSeek4Hf2MgConvert(Hf2MgConvert):
+             self.vpprank_layer_idxs = defaultdict(dict)
+             self._get_vpprank_hf_layeridxs()
+ 
++    @staticmethod
++    def _validate_backbone_input(src: Path, dst: Path) -> None:
++        if src == dst or src in dst.parents:
++            raise SystemExit("Output directory must be separate from the input checkpoint directory.")
++        if dst.exists() and any(dst.iterdir()):
++            raise SystemExit(f"Output directory is not empty: {dst}")
++
++        config = json.loads((src / "config.json").read_text(encoding="utf-8"))
++        # Backbone-only conversion uses 43 real layers and noop layer 43.
++        if config.get("model_type") != "deepseek_v4" or config.get("num_hidden_layers") != 43:
++            raise SystemExit("Input must be a 43-layer DeepSeek-V4-Flash-0731 checkpoint.")
++        if "quantization_config" in config or config.get("expert_dtype") is not None:
++            raise SystemExit("Input metadata still declares quantized weights; run the 0731 BF16 script first.")
++
++        index_path = src / "model.safetensors.index.json"
++        weight_map = json.loads(index_path.read_text(encoding="utf-8"))["weight_map"]
++        if not weight_map:
++            raise SystemExit("The BF16 safetensors weight map is empty.")
++        if any(key.endswith(".scale") for key in weight_map):
++            raise SystemExit("Input index still contains quantization scale tensors.")
++
++        # Read metadata only; preserve FP32 state and integer expert-routing tables.
++        actual_weight_map = {}
++        for shard_name in sorted(set(weight_map.values())):
++            with safe_open(src / shard_name, framework="pt", device="cpu") as shard:
++                for key in shard.keys():
++                    if key in actual_weight_map:
++                        raise SystemExit(f"Duplicate tensor across BF16 shards: {key}")
++                    actual_weight_map[key] = shard_name
++                    dtype = shard.get_slice(key).get_dtype()
++                    if dtype.startswith("F8") or dtype in {"I8", "U8"}:
++                        raise SystemExit(f"Input still contains a quantized one-byte tensor: {key}={dtype}")
++        if actual_weight_map != weight_map:
++            raise SystemExit("BF16 index/header mismatch: tensor names or shard assignments differ.")
++
++    @staticmethod
++    def _validate_backbone_output(dst: Path, target_tp: int, target_pp: int, target_ep: int) -> None:
++        checkpoints = sorted(dst.glob("iter_0000001/mp_rank_*/model_optim_rng.pt"))
++        expected_count = target_tp * target_pp * target_ep
++        if len(checkpoints) != expected_count:
++            raise SystemExit(f"Expected {expected_count} MCore rank checkpoints, found {len(checkpoints)}.")
++        if (dst / "latest_checkpointed_iteration.txt").read_text(encoding="utf-8").strip() != "1":
++            raise SystemExit("Unexpected latest_checkpointed_iteration.txt.")
++
++        expected_args = {
++            "tensor_model_parallel_size": target_tp,
++            "pipeline_model_parallel_size": target_pp,
++            "expert_model_parallel_size": target_ep,
++            "expert_tensor_parallel_size": 1,
++            "num_layers": 44,
++            "mtp_num_layers": 0,
++            "num_nextn_predict_layers": 0,
++            "dspark_target_layer_ids": [],
++            "deepseek4_backbone_only": True,
++        }
++        for checkpoint_path in checkpoints:
++            checkpoint = torch.load(checkpoint_path, map_location="meta", mmap=True, weights_only=False)
++            args, model = checkpoint["args"], checkpoint["model"]
++            for name, expected_value in expected_args.items():
++                actual_value = getattr(args, name, None)
++                if actual_value != expected_value:
++                    raise SystemExit(
++                        f"Unexpected checkpoint arg in {checkpoint_path}: "
++                        f"{name}={actual_value!r}, expected {expected_value!r}."
++                    )
++            if len(args.compress_ratios) != 43:
++                raise SystemExit(f"compress_ratios is not the 43-layer backbone list in {checkpoint_path}.")
++            if not model or any(key.startswith("mtp.") for key in model):
++                raise SystemExit(f"Expected non-empty backbone-only weights in {checkpoint_path}.")
++
+     def __parameter_packaging(self):
+         args = argparse.Namespace()
+         # load_model attributes
+@@ -197,6 +307,35 @@ class DeepSeek4Hf2MgConvert(Hf2MgConvert):
+         else:
+             raise ValueError("compress-ratios length must equal num-layers add mtp-layers.")
+ 
++    def _validate_backbone_index_keys(self) -> None:
++        """Require an exact key match for the backbone-only 0731 conversion."""
++        idx_path = os.path.join(self.hf_model_path, "model.safetensors.index.json")
++        if not os.path.isfile(idx_path):
++            raise FileNotFoundError(f"Backbone-only conversion requires {idx_path}.")
++        with open(idx_path, "r", encoding="utf-8") as f:
++            weight_map = json.load(f).get("weight_map", {})
++
++        global_keys = {
++            "embed.weight",
++            "norm.weight",
++            "head.weight",
++            "hc_head_base",
++            "hc_head_fn",
++            "hc_head_scale",
++        }
++        expected_keys = set(global_keys)
++        for layer_idx in range(self.num_layers):
++            expected_keys |= self._required_hf_keys_for_transformer_layer(layer_idx)
++        actual_keys = {key for key in weight_map if key.startswith("layers.") or key in global_keys}
++
++        if actual_keys != expected_keys:
++            missing = sorted(expected_keys - actual_keys)
++            extra = sorted(actual_keys - expected_keys)
++            raise ValueError(
++                "DeepSeek-V4 backbone key set does not match the converter: "
++                f"missing={len(missing)} {missing[:10]}, extra={len(extra)} {extra[:10]}."
++            )
++
+     def _mg_layer_prefix(self, local_layer_idx: int, mtp_layer_flag: bool = False) -> str:
+         return (
+             f"mtp.layers.{local_layer_idx}.transformer_layer" if mtp_layer_flag else f"decoder.layers.{local_layer_idx}"
+@@ -1045,6 +1184,134 @@ class DeepSeek4Mg2hfConvert(Mg2HfConvert):
+         self.compress_ratios = getattr(self.load_model, "compress_ratios")
+         self.expert_tensor_parallel_size = args.expert_tensor_parallel_size
+ 
++    @staticmethod
++    def _checkpoint_files(root: Path) -> list[Path]:
++        iteration = int((root / "latest_checkpointed_iteration.txt").read_text(encoding="utf-8").strip())
++        iteration_dir = root / f"iter_{iteration:07d}"
++        files = sorted(iteration_dir.glob("mp_rank_*/model_optim_rng.pt"))
++        if not files:
++            raise SystemExit(f"No MCore rank files found under {iteration_dir}.")
++        return files
++
++    @staticmethod
++    def _validate_lora_input(args: argparse.Namespace) -> None:
++        base_root, lora_root, hf_meta, out_root = (
++            Path(path).resolve() for path in (args.load_dir, args.lora_load, args.hf_cfg_dir, args.save_dir)
++        )
++        if len({base_root, lora_root, hf_meta, out_root}) != 4:
++            raise SystemExit("Base, LoRA, HF metadata, and output must be different directories.")
++        if any(source in out_root.parents for source in (base_root, lora_root, hf_meta)):
++            raise SystemExit("Output must not be inside an input directory.")
++        if out_root.exists() and any(out_root.iterdir()):
++            raise SystemExit(f"Output directory is not empty: {out_root}")
++
++        base_files = DeepSeek4Mg2hfConvert._checkpoint_files(base_root)
++        lora_files = DeepSeek4Mg2hfConvert._checkpoint_files(lora_root)
++        if {path.parent.name for path in base_files} != {path.parent.name for path in lora_files}:
++            raise SystemExit("Base/LoRA rank topology differs.")
++
++        # CPU mmap avoids loading tensor payloads; legacy torch-npu checkpoints cannot use the meta device here.
++        checkpoint = torch.load(lora_files[0], map_location="cpu", mmap=True, weights_only=False)
++        lora_args = checkpoint["args"]
++        if lora_args is None:
++            raise SystemExit(f"LoRA checkpoint metadata is missing: {lora_files[0]}")
++        for name, expected in (("lora_r", args.lora_r), ("lora_alpha", args.lora_alpha)):
++            actual = getattr(lora_args, name, None)
++            if actual is not None and actual != expected:
++                raise SystemExit(f"LoRA {name} mismatch: checkpoint={actual!r}, requested={expected!r}.")
++        targets = getattr(lora_args, "lora_target_modules", None)
++        if targets and set(targets) != set(args.lora_target_modules):
++            raise SystemExit("LoRA target modules differ from the training checkpoint.")
++        if not any(".lora_" in key.lower() or "_lora_" in key.lower() for key in checkpoint["model"].keys()):
++            raise SystemExit(f"No LoRA tensors found in representative rank {lora_files[0]}.")
++
++        config = json.loads((hf_meta / "config.json").read_text(encoding="utf-8"))
++        for name, expected in (
++            ("model_type", "deepseek_v4"),
++            ("architectures", ["DeepseekV4ForCausalLM"]),
++            ("num_hidden_layers", 43),
++        ):
++            if config.get(name) != expected:
++                raise SystemExit(f"Unexpected HF metadata: {name}={config.get(name)!r}, expected={expected!r}.")
++        if len(config["compress_ratios"]) < 43:
++            raise SystemExit("HF metadata must contain at least 43 backbone compress_ratios.")
++        if "quantization_config" in config or config.get("expert_dtype") is not None:
++            raise SystemExit("HF metadata still declares quantized weights; use the dequantized BF16 HF directory.")
++        if not (hf_meta / "tokenizer.json").stat().st_size:
++            raise SystemExit("HF metadata tokenizer.json is empty.")
++
++    @staticmethod
++    def _write_json(path: Path, data: dict) -> None:
++        temporary_path = path.with_name(f".{path.name}.tmp")
++        temporary_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
++        temporary_path.replace(path)
++
++    @staticmethod
++    def _finalize_backbone_output(root: Path) -> None:
++        # The converter copies HF metadata verbatim; inference must see only the exported BF16 backbone.
++        config_path = root / "config.json"
++        config = json.loads(config_path.read_text(encoding="utf-8"))
++        config["compress_ratios"] = config["compress_ratios"][:43]
++        config["num_nextn_predict_layers"] = 0
++        config["dspark_target_layer_ids"] = []
++        config["expert_dtype"] = None
++        config["torch_dtype"] = "bfloat16"
++        for key in (
++            "quantization_config",
++            "dspark_block_size",
++            "dspark_markov_rank",
++            "dspark_noise_token_id",
++            "tie_mtp_embeddings_and_lmhead",
++        ):
++            config.pop(key, None)
++        DeepSeek4Mg2hfConvert._write_json(config_path, config)
++
++        if not (root / "tokenizer.json").stat().st_size:
++            raise SystemExit("Exported tokenizer.json is empty.")
++        index_path = root / "model.safetensors.index.json"
++        index = json.loads(index_path.read_text(encoding="utf-8"))
++        weight_map = index["weight_map"]
++        actual_weight_map = {}
++        tensor_bytes = 0
++        for shard_name in sorted(set(weight_map.values())):
++            shard_path = root / shard_name
++            with safe_open(shard_path, framework="pt", device="cpu") as shard:
++                for key in shard.keys():
++                    if key in actual_weight_map:
++                        raise SystemExit(f"Duplicate tensor across shards: {key}")
++                    actual_weight_map[key] = shard_name
++                    dtype = shard.get_slice(key).get_dtype()
++                    if dtype.startswith("F8") or dtype in {"I8", "U8"}:
++                        raise SystemExit(f"Quantized one-byte tensor remains in HF weights: {key}={dtype}")
++                # safe_open validates the layout; the payload excludes the 8-byte length and JSON header.
++                with shard_path.open("rb") as stream:
++                    header_length = int.from_bytes(stream.read(8), "little")
++                tensor_bytes += shard_path.stat().st_size - 8 - header_length
++        if actual_weight_map != weight_map:
++            raise SystemExit("Safetensors index/header mismatch: tensor names or shard assignments differ.")
++
++        for key in weight_map:
++            if (
++                key.startswith("mtp.")
++                or key.endswith(".scale")
++                or any(marker in key.lower() for marker in ("dspark", ".base_layer.", ".lora_", "_lora_"))
++            ):
++                raise SystemExit(f"Unexpected MTP/dSPARK/LoRA/scale tensor remains: {key}")
++        layers = {int(match.group(1)) for key in weight_map if (match := re.match(r"^layers\.(\d+)\.", key))}
++        if layers != set(range(43)):
++            raise SystemExit("Exported weights must contain exactly backbone layers 0 through 42.")
++        if not {"embed.weight", "norm.weight", "head.weight"} <= weight_map.keys():
++            raise SystemExit("Required embedding, norm, or output tensor is missing.")
++
++        # DeepSeek-V4 imports TENSOR_SIZE by value and may write 0; derive the exact size without loading weights.
++        if index.get("metadata", {}).get("total_size") != tensor_bytes:
++            index.setdefault("metadata", {})["total_size"] = tensor_bytes
++            DeepSeek4Mg2hfConvert._write_json(index_path, index)
++        print(
++            f"HF validation passed: tensors={len(weight_map)}, shards={len(set(weight_map.values()))}, "
++            f"tensor_bytes={tensor_bytes}"
++        )
++
+     def _compress_ratio(self, hf_layer_idx: int) -> int:
+         if 0 <= hf_layer_idx < len(self.compress_ratios):
+             return self.compress_ratios[hf_layer_idx]
+@@ -1516,8 +1783,7 @@ class DeepSeek4Mg2hfConvert(Mg2HfConvert):
+                             self._merge_lora(mg_weight, merge_type="unified")
+                         else:
+                             lora_path = self.get_pt_path_by_tpppep_rank(self.lora_iter_path, tp_rank, pp_rank, ep_rank)
+-                            lora_model = load_data(lora_path)['model']
+-                            mg_weight = {**lora_model, **mg_weight}
++                            mg_weight.update(self._load_lora_override(lora_path))
+                             self._merge_lora(mg_weight, merge_type="independent")
+                     mg_weights[(tp_rank, ep_rank)] = mg_weight
+                 self.read_pp_rank_weights(pp_rank, mg_weights)
+@@ -1539,8 +1805,7 @@ class DeepSeek4Mg2hfConvert(Mg2HfConvert):
+                                 lora_path = self.get_pt_path_by_tpppep_rank(
+                                     self.lora_iter_path, tp_rank, pp_rank, ep_rank
+                                 )
+-                                lora_model = load_data(lora_path)[f'model{vpp_rank}']
+-                                mg_weight = {**lora_model, **mg_weight}
++                                mg_weight.update(self._load_lora_override(lora_path, f'model{vpp_rank}'))
+                                 self._merge_lora(mg_weight, merge_type="independent")
+                         mg_weights[(tp_rank, ep_rank)] = mg_weight
+ 
+@@ -1559,10 +1824,34 @@ class DeepSeek4Converter:
+         self.args.save_layer_by_layer = True
+ 
+     def run(self):
++        validate_flash_0731 = getattr(self.args, "validate_flash_0731", False)
++        hf_backbone = validate_flash_0731 and self.args.load_model_type == "hf"
++        lora_backbone = validate_flash_0731 and self.args.load_model_type == "mg"
++        if hf_backbone or lora_backbone:
++            paths = ("load_dir", "save_dir", "lora_load", "hf_cfg_dir") if lora_backbone else ("load_dir", "save_dir")
++            for name in paths:
++                setattr(self.args, name, str(Path(getattr(self.args, name)).resolve()))
++
+         if self.args.load_model_type == "hf":
++            if hf_backbone:
++                DeepSeek4Hf2MgConvert._validate_backbone_input(Path(self.args.load_dir), Path(self.args.save_dir))
+             convert = DeepSeek4Hf2MgConvert(self.args)
+         elif self.args.load_model_type == "mg":
++            if lora_backbone:
++                DeepSeek4Mg2hfConvert._validate_lora_input(self.args)
+             convert = DeepSeek4Mg2hfConvert(self.args)
+         else:
+             raise Exception("This conversion scheme is not supported")
+         convert.run()
++
++        if hf_backbone:
++            DeepSeek4Hf2MgConvert._validate_backbone_output(
++                Path(self.args.save_dir),
++                self.args.target_tensor_parallel_size,
++                self.args.target_pipeline_parallel_size,
++                self.args.target_expert_parallel_size,
++            )
++            print(f"Backbone-only MCore checkpoint is ready: {self.args.save_dir}")
++        elif lora_backbone:
++            DeepSeek4Mg2hfConvert._finalize_backbone_output(Path(self.args.save_dir))
++            print(f"DeepSeek-V4-Flash merged BF16 Hugging Face checkpoint is ready: {self.args.save_dir}")
+diff --git a/mindspeed_llm/tasks/checkpoint/convert_mg2hf.py b/mindspeed_llm/tasks/checkpoint/convert_mg2hf.py
+index 3620064ac45e605e53dc2335d57f34ccf4ff651c..84dbd5b6f0373d01d31d7dc1e20a233b5cd59c71 100644
+--- a/mindspeed_llm/tasks/checkpoint/convert_mg2hf.py
++++ b/mindspeed_llm/tasks/checkpoint/convert_mg2hf.py
+@@ -44,6 +44,7 @@ class Mg2HfConvert(Convert):
+             args.load_dir = args.save
+             args.save_dir = args.hf_save_dir
+         self.load_model = MegatronModel(args)
++        self.num_layers = self.load_model.num_layers
+         self.save_model = HuggingFaceModel(args)
+ 
+         self.iter_path = self.get_iter_path(args.load_dir)
+diff --git a/mindspeed_llm/tasks/megatron_basic/requirements_basic.py b/mindspeed_llm/tasks/megatron_basic/requirements_basic.py
+index a3f874c02cb473823e324b1e19109b83ee7bdcb3..2dcb65554e42bf74f43eee17bbaa5c31e5c59ed9 100644
+--- a/mindspeed_llm/tasks/megatron_basic/requirements_basic.py
++++ b/mindspeed_llm/tasks/megatron_basic/requirements_basic.py
+@@ -24,7 +24,12 @@ def _load_from_state_dict_wrapper(fn):
+             and hasattr(args, 'lora_target_modules')
+             and args.lora_target_modules
+         ):
+-            if not any(
++            # Missing adapters are expected when initializing from a backbone,
++            # but must remain errors when resuming a LoRA checkpoint.
++            initializing_lora = (
++                not args.lora_load or args.finetune or getattr(args, 'is_load_refer', False)
++            )
++            if initializing_lora and not any(
+                 ('lora_a' in key.lower() or 'lora_b' in key.lower()) and key.endswith('weight') for key in state_dict
+             ):
+                 import warnings
+diff --git a/mindspeed_llm/tasks/models/transformer/deepseek4/mhc.py b/mindspeed_llm/tasks/models/transformer/deepseek4/mhc.py
+index ede7a4c492688a6644b88819d75b0b4d28c2274b..d22667fa54b55a51684da8ca06e1317ca2172290 100644
+--- a/mindspeed_llm/tasks/models/transformer/deepseek4/mhc.py
++++ b/mindspeed_llm/tasks/models/transformer/deepseek4/mhc.py
+@@ -77,6 +77,15 @@ def mhc2fp32_fp16module_init_wrapper(fn):
+                     module.hc_fn.weight.data = module.hc_fn.weight.data.to(torch.float32)
+                     module.hc_base.data = module.hc_base.data.to(torch.float32)
+                     module.hc_scale.data = module.hc_scale.data.to(torch.float32)
++                # Restore storage dtype before loading the FP32 checkpoint.
++                # Casting back in forward cannot undo BF16 rounding at load.
++                if getattr(module, 'expert_bias', None) is not None:
++                    module.expert_bias = module.expert_bias.float()
++                    module.local_tokens_per_expert = module.local_tokens_per_expert.float()
++                for name in ('attn_sink', 'ape'):
++                    parameter = getattr(module, name, None)
++                    if parameter is not None:
++                        parameter.data = parameter.data.float()
+ 
+     return wrapper
+ 
+diff --git a/mindspeed_llm/tasks/posttrain/lora/moe/experts.py b/mindspeed_llm/tasks/posttrain/lora/moe/experts.py
+index 7018fba1eded9dda07837a458ec92397aa379870..811d6b7cd36a201e03411aaaacf82e6f64757858 100644
+--- a/mindspeed_llm/tasks/posttrain/lora/moe/experts.py
++++ b/mindspeed_llm/tasks/posttrain/lora/moe/experts.py
+@@ -602,9 +602,11 @@ class LoraParallelGroupedMLP(GroupedMLP):
+ 
+         torch.nn.init.zeros_(self.weight1_lora_b)
+         torch.nn.init.zeros_(self.weight2_lora_b)
+-        # expert lora weight
++        # All four tensors contain local experts. None is replicated across EP ranks.
++        setattr(self.weight1_lora_a, 'allreduce', not self.expert_parallel)
+         setattr(self.weight1_lora_b, 'allreduce', not self.expert_parallel)
+         setattr(self.weight2_lora_a, 'allreduce', not self.expert_parallel)
++        setattr(self.weight2_lora_b, 'allreduce', not self.expert_parallel)
+ 
+     def forward(
+         self,
+diff --git a/mindspeed_llm/tasks/posttrain/lora/utils.py b/mindspeed_llm/tasks/posttrain/lora/utils.py
+index 975b61c1dc64d3252ba6c77b1e07af5dca785b3b..a0520345b4a7a009e9233e5aa20b18b915ef49ef 100644
+--- a/mindspeed_llm/tasks/posttrain/lora/utils.py
++++ b/mindspeed_llm/tasks/posttrain/lora/utils.py
+@@ -64,15 +64,23 @@ def modify_keys_with_dict(dictionary, words_to_replace, exclude_words):
+ 
+ def filter_lora_keys(state_dict):
+     args = get_args()
++    # Router bias is a persistent buffer updated outside the optimizer. It must
++    # accompany the adapter to reproduce the routing used during training.
+     if args.virtual_pipeline_model_parallel_size is None:
+         model_dict = state_dict.get('model', {})
+-        filtered_model_dict = {key: value for key, value in model_dict.items() if 'lora' in key.lower()}
++        filtered_model_dict = {
++            key: value for key, value in model_dict.items()
++            if 'lora' in key.lower() or key.endswith('.expert_bias')
++        }
+         state_dict['model'] = filtered_model_dict
+     else:
+         for i in range(args.virtual_pipeline_model_parallel_size):
+             model_key = f'model{i}'
+             model_dict = state_dict[model_key]
+-            filtered_model_dict = {key: value for key, value in model_dict.items() if 'lora' in key.lower()}
++            filtered_model_dict = {
++                key: value for key, value in model_dict.items()
++                if 'lora' in key.lower() or key.endswith('.expert_bias')
++            }
+             state_dict[model_key] = filtered_model_dict
+     return state_dict
+ 
+diff --git a/mindspeed_llm/tasks/posttrain/sft/sft_trainer.py b/mindspeed_llm/tasks/posttrain/sft/sft_trainer.py
+index 988d9690e3d5e40204b6ea74425690eac49bd3fd..f112e849433badd8adc32d838bb22379f93c4ce4 100644
+--- a/mindspeed_llm/tasks/posttrain/sft/sft_trainer.py
++++ b/mindspeed_llm/tasks/posttrain/sft/sft_trainer.py
+@@ -26,6 +26,7 @@ except ImportError:
+     pass
+ 
+ from mindspeed_llm.core.models.deepseek4.deepseek4_model import DeepSeek4Model
++from mindspeed_llm.core.context_parallel.get_batch_utils import is_deepseek4_sft_cp
+ from mindspeed_llm.core.transformer.multi_token_prediction import generate_mtp_batch_list_on_this_tp_rank
+ from mindspeed_llm.tasks.models.transformer.deepseek4.mhc import get_mhc_spec
+ from mindspeed_llm.tasks.posttrain.base import BaseTrainer
+@@ -108,6 +109,12 @@ class SFTTrainer(BaseTrainer):
+         # ignored label -100
+         loss_mask = torch.where(labels == IGNORE_INDEX, 0, 1)
+ 
++        if is_deepseek4_sft_cp(args):
++            # Both packed and unpacked CP paths need global next-token targets.
++            # Shift before selecting a CP slicer; the model/loss skip a second shift.
++            labels = torch.nn.functional.pad(labels[..., 1:], (0, 1), value=IGNORE_INDEX)
++            loss_mask = torch.nn.functional.pad(loss_mask[..., 1:], (0, 1), value=0)
++
+         if get_args().spec is not None and args.spec[0] == "mindspeed_llm.tasks.models.spec.hunyuan_spec":
+             input_ids = tokens
+             pad_id = 127961
+@@ -187,7 +194,9 @@ class SFTTrainer(BaseTrainer):
+         loss_mask = input_tensor
+ 
+         losses = output_tensor.float()
+-        loss_mask = loss_mask[..., 1:].view(-1).float()
++        if not is_deepseek4_sft_cp(args):
++            loss_mask = loss_mask[..., 1:]
++        loss_mask = loss_mask.reshape(-1).float()
+         if args.context_parallel_size > 1:
+             loss = torch.cat([torch.sum(losses.view(-1) * loss_mask).view(1), loss_mask.sum().view(1)])
+             torch.distributed.all_reduce(loss, group=mpu.get_context_parallel_group())
+diff --git a/mindspeed_llm/tasks/preprocess/prepare_deepseek4_data.py b/mindspeed_llm/tasks/preprocess/prepare_deepseek4_data.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..0a13dc2f97738ca855e3a1b114b2f6df814cdf6f
+--- /dev/null
++++ b/mindspeed_llm/tasks/preprocess/prepare_deepseek4_data.py
+@@ -0,0 +1,133 @@
++"""Merge DeepSeek-V4 JSONL inputs and record prepared dataset metadata."""
++
++import argparse
++import hashlib
++import json
++import os
++import tempfile
++from pathlib import Path
++
++
++def sha256_file(path):
++    digest = hashlib.sha256()
++    with path.open("rb") as stream:
++        for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
++            digest.update(chunk)
++    return digest.hexdigest()
++
++
++def merge_jsonl_inputs(output, sources):
++    output = output.resolve()
++    sources = [source.resolve() for source in sources]
++    if len(set(sources)) != len(sources):
++        raise SystemExit("Input JSONL paths must be unique")
++    if output in sources:
++        raise SystemExit("Merged output must not also be an input")
++
++    fd, temporary_name = tempfile.mkstemp(prefix=f".{output.name}.", suffix=".tmp", dir=output.parent)
++    temporary = Path(temporary_name)
++    counts = []
++    try:
++        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as destination:
++            for source in sources:
++                count = 0
++                with source.open("r", encoding="utf-8") as stream:
++                    for line_number, line in enumerate(stream, start=1):
++                        text = line.rstrip("\r\n")
++                        if not text:
++                            raise ValueError(f"{source}:{line_number}: empty line")
++                        try:
++                            row = json.loads(text)
++                        except json.JSONDecodeError as error:
++                            raise ValueError(f"{source}:{line_number}: invalid JSON: {error}") from error
++                        if not isinstance(row, dict) or set(row) != {"instruction", "input", "output"}:
++                            raise ValueError(f"{source}:{line_number}: expected instruction/input/output fields")
++                        if not all(isinstance(row[key], str) for key in row):
++                            raise ValueError(f"{source}:{line_number}: all fields must be strings")
++                        if not row["input"] or not row["output"]:
++                            raise ValueError(f"{source}:{line_number}: input/output must be non-empty")
++                        destination.write(text + "\n")
++                        count += 1
++                if count == 0:
++                    raise ValueError(f"Input JSONL has no rows: {source}")
++                counts.append(count)
++            destination.flush()
++            os.fsync(destination.fileno())
++
++        digest = sha256_file(temporary)
++        if output.is_file() and sha256_file(output) == digest:
++            action = "Reused"
++        else:
++            os.replace(temporary, output)
++            action = "Wrote"
++        for source, count in zip(sources, counts):
++            print(f"Input JSONL: rows={count}, path={source}")
++        print(f"{action} merged JSONL: rows={sum(counts)}, sha256={digest}, path={output}")
++    finally:
++        temporary.unlink(missing_ok=True)
++
++
++def describe(path):
++    digest = hashlib.sha256()
++    rows = 0
++    with path.open("rb") as stream:
++        for line in stream:
++            digest.update(line)
++            rows += 1
++    return {"path": str(path), "rows": rows, "sha256": digest.hexdigest()}
++
++
++def annotate_manifest(manifest_path, overlength_policy, sources):
++    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
++    manifest["overlength_policy"] = overlength_policy
++    manifest["source_jsonl"] = [describe(source.resolve()) for source in sources]
++    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
++
++
++def print_summary(manifest_path, data_path):
++    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
++    documents = manifest["documents"]
++    tokens = manifest["tokens"]
++    print("Dataset ready:")
++    print(f"  documents           : {documents}")
++    print(f"  seq length          : {manifest['seq_length']}")
++    print(f"  tokens min/avg/max  : {tokens['minimum']}/{tokens['total'] / documents:.1f}/{tokens['maximum']}")
++    print(f"  assistant tokens    : {tokens['assistant_total']}")
++    print(f"  data path for train : {data_path}")
++    print(f"  manifest            : {manifest_path}")
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    commands = parser.add_subparsers(dest="command", required=True)
++
++    merge = commands.add_parser("merge", help="Concatenate JSONL inputs in order.")
++    merge.add_argument("output", type=Path)
++    merge.add_argument("inputs", type=Path, nargs="+")
++
++    annotate = commands.add_parser("annotate", help="Record input files and the overlength policy.")
++    annotate.add_argument("manifest", type=Path)
++    annotate.add_argument("overlength_policy")
++    annotate.add_argument("inputs", type=Path, nargs="+")
++
++    count = commands.add_parser("count", help="Print the dataset document count.")
++    count.add_argument("manifest", type=Path)
++
++    summary = commands.add_parser("summary", help="Print prepared dataset statistics.")
++    summary.add_argument("manifest", type=Path)
++    summary.add_argument("data_path")
++
++    args = parser.parse_args()
++    if args.command == "merge":
++        merge_jsonl_inputs(args.output, args.inputs)
++    elif args.command == "annotate":
++        annotate_manifest(args.manifest, args.overlength_policy, args.inputs)
++    elif args.command == "count":
++        with args.manifest.open(encoding="utf-8") as stream:
++            print(json.load(stream)["documents"])
++    else:
++        print_summary(args.manifest, args.data_path)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/mindspeed_llm/tasks/preprocess/verify_deepseek4_data.py b/mindspeed_llm/tasks/preprocess/verify_deepseek4_data.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..c6e4e15688fb61ab8dfe8c2516fc12eecf72c7c7
+--- /dev/null
++++ b/mindspeed_llm/tasks/preprocess/verify_deepseek4_data.py
+@@ -0,0 +1,345 @@
++#!/usr/bin/env python3
++"""Validate exact JSONL -> DeepSeek-V4 MindSpeed LLM SFT conversion."""
++
++import argparse
++import hashlib
++import json
++import os
++import sys
++import tempfile
++from pathlib import Path
++
++import numpy as np
++from transformers import AutoTokenizer
++
++
++REPO_ROOT = Path(__file__).resolve().parents[3]
++sys.path.insert(0, str(REPO_ROOT / "3rdparty" / "Megatron-LM"))
++
++from megatron.core.datasets.indexed_dataset import IndexedDataset  # noqa: E402
++
++
++BOS_TOKEN = "<｜begin▁of▁sentence｜>"
++EOS_TOKEN = "<｜end▁of▁sentence｜>"
++USER_TOKEN = "<｜User｜>"
++ASSISTANT_TOKEN = "<｜Assistant｜>"
++THINKING_END = "</think>"
++IGNORE_INDEX = -100
++
++
++def parse_args():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--raw-data", type=Path, required=True)
++    parser.add_argument("--expected-raw-sha256", required=True)
++    parser.add_argument("--expected-samples", type=int, required=True)
++    parser.add_argument("--tokenizer-path", type=Path, required=True)
++    parser.add_argument("--data-prefix", type=Path)
++    parser.add_argument("--seq-length", type=int, required=True)
++    parser.add_argument("--manifest", type=Path)
++    parser.add_argument(
++        "--preflight-only",
++        action="store_true",
++        help="Report raw token lengths and reject samples that preprocessing would truncate.",
++    )
++    parser.add_argument(
++        "--filter-overlength-to",
++        type=Path,
++        help="With --preflight-only, write an exact JSONL copy excluding over-limit samples.",
++    )
++    args = parser.parse_args()
++    if not args.preflight_only and args.data_prefix is None:
++        parser.error("--data-prefix is required unless --preflight-only is used")
++    if args.filter_overlength_to is not None and not args.preflight_only:
++        parser.error("--filter-overlength-to requires --preflight-only")
++    return args
++
++
++def sha256_file(path):
++    digest = hashlib.sha256()
++    with path.open("rb") as stream:
++        for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
++            digest.update(chunk)
++    return digest.hexdigest()
++
++
++def read_raw_rows(path):
++    rows = []
++    with path.open("r", encoding="utf-8") as stream:
++        for line_number, line in enumerate(stream, start=1):
++            if not line.strip():
++                raise ValueError(f"Empty line at {path}:{line_number}")
++            try:
++                row = json.loads(line)
++            except json.JSONDecodeError as error:
++                raise ValueError(f"Invalid JSON at {path}:{line_number}: {error}") from error
++            if not isinstance(row, dict):
++                raise ValueError(f"JSON value must be an object at {path}:{line_number}")
++            if set(row) != {"instruction", "input", "output"}:
++                raise ValueError(f"Unexpected fields at {path}:{line_number}: {sorted(row)}")
++            if not all(isinstance(row[key], str) for key in row):
++                raise ValueError(f"Non-string field at {path}:{line_number}")
++            if not row["input"] or not row["output"]:
++                raise ValueError(f"Empty input/output at {path}:{line_number}")
++            rows.append(row)
++    if not rows:
++        raise ValueError(f"JSONL has no rows: {path}")
++    return rows
++
++
++def artifact_paths(prefix):
++    paths = []
++    for key in ("input_ids", "attention_mask", "labels"):
++        paths.extend(
++            [
++                Path(f"{prefix}_{key}_document.bin"),
++                Path(f"{prefix}_{key}_document.idx"),
++            ]
++        )
++    return paths
++
++
++def encode_expected(row, tokenizer):
++    user_content = "\n".join(part for part in (row["instruction"], row["input"]) if part)
++    prompt_text = BOS_TOKEN + USER_TOKEN + user_content + ASSISTANT_TOKEN + THINKING_END
++    target_text = row["output"] + EOS_TOKEN
++    return (
++        tokenizer.encode(prompt_text, add_special_tokens=False),
++        tokenizer.encode(target_text, add_special_tokens=False),
++    )
++
++
++def write_filtered_raw_data(raw_data, filtered_output, skipped_indices):
++    raw_data = raw_data.resolve()
++    filtered_output = filtered_output.resolve()
++    if raw_data == filtered_output:
++        raise ValueError("Filtered output must be different from the original JSONL")
++    if filtered_output.exists() and not filtered_output.is_file():
++        raise ValueError(f"Filtered output is not a regular file: {filtered_output}")
++
++    filtered_output.parent.mkdir(parents=True, exist_ok=True)
++    descriptor, temporary_name = tempfile.mkstemp(
++        prefix=f".{filtered_output.name}.", suffix=".tmp", dir=filtered_output.parent
++    )
++    temporary = Path(temporary_name)
++    skipped = set(skipped_indices)
++    try:
++        with raw_data.open("rb") as source, os.fdopen(descriptor, "wb") as destination:
++            for index, line in enumerate(source):
++                if index not in skipped:
++                    destination.write(line)
++            destination.flush()
++            os.fsync(destination.fileno())
++
++        if filtered_output.is_file() and sha256_file(filtered_output) == sha256_file(temporary):
++            action = "Reused"
++        else:
++            os.replace(temporary, filtered_output)
++            action = "Wrote"
++        print(f"{action} filtered JSONL: {filtered_output}")
++    finally:
++        temporary.unlink(missing_ok=True)
++
++
++def scan_raw_token_lengths(rows, tokenizer, seq_length, raw_data=None, filtered_output=None):
++    total_tokens = 0
++    minimum_tokens = None
++    maximum_tokens = 0
++    maximum_row = None
++    over_limit = []
++
++    for index, row in enumerate(rows):
++        prompt_ids, target_ids = encode_expected(row, tokenizer)
++        prompt_length = len(prompt_ids)
++        target_length = len(target_ids)
++        document_length = prompt_length + target_length
++        total_tokens += document_length
++        minimum_tokens = (
++            document_length if minimum_tokens is None else min(minimum_tokens, document_length)
++        )
++        if document_length > maximum_tokens:
++            maximum_tokens = document_length
++            maximum_row = (index, prompt_length, target_length)
++        if document_length >= seq_length:
++            over_limit.append((index, prompt_length, target_length, document_length))
++
++    average_tokens = total_tokens / len(rows)
++    print(
++        "Raw DeepSeek-V4 non-thinking token lengths: "
++        f"documents={len(rows)}, total={total_tokens}, "
++        f"min/avg/max={minimum_tokens}/{average_tokens:.1f}/{maximum_tokens}, "
++        f"seq_length={seq_length}, over_limit={len(over_limit)}"
++    )
++
++    if filtered_output is not None:
++        write_filtered_raw_data(
++            raw_data,
++            filtered_output,
++            (index for index, _, _, _ in over_limit),
++        )
++        print(
++            "Over-length filtering: "
++            f"original={len(rows)}, kept={len(rows) - len(over_limit)}, skipped={len(over_limit)}"
++        )
++    elif over_limit:
++        recommended_seq_length = 1 << maximum_tokens.bit_length()
++        first_rows = ", ".join(
++            f"document {index} (JSONL line {index + 1}): "
++            f"prompt={prompt_length}, assistant={target_length}, total={document_length}"
++            for index, prompt_length, target_length, document_length in over_limit[:10]
++        )
++        if len(over_limit) > 10:
++            first_rows += f", ... and {len(over_limit) - 10} more"
++        max_index, max_prompt, max_target = maximum_row
++        raise ValueError(
++            "Raw samples would be truncated by DeepSeek4 preprocessing: "
++            f"{len(over_limit)} document(s) have total tokens >= seq-length {seq_length}. "
++            "The template reserves one position, so exact conversion requires total tokens "
++            f"< seq-length. Maximum is document {max_index} (JSONL line {max_index + 1}): "
++            f"prompt={max_prompt}, assistant={max_target}, total={maximum_tokens}. "
++            f"Set SEQ_LEN to at least {maximum_tokens + 1}; recommended power-of-two value is "
++            f"{recommended_seq_length}. First over-limit rows: {first_rows}"
++        )
++
++    return {
++        "total": total_tokens,
++        "minimum": minimum_tokens,
++        "maximum": maximum_tokens,
++    }
++
++
++def main():
++    args = parse_args()
++    raw_sha256 = sha256_file(args.raw_data)
++    if raw_sha256 != args.expected_raw_sha256:
++        raise ValueError(
++            f"Raw SHA256 mismatch: {raw_sha256}, expected {args.expected_raw_sha256}"
++        )
++
++    rows = read_raw_rows(args.raw_data)
++    if len(rows) != args.expected_samples:
++        raise ValueError(f"Raw row count is {len(rows)}, expected {args.expected_samples}")
++
++    tokenizer = AutoTokenizer.from_pretrained(
++        args.tokenizer_path,
++        use_fast=True,
++        trust_remote_code=False,
++    )
++    expected_special_tokens = {
++        "bos_token": BOS_TOKEN,
++        "eos_token": EOS_TOKEN,
++        "pad_token": EOS_TOKEN,
++    }
++    for name, expected in expected_special_tokens.items():
++        actual = getattr(tokenizer, name)
++        if actual != expected:
++            raise ValueError(f"Unexpected tokenizer {name}: {actual!r}, expected {expected!r}")
++
++    if args.preflight_only:
++        scan_raw_token_lengths(
++            rows,
++            tokenizer,
++            args.seq_length,
++            raw_data=args.raw_data,
++            filtered_output=args.filter_overlength_to,
++        )
++        return
++
++    paths = artifact_paths(args.data_prefix)
++    missing = [str(path) for path in paths if not path.is_file() or path.stat().st_size == 0]
++    if missing:
++        raise FileNotFoundError(f"Missing/empty dataset artifacts: {missing}")
++
++    datasets = {
++        key: IndexedDataset(f"{args.data_prefix}_{key}_document")
++        for key in ("input_ids", "attention_mask", "labels")
++    }
++    lengths = {key: len(dataset) for key, dataset in datasets.items()}
++    if set(lengths.values()) != {len(rows)}:
++        raise ValueError(f"Dataset document counts do not match raw rows: {lengths}")
++
++    token_lengths = []
++    prompt_lengths = []
++    target_lengths = []
++    for index, row in enumerate(rows):
++        expected_prompt_ids, expected_target_ids = encode_expected(row, tokenizer)
++        expected_document_length = len(expected_prompt_ids) + len(expected_target_ids)
++        if expected_document_length >= args.seq_length:
++            raise ValueError(
++                f"Raw document {index} (JSONL line {index + 1}) has "
++                f"prompt={len(expected_prompt_ids)}, assistant={len(expected_target_ids)}, "
++                f"total={expected_document_length} tokens; seq-length={args.seq_length} would "
++                "truncate it. Run this verifier with --preflight-only for the full summary."
++            )
++
++        input_ids = datasets["input_ids"][index]
++        attention_mask = datasets["attention_mask"][index]
++        labels = datasets["labels"][index]
++
++        if not (len(input_ids) == len(attention_mask) == len(labels)):
++            raise ValueError(f"Field length mismatch at document {index}")
++        if len(input_ids) >= args.seq_length:
++            raise ValueError(
++                f"Document {index} has {len(input_ids)} tokens and would be dropped at seq-length {args.seq_length}"
++            )
++        if not np.all(attention_mask == 1):
++            raise ValueError(f"Unexpected pre-collator attention mask at document {index}")
++
++        supervised = np.flatnonzero(labels != IGNORE_INDEX)
++        if supervised.size == 0 or supervised[0] == 0:
++            raise ValueError(f"Missing prompt mask at document {index}")
++        first_target = int(supervised[0])
++        if np.any(labels[:first_target] != IGNORE_INDEX) or np.any(labels[first_target:] == IGNORE_INDEX):
++            raise ValueError(f"Loss mask is not prompt-only at document {index}")
++        if not np.array_equal(input_ids[first_target:], labels[first_target:]):
++            raise ValueError(f"Supervised labels differ from input IDs at document {index}")
++
++        if input_ids[:first_target].tolist() != expected_prompt_ids:
++            raise ValueError(f"DeepSeek-V4 non-thinking prompt mismatch at document {index}")
++        if labels[first_target:].tolist() != expected_target_ids:
++            raise ValueError(f"Assistant output token mismatch at document {index}")
++
++        token_lengths.append(len(input_ids))
++        prompt_lengths.append(first_target)
++        target_lengths.append(len(input_ids) - first_target)
++
++    artifacts = {
++        path.name: {"bytes": path.stat().st_size, "sha256": sha256_file(path)} for path in paths
++    }
++    manifest = {
++        "format": "MindSpeed LLM indexed instruction dataset",
++        "handler": "AlpacaStyleInstructionHandler",
++        "prompt_type": "deepseek4",
++        "enable_thinking": False,
++        "train_on_prompt": False,
++        "packing": False,
++        "seq_length": args.seq_length,
++        "documents": len(rows),
++        "raw_data": str(args.raw_data.resolve()),
++        "raw_sha256": raw_sha256,
++        "tokenizer_path": str(args.tokenizer_path.resolve()),
++        "tokenizer_json_sha256": sha256_file(args.tokenizer_path / "tokenizer.json"),
++        "tokens": {
++            "total": int(sum(token_lengths)),
++            "minimum": int(min(token_lengths)),
++            "maximum": int(max(token_lengths)),
++            "prompt_total": int(sum(prompt_lengths)),
++            "assistant_total": int(sum(target_lengths)),
++            "assistant_minimum": int(min(target_lengths)),
++            "assistant_maximum": int(max(target_lengths)),
++        },
++        "artifacts": artifacts,
++    }
++
++    if args.manifest:
++        args.manifest.parent.mkdir(parents=True, exist_ok=True)
++        args.manifest.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
++
++    print(
++        "Validated DeepSeek-V4 non-thinking SFT data: "
++        f"documents={len(rows)}, total_tokens={sum(token_lengths)}, "
++        f"max_tokens={max(token_lengths)}, assistant_tokens={sum(target_lengths)}"
++    )
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/mindspeed_llm/training/checkpointing.py b/mindspeed_llm/training/checkpointing.py
+index 5af69ba54798949bab799c0380cafa3672a3ff77..38a374d1a800b95dd89305a5afaa9f2c29f6ece6 100644
+--- a/mindspeed_llm/training/checkpointing.py
++++ b/mindspeed_llm/training/checkpointing.py
+@@ -82,26 +82,38 @@ def _load_base_checkpoint_wrapper(fn):
+     """
+ 
+     @wraps(fn)
+-    def wrapper(*args, **kwargs):
++    def wrapper(load_dir, args, rank0=False, **kwargs):
+         args_ = get_args()
+-        if getattr(args_, 'is_load_refer', False):
++        is_reference = getattr(args_, 'is_load_refer', False)
++        lora_load = args_.lora_load if is_enable_lora() and not is_reference else None
++        if is_reference:
+             kwargs['checkpointing_context'] = args_.refer_model_iter
+-        state_dict, checkpoint_name, release, ckpt_type = fn(*args, **kwargs)
+-        rank0 = kwargs.pop('rank0')
++        # load_checkpoint uses the adapter directory for all training state;
++        # frozen model weights still come from --load.
++        if lora_load and load_dir == lora_load:
++            load_dir = args_.load
++        state_dict, checkpoint_name, release, ckpt_type = fn(load_dir, args, rank0=rank0, **kwargs)
++        if lora_load and state_dict is None:
++            raise FileNotFoundError(f'Cannot load the LoRA backbone checkpoint from {load_dir}')
+         if is_enable_lora() and state_dict is not None:
+             words_to_match = {'weight': 'base_layer.weight', 'bias': 'base_layer.bias'}
+             exclude_words = ['base_layer', 'lora_', 'norm']
+             state_dict = modify_keys_with_dict(state_dict, words_to_match, exclude_words)
+ 
+-            if not args_.lora_load or getattr(args_, 'is_load_refer', False):
+-                return state_dict, checkpoint_name, release, None
+-
+-            # Read the tracker file and set the iteration.
+-            state_dict_lora, checkpoint_name_lora, release_lora, ckpt_type_lora = fn(args_.lora_load, args_, rank0)
+-            if state_dict_lora is not None:
+-                merge_dicts(state_dict, state_dict_lora)
+-                checkpoint_name = checkpoint_name_lora
+-                release = release_lora
++            if not lora_load:
++                return state_dict, checkpoint_name, release, ckpt_type
++
++            state_dict_lora, checkpoint_name, release, ckpt_type = fn(lora_load, args_, rank0=rank0, **kwargs)
++            if state_dict_lora is None:
++                raise FileNotFoundError(f'Cannot load the LoRA checkpoint from {lora_load}')
++            if not args_.finetune and not hasattr(state_dict_lora.get('args'), 'consumed_train_samples'):
++                raise RuntimeError('LoRA resume requires checkpoint arguments with consumed_train_samples')
++            # Merge only model tensors. Optimizer, RNG and progress must not
++            # fall back to state from the pretrained backbone.
++            for key in state_dict:
++                if key == 'model' or (key.startswith('model') and key[5:].isdigit()):
++                    state_dict_lora[key] = merge_dicts(state_dict[key], state_dict_lora[key])
++            state_dict = state_dict_lora
+         return state_dict, checkpoint_name, release, ckpt_type
+ 
+     return wrapper
+@@ -126,15 +138,19 @@ def load_checkpoint_wrapper(fn):
+     """
+ 
+     @wraps(fn)
+-    # Preserve the wrapped Megatron API, which accepts strict positionally.
+-    # pylint: disable-next=keyword-arg-before-vararg
+-    def wrapper(ddp_model, optimizer, opt_param_scheduler, strict=True, *args, **kwargs):
++    def wrapper(ddp_model, optimizer, opt_param_scheduler, load_arg='load', strict=True,
++                checkpointing_context=None, skip_load_to_model_and_opt=False):
+         if load_checkpoint_loosely():
+             strict = False
+         args_ = get_args()
++        if (is_enable_lora() and args_.lora_load and load_arg == 'load'
++                and not getattr(args_, 'is_load_refer', False)):
++            load_arg = 'lora_load'
+         if not getattr(args_, "use_torch_fsdp2", False):
+             ddp_model = unwrap_model(ddp_model)
+-        return fn(ddp_model, optimizer, opt_param_scheduler, strict=strict, *args, **kwargs)
++        return fn(ddp_model, optimizer, opt_param_scheduler, load_arg=load_arg, strict=strict,
++                  checkpointing_context=checkpointing_context,
++                  skip_load_to_model_and_opt=skip_load_to_model_and_opt)
+ 
+     return wrapper
+ 
+@@ -411,13 +427,17 @@ def save_checkpoint_wrapper(fn):
+             if torch.distributed.is_initialized():
+                 torch.distributed.barrier()
+ 
+-        # Update tracker file with latest iteration (rank0 only).
+-        if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
++        # Node-local storage also needs a tracker on each node. Legacy shards
++        # have all finished writing at the barrier above.
++        write_local_tracker = args.no_shared_storage and not args.use_dist_ckpt and args.local_rank == 0
++        if not torch.distributed.is_initialized() or rank == 0 or write_local_tracker:
+             tracker_filename = get_checkpoint_tracker_filename(args.save)
+ 
+             def iter_finalize_fn():
+-                with open(tracker_filename, 'w', encoding='utf-8') as f:
++                temporary_tracker = f'{tracker_filename}.tmp.{rank}'
++                with open(temporary_tracker, 'w', encoding='utf-8') as f:
+                     f.write(str(iteration))
++                os.replace(temporary_tracker, tracker_filename)
+                 print_rank_0('  successfully saved checkpoint from iteration {:7d} to {}'.format(iteration, args.save))
+                 if args.log_progress and args.async_save:
+                     append_to_progress_log(f'Saved async checkpoint\tIteration: {iteration}', barrier=False)
+diff --git a/tests/tools/ckpt_dequant/deepseekv4_ckpt_dequant.py b/tests/tools/ckpt_dequant/deepseekv4_ckpt_dequant.py
+index 57d24832f8d0606c55d887673bc9e3fa4cad48f1..77260766fcecde9a513cfc9404639d4b79f705af 100644
+--- a/tests/tools/ckpt_dequant/deepseekv4_ckpt_dequant.py
++++ b/tests/tools/ckpt_dequant/deepseekv4_ckpt_dequant.py
+@@ -2,13 +2,14 @@
+ # Copyright (c) 2026 Huawei Technologies Co., Ltd.
+ 
+ import json
++import logging
+ import math
+ import os
+ import sys
+ import re
+ import shutil
+ from argparse import ArgumentParser
+-from glob import glob
++from pathlib import Path
+ from scipy.linalg import hadamard
+ import numpy as np
+ import torch
+@@ -19,8 +20,6 @@ CUR_DIR = os.path.dirname(__file__)
+ ROOT_DIR = os.path.realpath(os.path.join(CUR_DIR, "../../../"))
+ sys.path.append(ROOT_DIR)
+ 
+-from tests.tools.ckpt_dequant.mx_quantize import quantize_mx, pack_uint4, unpack_uint4, f4_unpacked_to_f32, f32_to_f4_unpacked
+-
+ 
+ NUM_BITS_4 = 4
+ NUM_BITS_8 = 8
+@@ -51,6 +50,12 @@ def weight_dequant(weight: torch.Tensor, scale: torch.Tensor, block_size: int =
+     scale = scale.to(torch.float32)
+ 
+     if is_mx:
++        expected_scale_shape = (M, (N + block_size - 1) // block_size)
++        if tuple(scale.shape) != expected_scale_shape:
++            raise ValueError(
++                f"Mismatch in MX scale shape: expected {expected_scale_shape} for "
++                f"weight shape {(M, N)}, got {tuple(scale.shape)}."
++            )
+         scale_expanded = scale.repeat_interleave(block_size, dim=1)
+     else:
+         # Compute the effective block dimensions for scale
+@@ -231,7 +236,33 @@ def copy_py_json(src, target):
+                 shutil.copy2(src_path, dst_path)
+ 
+ 
+-def main(fp8_path, output_path, quant_type, quant_param_path=None):
++def _validate_flash_0731_input(src: Path, dst: Path) -> None:
++    if src == dst or src in dst.parents:
++        raise SystemExit("Output directory must be separate from the input checkpoint directory.")
++    if dst.exists() and any(dst.iterdir()):
++        raise SystemExit(f"Output directory is not empty: {dst}")
++
++    config = json.loads((src / "config.json").read_text(encoding="utf-8"))
++    if config.get("model_type") != "deepseek_v4" or config.get("num_hidden_layers") != 43:
++        raise SystemExit("Input must be a 43-layer DeepSeek-V4-Flash checkpoint.")
++    quant_config = config.get("quantization_config", {})
++    expected_quant = {
++        "quant_method": "fp8",
++        "fmt": "e4m3",
++        "scale_fmt": "ue8m0",
++        "weight_block_size": [128, 128],
++    }
++    if config.get("expert_dtype") != "fp4" or any(
++        quant_config.get(key) != value for key, value in expected_quant.items()
++    ):
++        raise SystemExit("Input must use the supported mixed FP8/FP4 format with UE8M0 scales.")
++
++    index_path = src / "model.safetensors.index.json"
++    if not json.loads(index_path.read_text(encoding="utf-8"))["weight_map"]:
++        raise SystemExit("The safetensors weight map is empty.")
++
++
++def main(fp8_path, output_path, quant_type, quant_param_path=None, strict=False):
+     """
+     Converts FP8 weights to BF16 and saves the converted weights.
+ 
+@@ -271,6 +302,15 @@ def main(fp8_path, output_path, quant_type, quant_param_path=None):
+     is_quant = w8a8 or w4a8 or w4a4
+     is_w4 = w4a8 or w4a4
+ 
++    if is_quant and mx:
++        # torchao is only required when producing a new MX-quantized checkpoint;
++        # pure FP8/FP4 -> BF16 dequantization does not depend on it.
++        from tests.tools.ckpt_dequant.mx_quantize import (
++            f32_to_f4_unpacked,
++            pack_uint4,
++            quantize_mx,
++        )
++
+     if is_quant:
+         cache_scheme = {"kv_cache_scheme": {"num_bits": NUM_BITS_8, "type": "float"} if mx else None,
+                         "li_cache_scheme": {
+@@ -291,6 +331,10 @@ def main(fp8_path, output_path, quant_type, quant_param_path=None):
+     quant_layers = generate_quant_layers(num_layers, num_experts, compress_ratios, is_w4=is_w4, is_mx=mx)
+     # Cache for loaded safetensor files
+     loaded_files = {}
++    dequant_fp8_count = 0
++    dequant_fp4_count = 0
++    seen_input_weight_map = {}
++    used_scale_names = set()
+ 
+     # Helper function to get tensor from the correct file
+     def get_tensor(tensor_name):
+@@ -312,8 +356,9 @@ def main(fp8_path, output_path, quant_type, quant_param_path=None):
+             loaded_files[file_name] = load_file(file_path, device="cpu")
+         return loaded_files[file_name][tensor_name]
+ 
+-    safetensor_files = list(glob(os.path.join(fp8_path, "*.safetensors")))
+-    safetensor_files.sort()
++    # Process exactly the shards declared by the index. Directory globbing can
++    # accidentally include stale or unrelated safetensors files.
++    safetensor_files = [os.path.join(fp8_path, name) for name in sorted(set(weight_map.values()))]
+     for safetensor_file in tqdm(safetensor_files):
+         file_name = os.path.basename(safetensor_file)
+         current_state_dict = load_file(safetensor_file, device="cpu")
+@@ -321,21 +366,50 @@ def main(fp8_path, output_path, quant_type, quant_param_path=None):
+ 
+         new_state_dict = {}
+         for weight_name, weight in current_state_dict.items():
++            if strict and weight_name in seen_input_weight_map:
++                raise ValueError(
++                    f"Duplicate input tensor {weight_name} in {seen_input_weight_map[weight_name]} and {file_name}."
++                )
++            seen_input_weight_map[weight_name] = file_name
+             if weight_name.endswith(".scale"):
+                 continue
+             elif weight.element_size() == 1:
+-                # FP8 weight
+-                scale_inv_name = weight_name.replace('.weight', '.scale')
++                # The 0731 checkpoint stores either E4M3 FP8 weights or packed
++                # E2M1 FP4 weights (as int8). Both must have a sibling UE8M0
++                # scale tensor.
++                if strict and not weight_name.endswith(".weight"):
++                    raise ValueError(f"Unexpected one-byte tensor without a .weight suffix: {weight_name}")
++                scale_inv_name = weight_name[:-len(".weight")] + ".scale"
+                 try:
+                     # Get scale_inv from the correct file
+                     scale_inv = get_tensor(scale_inv_name)
++                    used_scale_names.add(scale_inv_name)
++                    if strict and str(scale_inv.dtype) != "torch.float8_e8m0fnu":
++                        raise TypeError(
++                            f"Unexpected scale dtype for {scale_inv_name}: {scale_inv.dtype}; "
++                            "expected torch.float8_e8m0fnu."
++                        )
+                     if weight.dtype == torch.int8:
+                         weight = unpack_mxfloat4_to_fp32(weight.view(torch.uint8))
+                         weight = weight_dequant(weight, scale_inv, block_size=32, is_mx=True)
++                        dequant_fp4_count += 1
+                     else:
++                        if strict and str(weight.dtype) != "torch.float8_e4m3fn":
++                            raise TypeError(
++                                f"Unexpected one-byte weight dtype for {weight_name}: {weight.dtype}; "
++                                "expected torch.float8_e4m3fn or torch.int8."
++                            )
+                         weight = weight_dequant(weight, scale_inv)
+-                except KeyError:
+-                    import logging
++                        dequant_fp8_count += 1
++                    if strict and weight.dtype != torch.bfloat16:
++                        raise TypeError(
++                            f"Dequantized tensor {weight_name} has dtype {weight.dtype}, expected bfloat16."
++                        )
++                    if strict and not torch.isfinite(weight).all().item():
++                        raise ValueError(f"Dequantized tensor {weight_name} contains NaN or Inf values.")
++                except KeyError as exc:
++                    if strict:
++                        raise KeyError(f"Missing scale tensor {scale_inv_name} for {weight_name}") from exc
+                     logging.warning(f"Missing scale_inv tensor for {weight_name}, skipping conversion")
+                 new_state_dict[weight_name] = weight
+                 new_weight_map[weight_name] = file_name
+@@ -371,8 +445,48 @@ def main(fp8_path, output_path, quant_type, quant_param_path=None):
+             oldest_file = next(iter(loaded_files))
+             del loaded_files[oldest_file]
+ 
++    if strict and seen_input_weight_map != weight_map:
++        missing = sorted(set(weight_map) - set(seen_input_weight_map))
++        extra = sorted(set(seen_input_weight_map) - set(weight_map))
++        misplaced = sorted(
++            key for key in set(weight_map) & set(seen_input_weight_map)
++            if weight_map[key] != seen_input_weight_map[key]
++        )
++        raise ValueError(
++            "Input safetensors index/header mismatch: "
++            f"missing={len(missing)}, extra={len(extra)}, misplaced={len(misplaced)}."
++        )
++
++    if strict:
++        input_scale_names = {key for key in weight_map if key.endswith(".scale")}
++        if used_scale_names != input_scale_names:
++            missing = sorted(input_scale_names - used_scale_names)
++            extra = sorted(used_scale_names - input_scale_names)
++            raise ValueError(
++                "Quantization scale pairing is not one-to-one: "
++                f"unused_scales={len(missing)} {missing[:10]}, unknown_scales={len(extra)} {extra[:10]}."
++            )
++
++        expected_output_keys = {key for key in weight_map if not key.endswith(".scale")}
++        actual_output_keys = set(new_weight_map)
++        if actual_output_keys != expected_output_keys:
++            missing = sorted(expected_output_keys - actual_output_keys)
++            extra = sorted(actual_output_keys - expected_output_keys)
++            raise ValueError(
++                "Unexpected BF16 output key set: "
++                f"missing={len(missing)}, extra={len(extra)}."
++            )
++
+     copy_py_json(fp8_path, output_path)
+ 
++    if quant_type == "bfloat16":
++        # The output no longer contains quantized weights or scale tensors. Keep
++        # the copied HuggingFace metadata consistent with the converted files.
++        config.pop("quantization_config", None)
++        if config.get("expert_dtype") in ("fp4", "fp8"):
++            config["expert_dtype"] = None
++        config["torch_dtype"] = "bfloat16"
++
+     # Update model index
+     new_model_index_file = os.path.join(
+         output_path, "model.safetensors.index.json")
+@@ -383,6 +497,11 @@ def main(fp8_path, output_path, quant_type, quant_param_path=None):
+     with open(new_config_file, "w") as f:
+         json.dump(config, f, indent=2)
+ 
++    print(
++        f"Converted {dequant_fp8_count} FP8 tensors and "
++        f"{dequant_fp4_count} packed FP4 tensors to {quant_type}."
++    )
++
+ 
+ if __name__ == "__main__":
+     parser = ArgumentParser()
+@@ -391,7 +510,23 @@ if __name__ == "__main__":
+     parser.add_argument("--quant_type", type=str, default="w8a8-int",
+                         choices=["w8a8-int", "w8a8-mx", "bfloat16", "w4a8-mx", "w4a4-mx"])
+     parser.add_argument("--quant_param_path", type=str, default=None)
++    parser.add_argument(
++        "--strict",
++        action="store_true",
++        help="Fail instead of leaving a quantized tensor unchanged when its scale is missing.",
++    )
++    parser.add_argument(
++        "--validate-flash-0731",
++        action="store_true",
++        help="Validate Flash-0731 input metadata and require a separate, empty output directory.",
++    )
+     args = parser.parse_args()
+ 
++    if args.validate_flash_0731:
++        args.input_fp8_hf_path = str(Path(args.input_fp8_hf_path).resolve())
++        args.output_hf_path = str(Path(args.output_hf_path).resolve())
++        _validate_flash_0731_input(Path(args.input_fp8_hf_path), Path(args.output_hf_path))
+     main(args.input_fp8_hf_path, args.output_hf_path,
+-         args.quant_type, args.quant_param_path)
++         args.quant_type, args.quant_param_path, args.strict)
++    if args.validate_flash_0731 and args.quant_type == "bfloat16":
++        print(f"BF16 HuggingFace checkpoint is ready: {args.output_hf_path}")
