@@ -28,8 +28,8 @@
 
 - [2026/09] 新增 [DeepSpec DSpark草稿模型训练支持](llm_sft/DeepSpec/README.md)样例，在 Atlas A3上完成开源DSpark同结构草稿模型训练
 - [2026/09] 新增 [鲲鹏CPU、昇腾950与灵衢协同的 Agentic RL 训练实践](docs/llm_rl/kunpeng_ascend_agentic_rl_infrastructure.md)，支持 AgentENV 沙箱与多 Harness 训练，实现 DSV4 Flash 训推bitwise对齐 MXFP8/MXFP4 低精度训练与长序列等特性。
-- [2026/09] 新增 [DeepSeek-V4.1-Flash 模型续训练支持](llm_pretrain/deepseek_v4_1/README.md)样例，基于 Atlas A5 + TorchTitan-NPU + AutoFuse + MXFP8 低精度，使能 **训练入图、AutoFuse**
-- [2026/09] 新增 [基于昇腾950超节点的万亿MoE模型预训练系统参考实践](docs/llm_pretrain/ascend950_superpod_moe_pretrain_system_reference.md)
+- [2026/09] 新增 [基于昇腾950超节点的万亿MoE模型预训练系统参考实践](docs/llm_pretrain/ascend950_superpod_moe_pretrain_system_reference.md)，围绕**超大规模、超长序列、多模态、高可用训练及训练开发者效率提升**等复杂场景提供系统参考实践。
+- [2026/09] 新增 [DeepSeek-V4.1-Flash 模型CPT/SFT支持](llm_pretrain/deepseek_v4_1/README.md)样例，基于 TorchTitan-NPU + TorchAO-NPU，在 **Ascend950 64 卡**集群完成全参模型低精度训练复现
 - [2026/09] 新增 [Qwen3.6-27B 模型 AscendC 算子生成监督微调支持](llm_sft/qwen36_ascendc/torchtitan/README.md)，包括 [TorchTitan-NPU 样例](llm_sft/qwen36_ascendc/torchtitan/README.md)和 [MindSpeed-MM 样例](llm_sft/qwen36_ascendc/mindspeed-mm/README.md)
 - [2026/08] 新增 [DeepSeek-V4-Flash HiF8 低精度预训练](llm_pretrain/deepseekv4/README.md#deepseek-v4-flash-a5-hif8-%E4%BD%8E%E7%B2%BE%E5%BA%A6%E8%AE%AD%E7%BB%83)样例，在 Atlas A5 上使能单卡 HiF8 低精度预训练
 - [2026/05] 新增 [DeepSeek-V4-Pro 模型续训练支持](llm_pretrain/deepseekv4/README.md)，基于 TorchTitan-NPU + AutoFuse，使能 **训练入图、AutoFuse**
@@ -195,6 +195,7 @@ flowchart TB
 
 | 阶段 | 原子化特性 | 解决什么问题 | 代表样例 / 文档 |
 |------|------------|--------------|------------------|
+| 预训练 / 续训练/ SFT | 1M序列/多模态理解/Engram等Offload/Profile-aware通算掩盖 | 超长序列内存、负载均衡问题；参数、梯度、Engram完全offload到Host侧，减少Device内存占用；优化整网通信占比| [基于昇腾950超节点的万亿MoE模型预训练系统参考实践](docs/llm_pretrain/ascend950_superpod_moe_pretrain_system_reference.md) |
 | 预训练 / 续训练 | 训练入图（torch.compile + AutoFuse） | 降低 Python 调度与小算子启动开销，提升训练执行效率 | [DeepSeek-V4 训练优化文档](docs/llm_pretrain/deepseek-v4_torchtitan_npu_autofuse.md) |
 | 预训练 / 续训练 | 大规模并行训练（TP / PP / EP / CP / FSDP2） | 支撑超大模型在多机多卡上的显存切分、长序列训练和计算扩展 | [DeepSeek-V4](llm_pretrain/deepseekv4/README.md)、[DeepSeek-V3.2](llm_pretrain/deepseekv32/README.md) |
 | 预训练 / 续训练 | 低精度训练（MXFP8 / HiF8） | 通过低精度数据格式兼顾显存、吞吐与训练精度 | [DeepSeek-V3 低精度训练文档](docs/llm_pretrain/deepseek-v3_pre_train_hif8_mxfp8.md) |
@@ -217,6 +218,7 @@ flowchart TB
 
 | 样例 | 场景说明 |
 |------|----------|
+| [DeepSeek-V4.1-Flash](llm_pretrain/deepseekv4/README.md) | 基于TorchTitan-NPU + TorchAO-NPU 的 mxFP8 低精度训练，使能torch.compile + Ascend C算子自动融合，在64卡Ascend 950集群完成CPT训练 |
 | [DeepSeek-V4-Flash / Pro](llm_pretrain/deepseekv4/README.md) | TorchTitan-NPU + AutoFuse 续训练，覆盖训练入图与大规模并行训练路径 |
 | [DeepSeek-V3.2 32K 长序列预训练](llm_pretrain/deepseekv32/README.md) | 基于 TorchTitan-NPU 的 32K 长序列预训练适配与性能复现 |
 | [DeepSeek-V3 MXFP8 / HiF8](llm_pretrain/DeepSeekV3/README.md) | 基于 MindSpeed 的低精度预训练样例，聚焦 MXFP8 / HiF8 训练实践 |
@@ -232,6 +234,7 @@ flowchart TB
 | [Qwen3-30B-A3B 医学 SFT](llm_sft/qwen3_30b_a3b/README.md) | 基于 TorchTitan-NPU 的医学领域多卡全参微调与效果评测样例 |
 | [Qwen3.6-27B Ascend C 算子生成](llm_sft/qwen36_ascendc/torchtitan/README.md) | 基于 TorchTitan-NPU 的 8 卡 910C（16 die）、CP8 × FSDP2 全参数监督微调样例 |
 | [Qwen3.6-27B Ascend C 算子生成](llm_sft/qwen36_ascendc/mindspeed-mm/README.md) | 基于 MindSpeed-MM 的 8 卡 910C（16 die）、CP8 × FSDP2 全参数及 LoRA 监督微调样例 |
+| [DeepSeek-V4.1-Flash](llm_sft/deepseekv4/README.md) | 基于TorchTitan-NPU + TorchAO-NPU 的 mxFP8 低精度训练，使用多模态数据集，在64卡Ascend 950集群完成全参数监督微调 |
 
 #### 强化学习训练
 
