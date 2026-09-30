@@ -47,6 +47,7 @@ bash build_project_platform.sh
 
 # 进入对应目录
 cd MindSpeed-LLM
+pip install pyarrow==21.0.0
 ```
 
 ## 数据集准备

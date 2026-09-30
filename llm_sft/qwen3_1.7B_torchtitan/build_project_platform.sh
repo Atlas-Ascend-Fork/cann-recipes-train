@@ -19,7 +19,7 @@ git checkout "$TORCHTITAN_NPU_REV"
 echo "Repo: $repo"
 echo "Commit: $(git rev-parse HEAD)"
 
-source /home/developer/Ascend/cann-9.1.0/set_env.sh
+source /home/developer/Ascend/cann-9.0.0/set_env.sh
 
 pip install -r requirements.txt
 pip install -e .

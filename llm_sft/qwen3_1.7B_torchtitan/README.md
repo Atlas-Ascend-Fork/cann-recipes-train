@@ -1,13 +1,13 @@
 # Qwen3-1.7B SFT训练示例
 
 ## 硬件要求
-卡数：1张A2
+卡数：1张A2/1张A3
 
 
 ## 一站式平台快速启动SFT训练示例
 
 ### 环境要求
-一站式平台模板选择：cann_master-py3.12-A2-arm-20260630
+一站式平台模板选择：cann_9.0.0-py3.11-A2-arm-20260715/cann_9.0.0-py3.11-A3-arm-20260715
 
 ### 项目及依赖构建
 在当前目录下（cann-recipes-train/llm_sft/qwen3_1.7B_torchtitan/）执行:
@@ -27,9 +27,9 @@ step: 1  loss: <finite>  grad_norm: <finite>
 Training completed
 
 
-注：需要按照实际情况在以上脚本中修改 ascend-toolkit 路径, 一站式平台需要修改（以CANN 9.1.0为例）：
+注：需要按照实际情况在以上脚本中修改 ascend-toolkit 路径, 一站式平台需要修改（以CANN 9.0.0为例）：
 ```
-/home/developer/Ascend/cann-9.1.0/set_env.sh
+/home/developer/Ascend/cann-9.0.0/set_env.sh
 ```
 
 ## 模型权重准备
@@ -165,7 +165,7 @@ find "$dst" -maxdepth 1 -type f -printf '%f\n' | sort
 
 ### 3. 启动推理服务
 ```bash
-source /home/developer/Ascend/cann-9.1.0/set_env.sh
+source /home/developer/Ascend/cann-9.0.0/set_env.sh
 # 关闭已有推理服务（可选）
 pkill -f infer_server.py || true
 

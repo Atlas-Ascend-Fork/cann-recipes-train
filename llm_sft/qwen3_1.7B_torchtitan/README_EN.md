@@ -2,13 +2,13 @@
 
 ## Hardware Requirements
 
-Number of cards: 1 A2
+Number of cards: 1 A2 or 1 A3
 
 ## Quick Start for SFT Training on the One-Stop Platform
 
 ### Environment Requirements
 
-Select the following one-stop platform template: `cann_master-py3.12-A2-arm-20260630`
+Select the following one-stop platform template: cann_9.0.0-py3.11-A2-arm-20260715/cann_9.0.0-py3.11-A3-arm-20260715
 
 ### Project and Dependency Setup
 
@@ -30,10 +30,10 @@ visible dies: 2
 step: 1  loss: <finite>  grad_norm: <finite>
 Training completed
 
-Note: Update the `ascend-toolkit` path in the scripts above according to your environment. On the one-stop platform, modify it as follows (using CANN 9.1.0 as an example):
+Note: Update the `ascend-toolkit` path in the scripts above according to your environment. On the one-stop platform, modify it as follows (using CANN 9.0.0 as an example):
 
 ```
-/home/developer/Ascend/cann-9.1.0/set_env.sh
+/home/developer/Ascend/cann-9.0.0/set_env.sh
 ```
 
 ## Preparing Model Weights
@@ -174,7 +174,7 @@ find "$dst" -maxdepth 1 -type f -printf '%f\n' | sort
 ### 3. Start the Inference Service
 
 ```bash
-source /home/developer/Ascend/cann-9.1.0/set_env.sh
+source /home/developer/Ascend/cann-9.0.0/set_env.sh
 # Stop an existing inference service (optional)
 pkill -f infer_server.py || true
 

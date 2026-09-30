@@ -51,6 +51,7 @@ bash build_project_platform.sh
 
 # Enter the corresponding directory
 cd MindSpeed-LLM
+pip install pyarrow==21.0.0
 ```
 
 ## Dataset Preparation
