@@ -187,13 +187,15 @@ PROFILE_ARGS="
 --profile-save-path ./A5_dsk3_8P_hif8_tp1ep8cp1_profiling_8k_gbs64_2layers
 "
 
-python -m torch.distributed.launch $DISTRIBUTED_ARGS pretrain_gpt.py
-$PROFILE_ARGS
-$FP8
-$GPT_ARGS
-$DATA_ARGS
-$OUTPUT_ARGS
-$MLA_ARGS
-$ROPE_ARGS
-$MOE_ARGS
---distributed-backend nccl | tee ./A5_dsk3_8P_hif8_tp1ep8cp1_profiling_8k_gbs64_2layers.log
+set -o pipefail
+
+python -m torch.distributed.launch $DISTRIBUTED_ARGS pretrain_gpt.py \
+    $PROFILE_ARGS \
+    $FP8 \
+    $GPT_ARGS \
+    $DATA_ARGS \
+    $OUTPUT_ARGS \
+    $MLA_ARGS \
+    $ROPE_ARGS \
+    $MOE_ARGS \
+    --distributed-backend nccl | tee ./A5_dsk3_8P_hif8_tp1ep8cp1_profiling_8k_gbs64_2layers.log
