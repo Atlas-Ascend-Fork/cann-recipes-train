@@ -24,9 +24,9 @@
 - **[DeepSeek-V4.1 Engram：大容量记忆表的分布式训练](ascend950/engram.md)**：结合 Host 存储、EP × EFSDP 联合分片、MXFP8 查表与 CPU 稀疏更新，支持 DeepSeek-V4.1-Flash 大容量记忆表训练。
 - **[GraphTrainer：Profile-aware 通算掩盖与图级 Cube–Vector 并行](ascend950/graphtrainer.md)**：基于静态图依赖与设备 Profile 编排 EP 通信和计算，并通过图级 Cube–Vector 并行减少串行等待。
 
-## 3、基于DeepSeek的昇腾950低精度量化训练实践
+## 3、TorchAO-NPU低精度量化训练实践
 
-- **[基于DeepSeek的昇腾950低精度量化训练实践](ascend950/low_precision_training.md)**：基于 TorchAO-NPU 接入低精度矩阵乘、Attention 融合算子与量化感知训练，并通过 FSDP 权重预量化复用通信载荷与计算输入，实现计算与通信协同优化。
+- **[昇腾950低精度量化训练实践](ascend950/low_precision_training.md)**：基于 TorchAO-NPU 接入低精度矩阵乘、Attention 融合算子与量化感知训练，并通过 FSDP 权重预量化复用通信载荷与计算输入，实现计算与通信协同优化。
 
 ## 4、1M长上下文训练
 
