@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="550" viewBox="0 0 980 550" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="14">
+  <defs>
+    <marker id="a-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/></marker>
+    <marker id="a-orange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#d97706"/></marker>
+    <marker id="a-gray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#6b7280"/></marker>
+  </defs>
+  <rect width="980" height="550" fill="#ffffff"/>
+  <text x="20" y="30" font-size="17" font-weight="bold" fill="#111827">图 1　进程模型：Ray 总控下的 SPMD</text>
+
+  <!-- main control process -->
+  <rect x="200" y="42" width="400" height="84" rx="8" fill="#eff6ff" stroke="#2563eb" stroke-width="1.5"/>
+  <text x="400" y="62" text-anchor="middle" font-weight="bold" fill="#1e3a8a">主控进程（train.py）</text>
+  <rect x="240" y="72" width="320" height="44" rx="6" fill="#dbeafe" stroke="#2563eb" stroke-width="1.5"/>
+  <text x="400" y="90" text-anchor="middle" font-weight="bold" fill="#1e3a8a">RayTrainGroup</text>
+  <text x="400" y="108" text-anchor="middle" font-size="12" fill="#1e3a8a">创建全部训练 actor；一次调用分发给全部 actor</text>
+
+  <!-- actors -->
+  <g>
+    <rect x="30" y="180" width="170" height="150" rx="8" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.5"/>
+    <text x="115" y="202" text-anchor="middle" font-weight="bold" fill="#14532d">Ray actor 进程</text>
+    <text x="115" y="222" text-anchor="middle" fill="#14532d">rank 0</text>
+    <rect x="45" y="234" width="140" height="28" rx="4" fill="#ffffff" stroke="#16a34a"/>
+    <text x="115" y="253" text-anchor="middle" font-size="12">TorchTitanTrainRayActor</text>
+    <rect x="45" y="268" width="140" height="28" rx="4" fill="#ffffff" stroke="#16a34a"/>
+    <text x="115" y="287" text-anchor="middle" font-size="12">TitanEngine</text>
+    <text x="115" y="318" text-anchor="middle" font-size="12" fill="#374151">NPU 0</text>
+  </g>
+  <g>
+    <rect x="220" y="180" width="170" height="150" rx="8" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.5"/>
+    <text x="305" y="202" text-anchor="middle" font-weight="bold" fill="#14532d">Ray actor 进程</text>
+    <text x="305" y="222" text-anchor="middle" fill="#14532d">rank 1</text>
+    <rect x="235" y="234" width="140" height="28" rx="4" fill="#ffffff" stroke="#16a34a"/>
+    <text x="305" y="253" text-anchor="middle" font-size="12">TorchTitanTrainRayActor</text>
+    <rect x="235" y="268" width="140" height="28" rx="4" fill="#ffffff" stroke="#16a34a"/>
+    <text x="305" y="287" text-anchor="middle" font-size="12">TitanEngine</text>
+    <text x="305" y="318" text-anchor="middle" font-size="12" fill="#374151">NPU 1</text>
+  </g>
+  <text x="430" y="260" text-anchor="middle" font-size="22" fill="#6b7280">…</text>
+  <g>
+    <rect x="470" y="180" width="170" height="150" rx="8" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.5"/>
+    <text x="555" y="202" text-anchor="middle" font-weight="bold" fill="#14532d">Ray actor 进程</text>
+    <text x="555" y="222" text-anchor="middle" fill="#14532d">rank N-1</text>
+    <rect x="485" y="234" width="140" height="28" rx="4" fill="#ffffff" stroke="#16a34a"/>
+    <text x="555" y="253" text-anchor="middle" font-size="12">TorchTitanTrainRayActor</text>
+    <rect x="485" y="268" width="140" height="28" rx="4" fill="#ffffff" stroke="#16a34a"/>
+    <text x="555" y="287" text-anchor="middle" font-size="12">TitanEngine</text>
+    <text x="555" y="318" text-anchor="middle" font-size="12" fill="#374151">NPU N-1</text>
+  </g>
+
+  <!-- control arrows -->
+  <line x1="330" y1="116" x2="120" y2="176" stroke="#2563eb" stroke-width="1.5" stroke-dasharray="6,4" marker-end="url(#a-blue)"/>
+  <line x1="390" y1="116" x2="305" y2="176" stroke="#2563eb" stroke-width="1.5" stroke-dasharray="6,4" marker-end="url(#a-blue)"/>
+  <line x1="470" y1="116" x2="550" y2="176" stroke="#2563eb" stroke-width="1.5" stroke-dasharray="6,4" marker-end="url(#a-blue)"/>
+  <text x="30" y="145" fill="#2563eb" font-size="12">控制面：Ray 远程调用</text>
+
+  <!-- process group band -->
+  <rect x="30" y="350" width="610" height="54" rx="8" fill="#fff7ed" stroke="#d97706" stroke-width="1.5"/>
+  <text x="335" y="373" text-anchor="middle" font-weight="bold" fill="#7c2d12">数据面：torch.distributed 进程组（world_size = N）</text>
+  <text x="335" y="394" text-anchor="middle" font-size="12" fill="#7c2d12">HCCL：FSDP/TP/EP 集合通信、DP all-reduce　　gloo：barrier、对象收集</text>
+  <line x1="115" y1="330" x2="115" y2="350" stroke="#d97706" stroke-width="1.5"/>
+  <line x1="305" y1="330" x2="305" y2="350" stroke="#d97706" stroke-width="1.5"/>
+  <line x1="555" y1="330" x2="555" y2="350" stroke="#d97706" stroke-width="1.5"/>
+
+  <!-- rollout -->
+  <rect x="700" y="180" width="250" height="150" rx="8" fill="#f9fafb" stroke="#6b7280" stroke-width="1.5"/>
+  <text x="825" y="206" text-anchor="middle" font-weight="bold" fill="#111827">rollout 侧（另见 rollout 文档）</text>
+  <rect x="720" y="220" width="210" height="36" rx="4" fill="#ffffff" stroke="#6b7280"/>
+  <text x="825" y="243" text-anchor="middle" font-size="13">RolloutManager（Ray actor）</text>
+  <rect x="720" y="268" width="210" height="36" rx="4" fill="#ffffff" stroke="#6b7280"/>
+  <text x="825" y="291" text-anchor="middle" font-size="13">vLLM 引擎 × M</text>
+
+  <line x1="600" y1="85" x2="825" y2="176" stroke="#6b7280" stroke-width="1.5" stroke-dasharray="6,4" marker-end="url(#a-gray)"/>
+  <text x="720" y="112" fill="#374151" font-size="12">generate / eval</text>
+  <!-- weight transfer: disaggregated deployment sends from rank 0 only -->
+  <path d="M160,180 L160,166 L685,166 L685,286 L716,286" fill="none" stroke="#b45309" stroke-width="2.5" marker-end="url(#a-orange)"/>
+  <text x="428" y="160" text-anchor="middle" fill="#b45309" font-size="12">权重传输（仅 rank 0 发出）</text>
+
+  <!-- legend -->
+  <g font-size="12">
+    <line x1="30" y1="445" x2="70" y2="445" stroke="#2563eb" stroke-width="1.5" stroke-dasharray="6,4"/>
+    <text x="78" y="449" fill="#374151">Ray 远程调用（RayTrainGroup 对 N 个 actor 发同一调用，ray.get 等待全部返回）</text>
+    <line x1="30" y1="470" x2="70" y2="470" stroke="#d97706" stroke-width="2"/>
+    <text x="78" y="474" fill="#374151">设备间通信（集合通信要求全部 rank 进入同一调用，否则挂起直至超时）</text>
+    <line x1="30" y1="495" x2="70" y2="495" stroke="#b45309" stroke-width="2.5"/>
+    <text x="78" y="499" fill="#374151">权重传输（图示为分离部署：只由 rank 0 发出，其余 rank 只参与聚合；共卡部署见第 5 章）</text>
+    <text x="30" y="528" fill="#374151">一个 rank ＝ 一个 Ray actor 进程 ＝ 一个 TorchTitanTrainRayActor 实例 ＝ 一张 NPU</text>
+  </g>
+</svg>

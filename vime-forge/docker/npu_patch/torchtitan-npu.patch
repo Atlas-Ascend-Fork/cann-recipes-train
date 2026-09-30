@@ -1,0 +1,165 @@
+diff --git a/torchtitan_npu/patches/torch/checkpoint.py b/torchtitan_npu/patches/torch/checkpoint.py
+index c306d5d..e8f8655 100644
+--- a/torchtitan_npu/patches/torch/checkpoint.py
++++ b/torchtitan_npu/patches/torch/checkpoint.py
+@@ -27,6 +27,7 @@ from typing import Any
+ 
+ import torch
+ import torch.distributed.checkpoint as dcp
++from torch.distributed.checkpoint import filesystem as dcp_filesystem
+ from torch.distributed.checkpoint import HuggingFaceStorageWriter
+ from torch.distributed.checkpoint._consolidate_hf_safetensors import (
+     consolidate_safetensors_files_on_every_rank,
+@@ -41,6 +42,7 @@ from torchtitan.components.checkpoint import AsyncMode, CheckpointManager
+ from torchtitan.tools.logging import logger
+ from torchtitan.tools.utils import GarbageCollection
+ 
++_ORIGINAL_DCP_WRITE_FILES_FROM_QUEUE = dcp_filesystem._write_files_from_queue
+ _ORIGINAL_FILESYSTEM_WRITER_WRITE_DATA = FileSystemWriter._write_data
+ _ORIGINAL_CHECKPOINT_MANAGER_INIT = CheckpointManager.__init__
+ _ORIGINAL_CHECKPOINT_MANAGER_SAVE = CheckpointManager.save
+@@ -93,6 +95,136 @@ def _upload_completion_for_async_save(result: Any) -> Any:
+     return result
+ 
+ 
++def _release_written_tensors_enabled() -> bool:
++    return os.environ.get("VIME_DCP_RELEASE_WRITTEN_TENSORS", "1") != "0"
++
++
++@wraps(_ORIGINAL_DCP_WRITE_FILES_FROM_QUEUE)
++def _patched_dcp_write_files_from_queue(
++    create_stream,
++    file_queue,
++    result_queue,
++    planner,
++    transforms,
++    inflight_threshhold,
++    use_fsync,
++    thread_count,
++    serialization_format,
++):
++    if not _release_written_tensors_enabled():
++        return _ORIGINAL_DCP_WRITE_FILES_FROM_QUEUE(
++            create_stream,
++            file_queue,
++            result_queue,
++            planner,
++            transforms,
++            inflight_threshhold,
++            use_fsync,
++            thread_count,
++            serialization_format,
++        )
++
++    try:
++        while True:
++            file_name, storage_key, write_items = file_queue.get_nowait()
++
++            custom_backend_name = torch._C._get_privateuse1_backend_name()
++            custom_device_mod = getattr(torch, custom_backend_name, None)
++            if (
++                thread_count == 1
++                and (
++                    torch.cuda.is_available()
++                    or (custom_device_mod and custom_device_mod.is_available())
++                )
++                and inflight_threshhold > 0
++            ):
++                loader = dcp_filesystem._OverlappingCpuLoader(
++                    planner.resolve_data,
++                    inflight_threshhold=inflight_threshhold,
++                )
++            else:
++                loader = dcp_filesystem._SerialCpuLoader(planner.resolve_data)
++
++            tensor_w = [
++                wi for wi in write_items if wi.type != dcp_filesystem.WriteItemType.BYTE_IO
++            ]
++            for write_item in tensor_w:
++                loader.add(dcp_filesystem._item_size(write_item), write_item)
++            loader.start_loading()
++
++            bytes_w = [
++                wi for wi in write_items if wi.type == dcp_filesystem.WriteItemType.BYTE_IO
++            ]
++            write_results = []
++
++            with create_stream(file_name, 'wb') as stream:
++                for write_item in bytes_w:
++                    data = planner.resolve_data(write_item)
++                    write_results.append(
++                        dcp_filesystem._write_item(
++                            transforms,
++                            stream,
++                            data,
++                            write_item,
++                            storage_key,
++                            serialization_format,
++                        )
++                    )
++
++                keep_tensor_dict = (
++                    serialization_format == dcp_filesystem.SerializationFormat.SAFETENSORS
++                )
++                tensor_dict = {} if keep_tensor_dict else None
++                metadata_dict = {} if keep_tensor_dict else None
++
++                for tensor, write_item in loader.values():
++                    if not tensor.is_cpu:
++                        raise AssertionError('Tensor must be on CPU')
++                    write_results.append(
++                        dcp_filesystem._write_item(
++                            transforms,
++                            stream,
++                            tensor,
++                            write_item,
++                            storage_key,
++                            serialization_format,
++                        )
++                    )
++                    if keep_tensor_dict:
++                        tensor_dict[write_item.index.fqn] = tensor
++                        metadata_dict[write_item.index.fqn] = {
++                            'saved_offsets': write_item.tensor_data.chunk.offsets
++                        }
++
++                if keep_tensor_dict:
++                    from safetensors.torch import save
++
++                    stream.write(
++                        save(
++                            tensor_dict,
++                            metadata={
++                                dcp_filesystem.CUSTOM_METADATA_KEY: dcp_filesystem.json.dumps(
++                                    metadata_dict
++                                ),
++                                dcp_filesystem.DCP_VERSION_KEY: str(
++                                    dcp_filesystem.HF_DCP_VERSION
++                                ),
++                                dcp_filesystem.FORMAT_KEY: dcp_filesystem.FORMAT_VALUE,
++                            },
++                        )
++                    )
++
++                if use_fsync:
++                    try:
++                        dcp_filesystem.os.fsync(stream.fileno())
++                    except (AttributeError, dcp_filesystem.UnsupportedOperation):
++                        dcp_filesystem.os.sync()
++                stream.close()
++            result_queue.put(write_results)
++    except dcp_filesystem.queue.Empty:
++        pass
++
++
+ @wraps(_ORIGINAL_FILESYSTEM_WRITER_WRITE_DATA)
+ def _patched_filesystem_writer_write_data(self, planner, file_queue):
+     result = _ORIGINAL_FILESYSTEM_WRITER_WRITE_DATA(self, planner, file_queue)
+@@ -214,6 +346,7 @@ def _patched_checkpoint_manager_save(self, curr_step: int, last_step: bool = Fal
+     return result
+ 
+ 
++dcp_filesystem._write_files_from_queue = _patched_dcp_write_files_from_queue
+ FileSystemWriter._write_data = _patched_filesystem_writer_write_data
+ CheckpointManager.__init__ = _patched_checkpoint_manager_init
+ CheckpointManager.dcp_save = _patched_checkpoint_manager_dcp_save

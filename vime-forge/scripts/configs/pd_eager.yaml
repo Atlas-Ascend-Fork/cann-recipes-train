@@ -1,0 +1,42 @@
+vllm:
+  - name: default
+    update_weights: true
+    server_groups:
+      - worker_type: prefill
+        num_gpus: 4
+        num_gpus_per_engine: 4
+        overrides:
+          enforce_eager: true
+          kv_transfer_config:
+            kv_connector: MooncakeConnectorV1
+            kv_buffer_device: npu
+            kv_role: kv_producer
+            kv_parallel_size: 1
+            kv_rank: 0
+            kv_port: 14579
+            kv_connector_extra_config:
+              prefill:
+                dp_size: 1
+                tp_size: 4
+              decode:
+                dp_size: 1
+                tp_size: 4
+      - worker_type: decode
+        num_gpus: 4
+        num_gpus_per_engine: 4
+        overrides:
+          enforce_eager: true
+          kv_transfer_config:
+            kv_connector: MooncakeConnectorV1
+            kv_buffer_device: npu
+            kv_role: kv_consumer
+            kv_parallel_size: 1
+            kv_rank: 1
+            kv_port: 14579
+            kv_connector_extra_config:
+              prefill:
+                dp_size: 1
+                tp_size: 4
+              decode:
+                dp_size: 1
+                tp_size: 4

@@ -1,0 +1,46 @@
+vllm:
+  - name: default
+    update_weights: true
+    server_groups:
+      - worker_type: prefill
+        num_gpus: 2
+        num_gpus_per_engine: 2
+        overrides:
+          additional_config:
+            enable_flashcomm1: true
+          kv_transfer_config:
+            kv_connector: MooncakeHybridConnector
+            kv_buffer_device: npu
+            kv_role: kv_producer
+            kv_parallel_size: 1
+            kv_rank: 0
+            kv_port: 14579
+            kv_connector_extra_config:
+              ascend_local_comm_res_path: /etc/hixlep
+              prefill:
+                dp_size: 1
+                tp_size: 2
+              decode:
+                dp_size: 1
+                tp_size: 2
+      - worker_type: decode
+        num_gpus: 2
+        num_gpus_per_engine: 2
+        overrides:
+          additional_config:
+            enable_flashcomm1: false
+          kv_transfer_config:
+            kv_connector: MooncakeHybridConnector
+            kv_buffer_device: npu
+            kv_role: kv_consumer
+            kv_parallel_size: 1
+            kv_rank: 1
+            kv_port: 14579
+            kv_connector_extra_config:
+              ascend_local_comm_res_path: /etc/hixlep
+              prefill:
+                dp_size: 1
+                tp_size: 2
+              decode:
+                dp_size: 1
+                tp_size: 2

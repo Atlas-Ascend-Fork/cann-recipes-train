@@ -1,0 +1,55 @@
+#!/bin/bash
+# Machine paths and per-experiment overrides. Copy to local.sh and fill in; local.sh is not
+# committed. Everything runs without it, but the paths will be wrong.
+#
+# Sourced before common/default.sh, which then fills in whatever is still unset
+# and derives the rest. So anything set here wins and anything omitted falls back.
+#
+# To keep several and switch between them:
+#   bash scripts/torchtitan/run-qwen3-4B.sh --local local.<experiment>.sh
+# A bare name resolves against this directory; naming a missing file is an error.
+#
+# Everything that can be set here is listed in common/default.sh.
+
+# ── Environment: the roots everything else derives from ───────────────
+
+export VIME_WORKSPACE=/path/to/workspace   # data / ckpt / tb / tmp / caches hang off this
+export VIME_MODEL_ROOT=/path/to/models     # model store, holds Qwen3-4B
+export VIME_SLOT=0                         # which concurrent instance on this host;
+                                           # shifts the whole port set so runs never collide
+
+export VIME_CANN_HOME=/usr/local/Ascend/ascend-toolkit
+export VIME_NNAL_HOME=/usr/local/Ascend/nnal/atb
+export VIME_TRAIN_ENV=                     # trainer + vime python env; empty => current interpreter
+export VIME_VLLM_ENV=                      # vllm python env; empty => same as VIME_TRAIN_ENV
+
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7   # host physical IDs accepted by npu-smi -i;
+                                                   # how they split is in ../<model>.sh
+
+# Either binary can be named outright instead of being derived from the envs:
+#   export TRAIN_PYTHON=/opt/tt-venv/bin/python
+#   export VIME_VLLM_EXECUTABLE=/opt/infer-venv/bin/vllm
+
+# Derived from VIME_WORKSPACE: VIME_DATA_ROOT, VIME_CKPT_ROOT, VIME_TB_ROOT,
+# TMPDIR, TRITON_CACHE_DIR, HF_HOME, ASCEND_CACHE_PATH.
+# Derived from VIME_SLOT: the five ports and VIME_RAY_TEMP_DIR.
+# Export any of them here to override that one on its own, e.g.
+#   export VIME_CKPT_ROOT=/somewhere/else
+
+# ── Switches: defaults live in common/default.sh ──────────────────────
+
+# export COLOCATE=off        # share NPUs between training and rollout; requires vLLM sleep mode
+#                            # and makes the launcher disable expandable allocator segments
+# export MODE=fully-async    # sync | async | fully-async
+# export DET=off             # determinism at all three sites at once
+# export SAVE_ON=off         # periodic checkpoint saving (off by default)
+# export EVAL_ON=off         # skip eval (throughput / smoke runs); follows MODE otherwise
+
+# ── Training parameters: override individual ones ─────────────────────
+# Appended after every parameter group, so these win (argparse keeps the last
+# value). For machine-specific tuning that does not belong in the model script.
+
+# OVERRIDE_ARGS=(
+#    --num-rollout 3000
+#    --max-tokens-per-gpu 4096
+# )

@@ -26,6 +26,7 @@
 
 ## 🚀 最新动态
 
+- [2026/09] 新增 [鲲鹏CPU、昇腾950与灵衢协同的 Agentic RL 训练实践](docs/llm_rl/kunpeng_ascend_agentic_rl_infrastructure.md)，支持 AgentENV 沙箱与多 Harness 训练，实现 DSV4 Flash 训推bitwise对齐 MXFP8/MXFP4 低精度训练与长序列等特性。
 - [2026/09] 新增 [DeepSeek-V4.1-Flash 模型续训练支持](llm_pretrain/deepseek_v4_1/README.md)样例，基于 Atlas A5 + TorchTitan-NPU + AutoFuse + MXFP8 低精度，使能 **训练入图、AutoFuse**
 - [2026/09] 新增 [基于昇腾950超节点的万亿MoE模型预训练系统参考实践](docs/llm_pretrain/ascend950_superpod_moe_pretrain_system_reference.md)
 - [2026/09] 新增 [Qwen3.6-27B 模型 AscendC 算子生成监督微调支持](llm_sft/qwen36_ascendc/torchtitan/README.md)，包括 [TorchTitan-NPU 样例](llm_sft/qwen36_ascendc/torchtitan/README.md)和 [MindSpeed-MM 样例](llm_sft/qwen36_ascendc/mindspeed-mm/README.md)

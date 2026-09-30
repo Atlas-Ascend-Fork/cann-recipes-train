@@ -1,0 +1,603 @@
+diff --git a/tests/unit_tests/test_loss.py b/tests/unit_tests/test_loss.py
+index d16e53c6f..dcc2bf914 100644
+--- a/tests/unit_tests/test_loss.py
++++ b/tests/unit_tests/test_loss.py
+@@ -5,12 +5,121 @@
+ # LICENSE file in the root directory of this source tree.
+ 
+ import unittest
++from copy import deepcopy
+ 
+ import torch
+-from torchtitan.components.loss import cross_entropy_loss, IGNORE_INDEX
++from torchtitan.components.loss import (
++    ChunkedCrossEntropyLoss,
++    IGNORE_INDEX,
++    cross_entropy_loss,
++)
+ 
+ 
+ class TestLoss(unittest.TestCase):
++    def test_chunked_loss_matches_normalized_unchunked_gradients(self):
++        torch.manual_seed(7)
++        hidden = torch.randn(2, 8, 16, requires_grad=True)
++        chunked_hidden = hidden.detach().clone().requires_grad_(True)
++        labels = torch.randint(0, 32, (2, 8))
++        labels[0, 1] = IGNORE_INDEX
++        global_valid_tokens = (labels != IGNORE_INDEX).sum()
++
++        lm_head = torch.nn.Linear(16, 32, bias=False)
++        chunked_lm_head = deepcopy(lm_head)
++
++        loss = cross_entropy_loss(lm_head(hidden), labels) / global_valid_tokens
++        loss.backward()
++
++        chunked_loss_fn = ChunkedCrossEntropyLoss(num_chunks=4)
++        chunked_loss_fn.set_lm_head(chunked_lm_head)
++        chunked_loss = chunked_loss_fn(
++            chunked_hidden,
++            labels,
++            global_valid_tokens=float(global_valid_tokens),
++        ) / global_valid_tokens
++        chunked_loss.backward()
++
++        torch.testing.assert_close(chunked_loss, loss)
++        torch.testing.assert_close(chunked_hidden.grad, hidden.grad)
++        torch.testing.assert_close(chunked_lm_head.weight.grad, lm_head.weight.grad)
++
++    def test_chunked_loss_supports_compact_token_layout(self):
++        torch.manual_seed(11)
++        hidden = torch.randn(16, 8, requires_grad=True)
++        chunked_hidden = hidden.detach().clone().requires_grad_(True)
++        labels = torch.randint(0, 24, (16,))
++        labels[3] = IGNORE_INDEX
++        global_valid_tokens = (labels != IGNORE_INDEX).sum()
++
++        lm_head = torch.nn.Linear(8, 24, bias=False)
++        chunked_lm_head = deepcopy(lm_head)
++        loss = torch.nn.functional.cross_entropy(
++            lm_head(hidden).float(),
++            labels,
++            reduction="sum",
++            ignore_index=IGNORE_INDEX,
++        ) / global_valid_tokens
++        loss.backward()
++
++        chunked_loss_fn = ChunkedCrossEntropyLoss(num_chunks=4)
++        chunked_loss_fn.set_lm_head(chunked_lm_head)
++        chunked_loss = chunked_loss_fn(
++            chunked_hidden,
++            labels,
++            global_valid_tokens=global_valid_tokens,
++        ) / global_valid_tokens
++        chunked_loss.backward()
++
++        torch.testing.assert_close(chunked_loss, loss)
++        torch.testing.assert_close(chunked_hidden.grad, hidden.grad)
++        torch.testing.assert_close(chunked_lm_head.weight.grad, lm_head.weight.grad)
++
++    def test_chunked_loss_applies_lm_head_input_dtype(self):
++        torch.manual_seed(13)
++        hidden = torch.randn(8, 4, dtype=torch.bfloat16, requires_grad=True)
++        chunked_hidden = hidden.detach().clone().requires_grad_(True)
++        labels = torch.randint(0, 12, (8,))
++        global_valid_tokens = labels.numel()
++
++        lm_head = torch.nn.Linear(4, 12, bias=False)
++        chunked_lm_head = deepcopy(lm_head)
++        loss = torch.nn.functional.cross_entropy(
++            lm_head(hidden.float()), labels, reduction="sum"
++        ) / global_valid_tokens
++        loss.backward()
++
++        chunked_loss_fn = ChunkedCrossEntropyLoss(num_chunks=2)
++        chunked_loss_fn.set_lm_head(
++            chunked_lm_head,
++            input_dtype=torch.float32,
++        )
++        chunked_loss = chunked_loss_fn(
++            chunked_hidden,
++            labels,
++            global_valid_tokens=global_valid_tokens,
++        ) / global_valid_tokens
++        chunked_loss.backward()
++
++        torch.testing.assert_close(chunked_loss, loss)
++        torch.testing.assert_close(chunked_hidden.grad, hidden.grad)
++        torch.testing.assert_close(chunked_lm_head.weight.grad, lm_head.weight.grad)
++
++    def test_chunked_loss_rejects_mismatched_outer_gradient_scale(self):
++        hidden = torch.randn(1, 4, 8, requires_grad=True)
++        labels = torch.randint(0, 16, (1, 4))
++        global_valid_tokens = labels.numel()
++        loss_fn = ChunkedCrossEntropyLoss(num_chunks=2)
++        loss_fn.set_lm_head(torch.nn.Linear(8, 16, bias=False))
++
++        loss = loss_fn(
++            hidden,
++            labels,
++            global_valid_tokens=global_valid_tokens,
++        )
++
++        with self.assertRaisesRegex(RuntimeError, "outer gradient scale"):
++            (loss * (2 / global_valid_tokens)).backward()
++
+     def test_ignore_index_equal_per_token_contribution(self):
+         """Test that each valid token contributes equally to the loss.
+ 
+diff --git a/torchtitan/components/loss.py b/torchtitan/components/loss.py
+index 719414824..94c4e5c82 100644
+--- a/torchtitan/components/loss.py
++++ b/torchtitan/components/loss.py
+@@ -5,9 +5,10 @@
+ # LICENSE file in the root directory of this source tree.
+ 
+ from collections.abc import Callable
+-from typing import TypeAlias
++from typing import TypeAlias, cast
+ 
+ import torch
++import torch.nn as nn
+ 
+ from torchtitan.config import CompileConfig
+ from torchtitan.tools.logging import logger
+@@ -51,3 +52,274 @@ def build_mse_loss(compile_config: CompileConfig, **kwargs):
+         logger.info("Compiling the loss function with torch.compile")
+         loss_fn = torch.compile(loss_fn, backend=compile_config.backend)
+     return loss_fn
++
++
++class GradAccumulator:
++    """Accumulates per-chunk gradients into a pre-allocated buffer.
++
++    Ported from the upstream ``ChunkedLossWrapper`` (torchtitan main) as a
++    standalone helper, keeping only the plain-tensor path so it can be used
++    with the legacy (non-``BaseLoss``) training pipeline on the ``old``
++    branch. The buffer supports ``[B, L, D]`` and compact ``[T, D]`` layouts;
++    successive ``add()`` calls write one token chunk per ``num_chunks``.
++    """
++
++    def __init__(
++        self,
++        hidden_states: torch.Tensor,
++        *,
++        num_chunks: int,
++        dtype: torch.dtype,
++        token_dim: int,
++    ) -> None:
++        self._buffer = torch.zeros(
++            hidden_states.shape, dtype=dtype, device=hidden_states.device
++        )
++        self._token_dim = token_dim
++        self._chunk_len = hidden_states.shape[token_dim] // num_chunks
++        self._chunk_idx = 0
++
++    def add(self, grad: torch.Tensor) -> None:
++        grad = grad.detach().to(dtype=self._buffer.dtype, device=self._buffer.device)
++        start = self._chunk_idx * self._chunk_len
++        index = [slice(None)] * self._buffer.ndim
++        index[self._token_dim] = slice(start, start + self._chunk_len)
++        self._buffer[tuple(index)] = grad
++        self._chunk_idx += 1
++
++    def result(self) -> torch.Tensor:
++        return self._buffer
++
++
++class _ChunkedGradientBackProp(torch.autograd.Function):
++    """Bridges chunked lm_head backward with decoder backward via autograd.
++
++    Mirrors upstream ``_DecoderOutputGradientBackProp``. Forward takes the
++    hidden states (still connected to the decoder graph), the accumulated
++    gradient from the per-chunk lm_head backwards, the loss value, and the
++    normalization already applied to the lm_head gradients. Backward verifies
++    that the outer loss uses the same normalization before propagating the
++    accumulated gradient through the decoder in a single pass.
++    """
++
++    @staticmethod
++    def forward(
++        ctx,
++        hidden_states: torch.Tensor,
++        accumulated_grad: torch.Tensor,
++        loss: torch.Tensor,
++        expected_grad_output: torch.Tensor,
++    ) -> torch.Tensor:
++        ctx.save_for_backward(accumulated_grad, expected_grad_output)
++        return loss.detach()
++
++    @staticmethod
++    def backward(
++        ctx, grad_output: torch.Tensor
++    ) -> tuple[torch.Tensor, None, None, None]:
++        accumulated_grad, expected_grad_output = ctx.saved_tensors
++        if not torch.allclose(grad_output, expected_grad_output):
++            raise RuntimeError(
++                "ChunkedCrossEntropyLoss outer gradient scale must equal "
++                "1 / global_valid_tokens so decoder and lm_head gradients match"
++            )
++        return accumulated_grad, None, None, None
++
++
++class ChunkedCrossEntropyLoss:
++    """Chunked cross-entropy loss splitting the sequence to reduce peak memory.
++
++    Legacy (plain-callable) port of the upstream ``ChunkedLossWrapper`` for
++    the ``old`` branch, which predates the ``BaseLoss``/``Configurable`` loss
++    framework. It keeps the upstream call contract visible to the trainer:
++
++    - ``build_chunked_cross_entropy_loss()`` returns this callable instance
++    - The trainer detects the instance type, calls ``set_lm_head()`` with the
++      model's output/LM-head layer, and sets ``model._skip_lm_head = True`` so
++      the model forward returns hidden states ``[B, L, D]`` instead of logits.
++    - The loss then applies ``lm_head`` per chunk, exactly once per chunk, so
++      the ``[B, L, V]`` logits tensor is never materialized at once; peak
++      memory drops from ``O(B*L*V)`` to ``O(B*L/N*V)``.
++
++    The per-chunk backward is propagated to the decoder via
++    ``_ChunkedGradientBackProp`` so upstream ``loss.backward()`` in the
++    trainer needs no change. Calling convention: ``loss_fn(pred, labels)``
++    where ``pred`` is the model's hidden states (with ``_skip_lm_head``) and
++    ``labels`` is ``[B, L]`` (or ``[B*L]``; it is flattened like the plain CE).
++
++    With FSDP, the wrapper keeps lm_head unsharded across chunks, performs
++    gradient synchronization only on the final chunk, and restores the FSDP
++    runtime flags to their incoming values afterwards. Since lm_head gradients
++    are produced inside this callable, the outer backward gradient must equal
++    ``1 / global_valid_tokens``; a mismatch raises instead of silently scaling
++    decoder and lm_head gradients differently.
++    """
++
++    def __init__(self, num_chunks: int = 8) -> None:
++        self.num_chunks = num_chunks
++        self.lm_head: nn.Module | None = None
++        self.lm_head_input_dtype: torch.dtype | None = None
++
++    def set_lm_head(
++        self,
++        lm_head: nn.Module,
++        *,
++        input_dtype: torch.dtype | None = None,
++    ) -> None:
++        """Set the lm_head/output module. Must be called before the first call."""
++        self.lm_head = lm_head
++        self.lm_head_input_dtype = input_dtype
++
++    def __call__(
++        self,
++        pred: torch.Tensor,
++        labels: torch.Tensor,
++        global_valid_tokens: float | torch.Tensor | None = None,
++    ) -> torch.Tensor:
++        from torch.distributed._composable.fsdp import FSDPModule
++
++        hidden_states = pred
++        num_chunks = self.num_chunks
++        lm_head = self.lm_head
++        assert lm_head is not None, "Set lm_head before calling ChunkedCrossEntropyLoss"
++        fsdp_enabled = isinstance(lm_head, FSDPModule)
++        requires_grad = hidden_states.requires_grad
++
++        token_dim = hidden_states.ndim - 2
++        label_token_dim = labels.ndim - 1
++        seq_len = hidden_states.shape[token_dim]
++        assert labels.shape[label_token_dim] == seq_len, (
++            "ChunkedCrossEntropyLoss expects hidden states and labels to have "
++            f"the same token count, got {seq_len} and "
++            f"{labels.shape[label_token_dim]}"
++        )
++        assert (
++            seq_len % num_chunks == 0
++        ), f"ChunkedCrossEntropyLoss sequence length {seq_len} must be divisible by num_chunks={num_chunks}"
++        chunk_len = seq_len // num_chunks
++
++        # ``detach`` + ``requires_grad_`` makes each chunk a leaf so it
++        # accumulates ``.grad`` for ``GradAccumulator``.
++        h_chunks = [
++            c.detach().requires_grad_(requires_grad)
++            for c in torch.split(hidden_states, chunk_len, dim=token_dim)
++        ]
++        label_chunks = list(torch.split(labels, chunk_len, dim=label_token_dim))
++
++        grad_accumulator = None
++        if requires_grad:
++            grad_accumulator = GradAccumulator(
++                hidden_states,
++                num_chunks=num_chunks,
++                dtype=torch.float32,
++                token_dim=token_dim,
++            )
++
++        total_loss = hidden_states.new_zeros((), dtype=torch.float32)
++        backward_scale = (
++            total_loss.new_tensor(1.0)
++            if global_valid_tokens is None
++            else torch.as_tensor(
++                global_valid_tokens,
++                dtype=torch.float32,
++                device=hidden_states.device,
++            ).reciprocal()
++        )
++
++        fsdp_settings = None
++        if fsdp_enabled:
++            get_fsdp_state = getattr(lm_head, "get_fsdp_state", None)
++            if not callable(get_fsdp_state):
++                get_fsdp_state = getattr(lm_head, "_get_fsdp_state", None)
++            if not callable(get_fsdp_state):
++                raise RuntimeError(
++                    "ChunkedCrossEntropyLoss requires an FSDP state accessor"
++                )
++            fsdp_state = get_fsdp_state()
++            fsdp_param_group = getattr(fsdp_state, "_fsdp_param_group", None)
++            if fsdp_param_group is None:
++                fsdp_param_group = getattr(fsdp_state, "fsdp_param_group", None)
++            if fsdp_param_group is None:
++                raise RuntimeError(
++                    "ChunkedCrossEntropyLoss requires an FSDP parameter group"
++                )
++            reshard_after_forward = getattr(
++                fsdp_param_group,
++                "_reshard_after_forward",
++                getattr(fsdp_param_group, "reshard_after_forward", None),
++            )
++            if reshard_after_forward is None:
++                raise RuntimeError(
++                    "ChunkedCrossEntropyLoss requires FSDP reshard_after_forward state"
++                )
++            reshard_after_backward = getattr(
++                fsdp_param_group, "reshard_after_backward", None
++            )
++            reduce_grads = getattr(fsdp_param_group, "reduce_grads", None)
++            all_reduce_grads = getattr(fsdp_param_group, "all_reduce_grads", None)
++            if any(
++                value is None
++                for value in (reshard_after_backward, reduce_grads, all_reduce_grads)
++            ):
++                raise RuntimeError(
++                    "ChunkedCrossEntropyLoss requires complete FSDP runtime state"
++                )
++            fsdp_settings = (
++                reshard_after_forward,
++                reshard_after_backward,
++                reduce_grads,
++                all_reduce_grads,
++            )
++            lm_head.set_reshard_after_forward(False)
++            lm_head.set_reshard_after_backward(False)
++            lm_head.set_requires_gradient_sync(False, recurse=False)
++            lm_head.unshard()
++
++        last_idx = len(h_chunks) - 1
++        for idx, (h_chunk, label_chunk) in enumerate(
++            zip(h_chunks, label_chunks)
++        ):
++            if fsdp_enabled and idx == last_idx:
++                assert fsdp_settings is not None
++                lm_head.set_requires_gradient_sync(fsdp_settings[2], recurse=False)
++                lm_head.set_requires_all_reduce(fsdp_settings[3], recurse=False)
++            lm_head_input = (
++                h_chunk.to(self.lm_head_input_dtype)
++                if self.lm_head_input_dtype is not None
++                else h_chunk
++            )
++            logits = lm_head(lm_head_input)
++            if logits.ndim == 2:
++                chunk_loss = torch.nn.functional.cross_entropy(
++                    logits.float(),
++                    label_chunk.reshape(-1),
++                    reduction="sum",
++                    ignore_index=IGNORE_INDEX,
++                )
++            else:
++                chunk_loss = cross_entropy_loss(logits, label_chunk)
++            total_loss = total_loss + chunk_loss.detach()
++
++            if requires_grad:
++                chunk_loss.backward(gradient=backward_scale)
++                assert h_chunk.grad is not None
++                assert grad_accumulator is not None
++                grad_accumulator.add(h_chunk.grad)
++                h_chunk.grad = None
++
++        if fsdp_enabled:
++            assert fsdp_settings is not None
++            (
++                reshard_after_forward,
++                reshard_after_backward,
++                reduce_grads,
++                all_reduce_grads,
++            ) = fsdp_settings
++            lm_head.set_reshard_after_forward(reshard_after_forward)
++            lm_head.set_reshard_after_backward(reshard_after_backward)
++            lm_head.set_requires_gradient_sync(reduce_grads, recurse=False)
++            lm_head.set_requires_all_reduce(all_reduce_grads, recurse=False)
++            if reshard_after_backward:
++                lm_head.reshard()
++
++        if not requires_grad:
++            return total_loss
++
++        assert grad_accumulator is not None
++        accumulated_grad = grad_accumulator.result().to(hidden_states.dtype)
++        loss = cast(
++            torch.Tensor,
++            _ChunkedGradientBackProp.apply(
++                hidden_states, accumulated_grad, total_loss, backward_scale
++            ),
++        )
++        return loss
++
++
++def build_chunked_cross_entropy_loss(
++    compile_config: CompileConfig, num_chunks: int = 8, **kwargs
++):
++    """Build a chunked cross-entropy loss function (legacy callable API).
++
++    ``num_chunks`` controls how many sequence chunks the loss is split into;
++    larger values reduce peak logits memory at the cost of more per-chunk
++    lm_head forwards. The model must expose an output/lm-head layer that the
++    trainer wires up via ``ChunkedCrossEntropyLoss.set_lm_head()``, and the
++    model forward must support ``_skip_lm_head`` so it returns hidden states.
++    """
++    del kwargs  # delete any unused arguments
++    loss_fn = ChunkedCrossEntropyLoss(num_chunks=num_chunks)
++    if compile_config.enable and "loss" in compile_config.components:
++        logger.info(
++            "Chunked loss with torch.compile: compiling the inner cross_entropy_loss "
++            "will be applied per chunk by the trainer; the wrapper itself is not "
++            "torch.compiled (per-chunk backward + autograd bridge)."
++        )
++    return loss_fn
+diff --git a/torchtitan/models/common/decoder.py b/torchtitan/models/common/decoder.py
+index 0919d954b..8666628c0 100644
+--- a/torchtitan/models/common/decoder.py
++++ b/torchtitan/models/common/decoder.py
+@@ -63,6 +63,13 @@ class Decoder(BaseModel):
+     ``get_attention_masks`` (flex/varlen dispatch) used by most models.
+     """
+ 
++    # Set by the trainer when ChunkedCrossEntropyLoss is used, so the output
++    # projection is applied per-chunk inside the loss function instead of in
++    # forward(). It is an attribute rather than a forward kwarg because PP
++    # backward calls .requires_grad on all stage inputs, which fails on bool
++    # kwargs.
++    _skip_lm_head: bool = False
++
+     @dataclass(kw_only=True, slots=True)
+     class Config(BaseModel.Config):
+         dim: int
+@@ -134,6 +141,8 @@ class Decoder(BaseModel):
+             h = layer(h, self.freqs_cis, attention_masks, positions)
+ 
+         h = self.norm(h) if self.norm is not None else h
++        if self._skip_lm_head:
++            return h
+         output = self.output(h) if self.output is not None else h
+         return output
+ 
+diff --git a/torchtitan/models/llama4/parallelize.py b/torchtitan/models/llama4/parallelize.py
+index 707fb397b..910e7e2ea 100644
+--- a/torchtitan/models/llama4/parallelize.py
++++ b/torchtitan/models/llama4/parallelize.py
+@@ -374,12 +374,24 @@ def apply_fsdp(
+         if model.norm is not None and model.output is not None:
+             # As an optimization, do not reshard_after_forward the last layers by default
+             # since FSDP would prefetch them immediately after the forward pass
+-            # pyrefly: ignore [no-matching-overload]
+-            fully_shard(
+-                [model.norm, model.output],
+-                **fsdp_config,
+-                reshard_after_forward=reshard_after_forward_policy == "always",
+-            )
++            if getattr(model, "_chunked_loss_enabled", False):
++                fully_shard(
++                    model.norm,
++                    **fsdp_config,
++                    reshard_after_forward=reshard_after_forward_policy == "always",
++                )
++                fully_shard(
++                    model.output,
++                    **fsdp_config,
++                    reshard_after_forward=reshard_after_forward_policy == "always",
++                )
++            else:
++                # pyrefly: ignore [no-matching-overload]
++                fully_shard(
++                    [model.norm, model.output],
++                    **fsdp_config,
++                    reshard_after_forward=reshard_after_forward_policy == "always",
++                )
+ 
+     # pyrefly: ignore [missing-attribute]
+     for layer_id, transformer_block in model.layers.items():
+diff --git a/torchtitan/trainer.py b/torchtitan/trainer.py
+index 87b50a9d1..52ac5c329 100644
+--- a/torchtitan/trainer.py
++++ b/torchtitan/trainer.py
+@@ -15,12 +15,17 @@ from typing import Annotated, Any, cast
+ 
+ import torch
+ import torch.distributed.checkpoint.stateful
++import torch.nn as nn
+ import tyro
+ from torch.distributed.elastic.multiprocessing.errors import record
+ 
+ from torchtitan.components.checkpoint import CheckpointManager
+ from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
+-from torchtitan.components.loss import IGNORE_INDEX, LossFunction
++from torchtitan.components.loss import (
++    ChunkedCrossEntropyLoss,
++    IGNORE_INDEX,
++    LossFunction,
++)
+ from torchtitan.components.lr_scheduler import LRSchedulersContainer
+ from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
+ from torchtitan.components.optimizer import (
+@@ -323,6 +328,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
+         self.loss_fn = model_spec.build_loss_fn(
+             config.compile, parallel_dims=parallel_dims
+         )
++        if isinstance(self.loss_fn, ChunkedCrossEntropyLoss):
++            setattr(model, "_chunked_loss_enabled", True)
++            setattr(model, "_skip_lm_head", True)
+ 
+         # verify batch sizes
+         global_batch_size = config.training.global_batch_size
+@@ -413,6 +421,38 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
+ 
+             self.model_parts = [model]
+ 
++        # Wire up the lm_head/output projection for ChunkedCrossEntropyLoss
++        # after model construction. Non-PP: the single model part always has
++        # the output layer. PP: only the last stage has it; non-last stages
++        # skip the wiring (their loss_fn is a no-op placeholder).
++        if isinstance(self.loss_fn, ChunkedCrossEntropyLoss):
++            if parallel_dims.pp_enabled:
++                if self.pp_has_last_stage:
++                    lm_head = cast(nn.Module, self.model_parts[-1].output)
++                    assert lm_head is not None, (
++                        "Last PP stage must have output for ChunkedCrossEntropyLoss"
++                    )
++                    self.loss_fn.set_lm_head(
++                        lm_head,
++                        input_dtype=getattr(
++                            self.model_parts[-1], "lm_head_input_dtype", None
++                        ),
++                    )
++                    setattr(self.model_parts[-1], "_skip_lm_head", True)
++            else:
++                assert len(self.model_parts) == 1
++                lm_head = cast(nn.Module, self.model_parts[0].output)
++                assert lm_head is not None, (
++                    "Model must have output for ChunkedCrossEntropyLoss"
++                )
++                self.loss_fn.set_lm_head(
++                    lm_head,
++                    input_dtype=getattr(
++                        self.model_parts[0], "lm_head_input_dtype", None
++                    ),
++                )
++                setattr(self.model_parts[0], "_skip_lm_head", True)
++
+         # initialize device memory monitor and get peak flops for MFU calculation
+         device_memory_monitor = self.metrics_processor.device_memory_monitor
+         gpu_peak_flops = utils.get_peak_flops(device_memory_monitor.device_name)
+@@ -703,7 +743,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
+                 with self.maybe_enable_amp:
+                     pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+                     # Compute loss sum (reduction='sum')
+-                    loss_sum = self.loss_fn(pred, labels)
++                    if isinstance(self.loss_fn, ChunkedCrossEntropyLoss):
++                        # Chunked loss performs lm_head backward internally, so it
++                        # needs the same token normalization as decoder backward.
++                        loss_sum = self.loss_fn(
++                            pred,
++                            labels,
++                            global_valid_tokens=global_valid_tokens,
++                        )
++                    else:
++                        loss_sum = self.loss_fn(pred, labels)
+ 
+                     # Scale the loss by the inverse of the total weight denominator before backward
+                     # This ensures gradients are properly normalized across all microbatches

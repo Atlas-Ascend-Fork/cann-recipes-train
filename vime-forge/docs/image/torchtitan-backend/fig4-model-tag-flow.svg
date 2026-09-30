@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="345" viewBox="0 0 980 345" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="13">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#374151"/></marker>
+    <marker id="ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/></marker>
+  </defs>
+  <rect width="980" height="345" fill="#ffffff"/>
+  <text x="20" y="30" font-size="17" font-weight="bold" fill="#111827">图 4　模型标签的写入与恢复</text>
+
+  <!-- live model -->
+  <rect x="370" y="55" width="240" height="66" rx="8" fill="#ecfdf5" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="490" y="82" text-anchor="middle" font-weight="bold">model_parts（模型当前的权重）</text>
+  <text x="490" y="104" text-anchor="middle" font-size="12">优化器更新与推送时加载 actor 权重</text>
+
+  <!-- tags -->
+  <rect x="40" y="240" width="190" height="72" rx="8" fill="#fef9c3" stroke="#ca8a04"/>
+  <text x="135" y="266" text-anchor="middle" font-weight="bold">actor</text>
+  <text x="135" y="288" text-anchor="middle" font-size="11">当前训练权重的快照</text>
+
+  <rect x="275" y="240" width="190" height="72" rx="8" fill="#fef9c3" stroke="#ca8a04"/>
+  <text x="370" y="266" text-anchor="middle" font-weight="bold">ref</text>
+  <text x="370" y="288" text-anchor="middle" font-size="11">KL 基准策略</text>
+
+  <rect x="515" y="240" width="190" height="72" rx="8" fill="#fef9c3" stroke="#ca8a04"/>
+  <text x="610" y="266" text-anchor="middle" font-weight="bold">old_actor</text>
+  <text x="610" y="288" text-anchor="middle" font-size="11">PPO 比率的分母策略</text>
+
+  <rect x="750" y="240" width="190" height="72" rx="8" fill="#fef9c3" stroke="#ca8a04"/>
+  <text x="845" y="266" text-anchor="middle" font-weight="bold">rollout_actor</text>
+  <text x="845" y="288" text-anchor="middle" font-size="11">rollout 正在使用的策略</text>
+
+  <!-- backup arrows (solid) -->
+  <line x1="390" y1="121" x2="150" y2="236" stroke="#374151" marker-end="url(#ar)"/>
+  <circle cx="262" cy="182" r="11" fill="#ffffff" stroke="#374151"/><text x="262" y="187" text-anchor="middle" font-size="12">1</text>
+  <line x1="440" y1="121" x2="360" y2="236" stroke="#374151" marker-end="url(#ar)"/>
+  <circle cx="398" cy="182" r="11" fill="#ffffff" stroke="#374151"/><text x="398" y="187" text-anchor="middle" font-size="12">2</text>
+  <line x1="600" y1="121" x2="830" y2="236" stroke="#374151" marker-end="url(#ar)"/>
+  <circle cx="722" cy="182" r="11" fill="#ffffff" stroke="#374151"/><text x="722" y="187" text-anchor="middle" font-size="12">3</text>
+  <!-- copy rollout_actor -> old_actor -->
+  <line x1="750" y1="290" x2="709" y2="290" stroke="#374151" marker-end="url(#ar)"/>
+  <circle cx="729" cy="318" r="11" fill="#ffffff" stroke="#374151"/><text x="729" y="323" text-anchor="middle" font-size="12">4</text>
+
+  <!-- restore arrows (dashed) -->
+  <path d="M370,240 C370,200 480,170 480,125" fill="none" stroke="#2563eb" stroke-dasharray="6,3" marker-end="url(#ab)"/>
+  <path d="M610,240 C610,200 500,170 500,125" fill="none" stroke="#2563eb" stroke-dasharray="6,3" marker-end="url(#ab)"/>
+  <circle cx="545" cy="182" r="11" fill="#ffffff" stroke="#2563eb"/><text x="545" y="187" text-anchor="middle" font-size="12" fill="#2563eb">5</text>
+</svg>

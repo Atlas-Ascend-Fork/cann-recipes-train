@@ -1,0 +1,906 @@
+import argparse
+import base64
+import dataclasses
+import logging
+import multiprocessing
+import os
+import shutil
+import sys
+import time
+from typing import Any
+from urllib.parse import quote
+
+import cloudpickle
+import requests
+from vllm.utils.system_utils import kill_process_tree
+
+from vime.backends.vllm_utils.external import get_server_info
+from vime.ray.ray_actor import RayActor
+from vime.utils import accelerator
+from vime.utils.http_utils import _wrap_ipv6, get_host_info
+
+logger = logging.getLogger(__name__)
+
+_VLLM_WAKE_TAGS = frozenset({"weights", "kv_cache"})
+_LEGACY_VLLM_PARALLEL_FIELDS = frozenset({"tp_size", "pp_size", "pcp_size", "dp_size"})
+_INVALID_VLLM_PARALLEL_FIELDS = frozenset({"ep_size", "expert_parallel_size", "moe_dp_size", "moe_data_parallel_size"})
+
+
+def get_base_gpu_id(args, rank):
+    num_gpus = min(args.num_gpus_per_node, args.rollout_num_gpus_per_engine)
+    if args.colocate:
+        start_index = (rank * num_gpus) % args.num_gpus_per_node
+    else:
+        num_actor_gpus = 0 if args.debug_rollout_only else args.actor_num_gpus_per_node * args.actor_num_nodes
+        start_index = (num_actor_gpus + rank * num_gpus) % args.num_gpus_per_node
+        if args.use_critic:
+            num_critic_gpus = args.critic_num_gpus_per_node * args.critic_num_nodes
+            start_index = (num_actor_gpus + num_critic_gpus + rank * num_gpus) % args.num_gpus_per_node
+    return start_index
+
+
+def launch_server_process(server_args_dict: dict) -> multiprocessing.Process:
+    env = _build_subprocess_env(server_args_dict)
+    kwargs = {k: v for k, v in server_args_dict.items() if not k.startswith("_")}
+    host = _wrap_ipv6(kwargs.get("host") or "127.0.0.1")
+    kwargs["host"] = host.strip("[]")
+    logger.info("Launching vLLM server: %s", kwargs)
+
+    multiprocessing.set_start_method("spawn", force=True)
+    p = multiprocessing.Process(target=_run_vllm_server, args=(kwargs, env))
+    p.start()
+
+    if server_args_dict.get("node_rank", 0) != 0:
+        return p
+
+    _wait_server_healthy(
+        base_url=f"http://{host}:{server_args_dict['port']}",
+        is_process_alive=lambda: p.is_alive(),
+    )
+
+    return p
+
+
+def _vllm_supports_v2_model_runner() -> bool:
+    """vllm's config layer only gates V2 on model/features, not the version:
+    an explicit env var bypasses every check (vllm/config/vllm.py
+    ``use_v2_model_runner`` returns the env value directly). The version
+    fallback lives in the platform worker (vllm-ascend), which is too late and
+    only patches itself, so the version gate has to live here."""
+    try:
+        import vllm
+
+        version = vllm.__version__
+    except Exception:
+        return False
+    # "0.23.1.dev4+g..." and friends: compare the release tuple, not the string.
+    try:
+        release = tuple(int(part) for part in version.split("+")[0].split(".")[:2])
+    except ValueError:
+        return False
+    return release > (0, 23)
+
+
+def _build_subprocess_env(server_args_dict: dict[str, Any]) -> dict[str, str]:
+    args = server_args_dict["_args"]
+    env = os.environ.copy()
+    env.pop("PYTORCH_CUDA_ALLOC_CONF", None)
+    env.pop("PYTORCH_ALLOC_CONF", None)
+    env.setdefault("NCCL_CUMEM_ENABLE", "0")
+    visible_devices = server_args_dict["_visible_devices"]
+    if accelerator.is_available() and accelerator.device_type() == "npu":
+        env["ASCEND_RT_VISIBLE_DEVICES"] = visible_devices
+        env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+    else:
+        env["CUDA_VISIBLE_DEVICES"] = visible_devices
+        # ROCm: keep HIP visibility in sync with CUDA (no-op on CUDA).
+        env["HIP_VISIBLE_DEVICES"] = visible_devices
+    env.setdefault("VLLM_SERVER_DEV_MODE", "1")
+    # V2 model runner needs a vllm newer than 0.23.0. On 0.23.x, vllm's config
+    # layer honors an explicit VLLM_USE_V2_MODEL_RUNNER=1 without a version
+    # check, while vllm-ascend's worker falls back to the V1 runner locally
+    # (vllm_ascend/worker/worker.py: "not supported on vllm 0.23.0"), leaving
+    # the engine in a mixed V2-config/V1-execution state. That state corrupts
+    # aclgraph decode deterministically (garbage responses from the first
+    # rollout on), while prefill stays correct. "0" also suppresses vllm's own
+    # model-based V2 auto-selection, which hits the same broken fallback.
+    env["VLLM_USE_V2_MODEL_RUNNER"] = "1" if _vllm_supports_v2_model_runner() else "0"
+    if getattr(args, "vllm_enable_deterministic_inference", False):
+        if accelerator.is_available() and accelerator.device_type() == "npu":
+            env["VLLM_ASCEND_BATCH_INVARIANT"] = "1"
+            env["VLLM_BATCH_INVARIANT"] = "0"
+        else:
+            # CUDA vLLM uses the generic switch; keep deterministic Qwen3 inference enabled.
+            env["VLLM_BATCH_INVARIANT"] = "1"
+    if getattr(args, "colocate", False):
+        import vime
+
+        vime_root = os.path.dirname(os.path.dirname(os.path.abspath(vime.__file__)))
+        existing_pp = env.get("PYTHONPATH", "")
+        if vime_root not in {p for p in existing_pp.split(os.pathsep) if p}:
+            env["PYTHONPATH"] = os.pathsep.join(filter(None, [vime_root, existing_pp]))
+        env.setdefault("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+        # NOTE: do NOT set VLLM_PLUGINS here. It is an entry-point NAME
+        # allowlist (vllm/plugins/__init__.py: plugin.name in allowed), so a
+        # module path neither loads the extension nor keeps the platform
+        # plugins alive: every child that re-imports vllm after
+        # os.environ.update loses vllm_ascend and dies with
+        # "Device string must not be empty". The worker extension is passed
+        # via server kwargs instead (see _compute_server_args).
+
+    worker_type = server_args_dict.get("_worker_type", "regular")
+    if worker_type in ("prefill", "decode") and server_args_dict.get("node_rank", 0) == 0:
+        host_for_subprocess = (server_args_dict.get("host") or "127.0.0.1").strip("[]")
+        env["VLLM_NIXL_SIDE_CHANNEL_HOST"] = host_for_subprocess
+        env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(server_args_dict["_disaggregation_bootstrap_port"])
+
+    return env
+
+
+def _rollout_interpreter() -> str | None:
+    """Return the rollout Python interpreter when it differs from this process.
+
+    multiprocessing spawn children inherit the parent actor's interpreter.
+    In dual-venv setups that is the TRAIN python, under which the rollout
+    env's vllm/torch must not run. Returns None when no re-exec is needed.
+    """
+    explicit = os.getenv("VIME_VLLM_PYTHON", "")
+    if explicit:
+        if not os.path.isfile(explicit):
+            raise FileNotFoundError(f"VIME_VLLM_PYTHON does not exist: {explicit}")
+        candidate = explicit
+    else:
+        candidate = _interpreter_from_vllm_shebang()
+        if candidate is None:
+            return None
+
+    if candidate == sys.executable:
+        return None
+    if os.path.realpath(candidate) == os.path.realpath(sys.executable):
+        # A different virtualenv can point at the same base Python binary while
+        # supplying a different site-packages tree.
+        if sys.prefix == sys.base_prefix:
+            return None
+        return candidate
+    return candidate
+
+
+def _interpreter_from_vllm_shebang() -> str | None:
+    exe = os.getenv("VIME_VLLM_EXECUTABLE", "")
+    if not exe or not os.path.isfile(exe):
+        return None
+    try:
+        with open(exe, encoding="utf-8") as f:
+            first = f.readline().strip()
+    except OSError:
+        return None
+    if not first.startswith("#!"):
+        return None
+    parts = first[2:].split()
+    candidate = parts[0] if parts else ""
+    if os.path.basename(candidate) == "env" and len(parts) > 1:
+        candidate = shutil.which(parts[1]) or ""
+    if not candidate or not os.path.basename(candidate).startswith("python") or not os.path.isfile(candidate):
+        return None
+    return candidate
+
+
+def _run_vllm_server(kwargs: dict, env: dict) -> None:
+    python = _rollout_interpreter()
+    if python is not None:
+        # Hand (kwargs, env) to the rollout interpreter and replace this
+        # process. The pid is preserved, so the parent's multiprocessing
+        # Process handle (is_alive/terminate) keeps working.
+        import pickle
+        import tempfile
+
+        fd, path = tempfile.mkstemp(prefix="vllm_server_", suffix=".pkl")
+        with os.fdopen(fd, "wb") as f:
+            pickle.dump((kwargs, env), f)
+        os.execve(
+            python,
+            [python, "-m", "vime.backends.vllm_utils.vllm_server_entry", path],
+            env,
+        )
+
+    os.environ.update(env)
+
+    from vllm.entrypoints.cli.serve import ServeSubcommand
+    try:
+        from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
+    except ImportError:
+        from vllm.entrypoints.launchers.cli_args import make_arg_parser, validate_parsed_serve_args
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+    ns = argparse.Namespace(**kwargs)
+    parser = make_arg_parser(FlexibleArgumentParser())
+    args = parser.parse_args(args=[], namespace=ns)
+    validate_parsed_serve_args(args)
+    ServeSubcommand.cmd(args)
+
+
+def _wait_server_healthy(base_url, is_process_alive):
+    while True:
+        try:
+            response = requests.get(f"{base_url}/health")
+            if response.status_code == 200:
+                break
+        except requests.RequestException:
+            pass
+
+        if not is_process_alive():
+            raise Exception("Server process terminated unexpectedly.")
+
+        time.sleep(2)
+
+
+class VLLMEngine(RayActor):
+    def __init__(
+        self,
+        args,
+        rank: int,
+        worker_type: str = "regular",
+        base_gpu_id: int | None = None,
+        model_path: str | None = None,
+        vllm_overrides: dict | None = None,
+        num_gpus_per_engine: int | None = None,
+    ):
+        self.args = args
+        self.rank = rank
+        self.worker_type = worker_type
+        self.base_gpu_id = base_gpu_id
+        self.model_path = model_path or args.hf_checkpoint
+        self.vllm_overrides = vllm_overrides or {}
+        self.num_gpus_per_engine = num_gpus_per_engine
+        self._weight_version: str | None = None
+
+    def init(
+        self,
+        dist_init_addr,
+        port,
+        nccl_port,
+        host=None,
+        disaggregation_bootstrap_port=None,
+        router_ip=None,
+        router_port=None,
+    ):
+        del nccl_port
+
+        self.router_ip = _wrap_ipv6(router_ip) if router_ip is not None else None
+        self.router_port = router_port
+
+        host = host or get_host_info()[1]
+
+        host = _wrap_ipv6(host)
+        ip_part, port_part = dist_init_addr.rsplit(":", 1)
+        dist_init_addr = f"{_wrap_ipv6(ip_part)}:{port_part}"
+
+        server_args_dict, external_engine_need_check_fields = _compute_server_args(
+            self.args,
+            self.rank,
+            dist_init_addr,
+            host,
+            port,
+            self.worker_type,
+            disaggregation_bootstrap_port,
+            base_gpu_id=self.base_gpu_id,
+            vllm_overrides=self.vllm_overrides,
+            num_gpus_per_engine=self.num_gpus_per_engine,
+        )
+
+        self.node_rank = server_args_dict["node_rank"]
+        self.server_host = server_args_dict["host"]  # with [] if ipv6
+        self.server_port = server_args_dict["port"]
+
+        if self.args.rollout_external:
+            self._init_external(server_args_dict, external_engine_need_check_fields=external_engine_need_check_fields)
+        else:
+            self._init_normal(server_args_dict)
+
+    def _init_external(self, expect_server_args, external_engine_need_check_fields):
+        logger.info(f"Use external vLLM engine (rank={self.rank}, expect_server_args={expect_server_args})")
+
+        def _matches_expected(actual, expected):
+            if isinstance(actual, dict) and isinstance(expected, dict):
+                return all(key in actual and _matches_expected(actual[key], value) for key, value in expected.items())
+            return actual == expected
+
+        def _sanity_check_server_args(actual_server_args, expect_server_args):
+            for name in external_engine_need_check_fields:
+                expect_value = expect_server_args.get(name)
+                actual_value = actual_server_args.get(name)
+                assert _matches_expected(
+                    actual_value, expect_value
+                ), f"{name=} {expect_value=} {actual_value=} {expect_server_args=} {actual_server_args=}"
+
+        actual_server_args = get_server_info(f"http://{self.server_host}:{self.server_port}")
+        _sanity_check_server_args(actual_server_args, expect_server_args)
+        self._register_to_router(expect_server_args)
+
+    def _init_normal(self, server_args_dict):
+        logger.info(f"Launch vLLM api_server at: {self.server_host}:{self.server_port}")
+        self.process = launch_server_process(server_args_dict)
+        self._register_to_router(server_args_dict)
+
+    def _register_to_router(self, server_args_dict):
+        if self.worker_type == "encoder":
+            return
+
+        if self.node_rank == 0 and self.router_ip and self.router_port:
+            worker_url = f"http://{self.server_host}:{self.server_port}"
+            payload = {
+                "url": worker_url,
+                "worker_type": self.worker_type,
+            }
+            if self.worker_type == "prefill":
+                bootstrap_port = server_args_dict.get("_disaggregation_bootstrap_port")
+                if bootstrap_port is None:
+                    bootstrap_port = server_args_dict.get("disaggregation_bootstrap_port")
+                if bootstrap_port is None:
+                    raise RuntimeError(
+                        f"Prefill worker {worker_url} does not have disaggregation_bootstrap_port; cannot register it to the PD router."
+                    )
+                payload["bootstrap_port"] = bootstrap_port
+            response = requests.post(
+                f"http://{self.router_ip}:{self.router_port}/workers",
+                json=payload,
+            )
+            response.raise_for_status()
+
+    def _make_request(self, endpoint: str, payload: dict | None = None):
+        """Make a POST request to the specified endpoint with the given payload.
+
+        Args:
+            endpoint: The API endpoint to call
+            payload: The JSON payload to send (default: empty dict)
+
+        Returns:
+            The JSON response from the server
+        """
+        if self.node_rank != 0:
+            return
+
+        url = f"http://{self.server_host}:{self.server_port}/{endpoint}"
+        response = requests.post(url, json=payload or {})
+        try:
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            e.add_note(f"{response.text=}")
+            raise
+        if not response.content or not response.content.strip():
+            return {"ok": True}
+        return response.json()
+
+    def health_generate(self, timeout: float = 5.0) -> bool:
+        if self.node_rank != 0:
+            return True
+
+        response = requests.get(
+            f"http://{self.server_host}:{self.server_port}/health",
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        return True
+
+    def update_weights(self, update_info: dict | list[dict | None]):
+        infos = update_info if isinstance(update_info, list) else [update_info]
+        payload = []
+        for info in infos:
+            if info is None:
+                payload.append(None)
+                continue
+            worker_payload = dict(info)
+            ipc_handles = worker_payload.pop("ipc_handles", None)
+            if ipc_handles is not None:
+                worker_payload["ipc_handles_pickled"] = base64.b64encode(cloudpickle.dumps(ipc_handles)).decode(
+                    "utf-8"
+                )
+            payload.append(worker_payload)
+        if not isinstance(update_info, list):
+            payload = payload[0]
+        return self._make_request("update_weights", {"update_info": payload})
+
+    def flush_cache(self):
+        if self.node_rank != 0:
+            return
+        params = {"reset_running_requests": False}
+        requests.post(
+            f"http://{self.server_host}:{self.server_port}/reset_prefix_cache", params=params
+        ).raise_for_status()
+
+    def get_url(self):
+        if self.node_rank != 0:
+            return None
+        return f"http://{self.server_host}:{self.server_port}"
+
+    def shutdown(self):
+        if self.args.rollout_external:
+            return
+
+        logger.info(f"Shutdown engine {self.server_host}:{self.server_port}...")
+        if self.worker_type != "encoder" and self.node_rank == 0:
+            worker_url = f"http://{self.server_host}:{self.server_port}"
+            try:
+                all_workers = requests.get(f"http://{self.router_ip}:{self.router_port}/workers").json()["workers"]
+                for worker in all_workers:
+                    if worker["url"] == worker_url:
+                        response = requests.delete(
+                            f"http://{self.router_ip}:{self.router_port}/workers/{quote(worker_url, safe='')}",
+                        )
+                        response.raise_for_status()
+                        break
+                else:
+                    logger.warning(f"Worker {worker_url} not found in vllm-router during shutdown.")
+            except Exception as e:
+                logger.warning(f"Failed to fetch workers list or remove worker: {e}")
+
+        kill_process_tree(self.process.pid)
+
+    def get_weight_version(self):
+        if self.node_rank != 0:
+            return
+        response = requests.get(f"http://{self.server_host}:{self.server_port}/weight_info")
+        try:
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as error:
+            error.add_note(f"{response.text=}")
+            raise
+        weight_version = response.json()["weight_version"]
+        self._weight_version = None if weight_version is None else str(weight_version)
+        return self._weight_version
+
+    def set_weight_version(self, new_version: str):
+        version = str(new_version)
+        result = self._make_request("update_weight_version", {"new_version": version})
+        self._weight_version = version
+        return result
+
+    def release_memory_occupation(self, level: int = 2):
+        self.flush_cache()
+        response = requests.post(f"http://{self.server_host}:{self.server_port}/sleep", params={"level": level})
+        response.raise_for_status()
+        if not response.content or not response.content.strip():
+            return {"ok": True}
+        return response.json()
+
+    def resume_memory_occupation(self, tags: list[str] = None):
+        tags = _normalize_vllm_wake_tags(tags)
+        # vLLM ``POST /wake_up`` uses ``query_params.getlist("tags")``, not JSON.
+        # Omit params when ``tags`` is empty so the server wakes all tags (see api_router.wake_up).
+        wake_params: list[tuple[str, str]] | None = [("tags", t) for t in tags] if tags else None
+        response = requests.post(f"http://{self.server_host}:{self.server_port}/wake_up", params=wake_params)
+        response.raise_for_status()
+        if not response.content or not response.content.strip():
+            return {"ok": True}
+        return response.json()
+
+    def check_weights(self, action: str):
+        del action
+        return {"ok": True, "supported": False}
+
+    def init_weight_transfer_engine(self, payload: dict) -> dict:
+        return self._make_request("init_weight_transfer_engine", payload)
+
+    def start_weight_update(self, is_checkpoint_format: bool = True) -> dict:
+        return self._make_request(
+            "start_weight_update",
+            {"is_checkpoint_format": is_checkpoint_format},
+        )
+
+    def start_draft_weight_update(self) -> dict:
+        return self._make_request("start_draft_weight_update", {})
+
+    def finish_weight_update(self, weight_version: str | None = None) -> dict:
+        payload = {} if weight_version is None else {"weight_version": str(weight_version)}
+        result = self._make_request("finish_weight_update", payload)
+        if weight_version is not None:
+            self._weight_version = str(weight_version)
+        return result
+
+    def pull_weights(self, target_version: int):
+        if self.node_rank != 0:
+            return
+        response = requests.post(
+            f"http://{self.server_host}:{self.server_port}/collective_rpc",
+            json={
+                "method": "pull_weights",
+                "kwargs": {
+                    "local_checkpoint_dir": self.args.update_weight_local_checkpoint_dir,
+                    "source_dir": self.args.update_weight_disk_dir,
+                    "target_version": target_version,
+                    "pre_read_hook": self.args.custom_update_weight_pre_read_path,
+                },
+            },
+        )
+        response.raise_for_status()
+        result = response.json()
+        self.set_weight_version(str(target_version))
+        return result
+
+    def update_weights_from_disk(
+        self,
+        model_path: str,
+        load_format: str | None = None,
+        weight_version: str | None = None,
+    ):
+        del load_format
+        if self.node_rank != 0:
+            return
+        response = requests.post(
+            f"http://{self.server_host}:{self.server_port}/collective_rpc",
+            json={"method": "reload_weights", "kwargs": {"weights_path": model_path, "is_checkpoint_format": True}},
+        )
+        try:
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            e.add_note(f"{response.text=}")
+            raise
+        if weight_version is not None:
+            self.set_weight_version(str(weight_version))
+        return response.json()
+
+    def init_weights_update_group(self, master_address, master_port, rank_offset, world_size, group_name, backend):
+        del group_name, backend
+        return self._make_request(
+            "init_weight_transfer_engine",
+            {
+                "init_info": {
+                    "master_address": master_address,
+                    "master_port": master_port,
+                    "rank_offset": rank_offset,
+                    "world_size": world_size,
+                }
+            },
+        )
+
+    def destroy_weights_update_group(self, group_name):
+        del group_name
+        return None
+
+    def update_weights_from_distributed(
+        self,
+        names,
+        dtypes,
+        shapes,
+        *,
+        flush_cache=False,
+        weight_version: str,
+        packed: bool = True,
+    ):
+        if flush_cache:
+            self.flush_cache()
+        dtype_names = [str(d).replace("torch.", "") for d in dtypes]
+        update_info = {
+            "names": names,
+            "dtype_names": dtype_names,
+            "shapes": [list(s) for s in shapes],
+            "packed": packed,
+        }
+        result = self._make_request("update_weights", {"update_info": update_info})
+        del weight_version
+        return result
+
+    def pause_generation(self):
+        if self.node_rank != 0:
+            return
+        response = requests.post(
+            f"http://{self.server_host}:{self.server_port}/pause",
+            params={"mode": "keep", "clear_cache": "false"},
+            json={},
+            timeout=120,
+        )
+        response.raise_for_status()
+        return response
+
+    def continue_generation(self):
+        if self.node_rank != 0:
+            return
+        response = requests.post(f"http://{self.server_host}:{self.server_port}/resume", json={})
+        response.raise_for_status()
+        return response
+
+    def post_process_weights(
+        self,
+        restore_weights_before_load: bool = False,
+        post_process_quantization: bool = False,
+    ):
+        del restore_weights_before_load, post_process_quantization
+        return {"ok": True, "noop": True}
+
+    def start_profile(
+        self,
+        output_dir: str | None = None,
+        start_step: int | None = None,
+        num_steps: int | None = None,
+        activities: list[str] | None = None,
+        profile_by_stage: bool = False,
+        with_stack: bool | None = None,
+        record_shapes: bool | None = None,
+    ):
+        if self.node_rank != 0:
+            return
+        response = requests.post(f"http://{self.server_host}:{self.server_port}/start_profile", json={})
+        response.raise_for_status()
+        return response
+
+    def stop_profile(self):
+        if self.node_rank != 0:
+            return
+        response = requests.post(f"http://{self.server_host}:{self.server_port}/stop_profile", json={})
+        response.raise_for_status()
+        return response
+
+    def simulate_crash(self):
+        if self.args.rollout_external or not getattr(self, "process", None):
+            logger.info(
+                "simulate_crash called but no local engine process exists (rollout_external=%s); skip kill",
+                self.args.rollout_external,
+            )
+            return
+
+        logger.info(f"Simulating crash on engine {self.server_host}:{self.server_port}...")
+        self.shutdown()
+
+
+def _normalize_vllm_wake_tags(tags: list[str] | None) -> list[str] | None:
+    if not tags:
+        return tags
+    normalized = [t for t in tags if t in _VLLM_WAKE_TAGS]
+    dropped = set(tags) - set(normalized)
+    if dropped:
+        logger.debug("vLLM wake_up: dropped tags not supported by vLLM: %s", sorted(dropped))
+    return normalized or None
+
+
+def _resolve_parallel_sizes(
+    args, *, gpus_per_engine: int, overrides: dict[str, Any] | None = None
+) -> tuple[int, int, int, int]:
+    overrides = {key.replace("-", "_"): value for key, value in (overrides or {}).items()}
+    legacy_fields = _LEGACY_VLLM_PARALLEL_FIELDS.intersection(overrides)
+    if legacy_fields:
+        raise ValueError(
+            "vLLM overrides must use native field names: tensor_parallel_size, "
+            "pipeline_parallel_size, prefill_context_parallel_size, and data_parallel_size; "
+            f"got {sorted(legacy_fields)}"
+        )
+    invalid_fields = _INVALID_VLLM_PARALLEL_FIELDS.intersection(overrides)
+    if invalid_fields:
+        raise ValueError(
+            "vLLM does not accept explicit EP/MoE-DP sizes; use "
+            "enable_expert_parallel with TP/PCP/DP instead: "
+            f"{sorted(invalid_fields)}"
+        )
+    pp = int(overrides.get("pipeline_parallel_size", getattr(args, "vllm_pipeline_parallel_size", 1)) or 1)
+    pcp = int(
+        overrides.get(
+            "prefill_context_parallel_size",
+            getattr(args, "vllm_prefill_context_parallel_size", 1),
+        )
+        or 1
+    )
+    dp = int(
+        overrides.get(
+            "data_parallel_size",
+            getattr(args, "vllm_dp_size", None) or getattr(args, "vllm_data_parallel_size", 1),
+        )
+        or 1
+    )
+    tp_override = overrides.get("tensor_parallel_size")
+    parallel_divisor = pp * pcp * dp
+    if tp_override is None and gpus_per_engine % parallel_divisor != 0:
+        raise ValueError(
+            f"num_gpus_per_engine ({gpus_per_engine}) must be divisible by "
+            "vllm_pipeline_parallel_size * vllm_prefill_context_parallel_size * "
+            f"vllm_data_parallel_size ({pp} * {pcp} * {dp} = {parallel_divisor})"
+        )
+    tp = int(tp_override) if tp_override is not None else gpus_per_engine // parallel_divisor
+    if tp * pp * pcp * dp != gpus_per_engine:
+        raise ValueError(
+            f"num_gpus_per_engine ({gpus_per_engine}) must equal tensor_parallel_size * "
+            "pipeline_parallel_size * prefill_context_parallel_size * data_parallel_size "
+            f"({tp} * {pp} * {pcp} * {dp} = {tp * pp * pcp * dp})"
+        )
+    return tp, pp, pcp, dp
+
+
+def _compute_server_args(
+    args,
+    rank,
+    dist_init_addr,
+    host,
+    port,
+    worker_type: str = "regular",
+    disaggregation_bootstrap_port: int | None = None,
+    base_gpu_id: int | None = None,
+    vllm_overrides: dict | None = None,
+    num_gpus_per_engine: int | None = None,
+):
+    normalized_overrides = {}
+    for key, value in (vllm_overrides or {}).items():
+        normalized_key = key.replace("-", "_")
+        normalized_overrides[normalized_key] = value
+    vllm_overrides = normalized_overrides
+    ec_transfer_override = vllm_overrides.pop("ec_transfer_config", None)
+
+    _gpus_per_engine = num_gpus_per_engine or args.rollout_num_gpus_per_engine
+    nnodes = max(1, _gpus_per_engine // args.num_gpus_per_node)
+    node_rank = rank % nnodes
+    if nnodes == 1:
+        local_num_gpus = min(args.num_gpus_per_node, _gpus_per_engine)
+    else:
+        if _gpus_per_engine % nnodes != 0:
+            raise ValueError(
+                f"rollout_num_gpus_per_engine ({_gpus_per_engine}) must be divisible by the number of nodes per engine ({nnodes})"
+            )
+        local_num_gpus = _gpus_per_engine // nnodes
+
+    tp, pp, pcp, dp = _resolve_parallel_sizes(args, gpus_per_engine=_gpus_per_engine, overrides=vllm_overrides)
+    base = base_gpu_id if base_gpu_id is not None else get_base_gpu_id(args, rank)
+
+    master_addr: str | None = None
+    master_port: int | None = None
+    if nnodes > 1:
+        if not dist_init_addr:
+            raise ValueError("dist_init_addr is required when launching a multi-node vLLM engine")
+        ip_part, port_part = dist_init_addr.rsplit(":", 1)
+        master_addr = ip_part.strip("[]")
+        master_port = int(port_part)
+
+    kwargs: dict[str, Any] = {
+        "model": str(args.hf_checkpoint),
+        "trust_remote_code": True,
+        "seed": args.seed + rank * args.num_gpus_per_node,
+        "host": _wrap_ipv6(host or "127.0.0.1"),
+        "port": port,
+        "nnodes": nnodes,
+        "node_rank": node_rank,
+        "tensor_parallel_size": tp,
+        "logprobs_mode": "processed_logprobs",
+        "enable_prompt_tokens_details": True,
+        "enable_server_load_tracking": True,
+    }
+
+    if pp > 1:
+        kwargs["pipeline_parallel_size"] = pp
+
+    if nnodes > 1:
+        kwargs["master_addr"] = master_addr
+        kwargs["master_port"] = master_port
+        kwargs["data_parallel_backend"] = "mp"
+        kwargs["distributed_executor_backend"] = "mp"
+        if node_rank != 0:
+            kwargs["headless"] = True
+
+    if worker_type == "prefill":
+        assert (
+            disaggregation_bootstrap_port is not None
+        ), "disaggregation_bootstrap_port must be set for prefill worker"
+        kwargs["kv_transfer_config"] = {
+            "kv_connector": "NixlConnector",
+            "kv_role": "kv_producer",
+        }
+    elif worker_type == "decode":
+        kwargs["kv_transfer_config"] = {
+            "kv_connector": "NixlConnector",
+            "kv_role": "kv_consumer",
+        }
+
+    if ec_transfer_override is not None and worker_type in ("encoder", "regular", "prefill"):
+        kwargs["ec_transfer_config"] = {
+            "ec_connector": "ECExampleConnector",
+            "ec_role": "ec_producer" if worker_type == "encoder" else "ec_consumer",
+            **ec_transfer_override,
+        }
+
+    if args.use_rollout_routing_replay:
+        kwargs["enable_return_routed_experts"] = True
+    if getattr(args, "vllm_speculative_config", None) is not None:
+        kwargs["per_request_spec_decode_metrics"] = "summary"
+    if getattr(args, "rollout_top_p", 1.0) != 1.0:
+        kwargs["return_sampling_mask"] = True
+    if args.fp16:
+        kwargs["dtype"] = "float16"
+
+    if args.offload_rollout and not getattr(args, "vllm_enable_sleep_mode", False):
+        kwargs["enable_sleep_mode"] = True
+        args.vllm_enable_sleep_mode = True
+
+    if (
+        getattr(args, "rollout_max_context_len", None) is not None
+        and getattr(args, "vllm_max_model_len", None) is None
+    ):
+        kwargs["max_model_len"] = args.rollout_max_context_len
+
+    if args.colocate:
+        kwargs["weight_transfer_config"] = {"backend": "ipc"}
+        # The colocate worker extension must go through the server kwargs (the
+        # old CLI --worker-extension-cls path). It is NOT a vllm entry-point
+        # plugin, so putting its module path in VLLM_PLUGINS both fails to
+        # load it and filters the platform plugins out of every subprocess
+        # that re-imports vllm after the env update (ApiServer children lose
+        # vllm_ascend -> "Device string must not be empty").
+        kwargs.setdefault(
+            "worker_extension_cls",
+            "vime.backends.vllm_utils.colocate_worker.vLLMColocateWorkerExtension",
+        )
+    else:
+        kwargs["weight_transfer_config"] = {"backend": "nccl"}
+
+    if worker_type == "encoder":
+        # vLLM EPD producers have no language-model KV cache groups. Prefix
+        # caching must therefore be disabled; vLLM's EPD reference launcher
+        # uses the same setting.
+        kwargs["enable_prefix_caching"] = False
+
+    external_engine_need_check_fields = [k for k in kwargs.keys() if k not in _EXTERNAL_ENGINE_SKIP_CHECK_FIELDS]
+
+    global _VLLM_SERVER_FIELDS  # noqa: PLW0603
+    if _VLLM_SERVER_FIELDS is None:
+        _VLLM_SERVER_FIELDS = _vllm_server_field_names()
+
+    for key, value in vars(args).items():
+        if not key.startswith("vllm_"):
+            continue
+        field_name = key[len("vllm_") :]
+        if field_name not in _VLLM_SERVER_FIELDS:
+            continue
+        if field_name in kwargs:
+            continue
+        if value is None:
+            continue
+        kwargs[field_name] = value
+
+    # Per-server-group overrides from --vllm-config YAML.
+    # Applied after base args so they take highest priority.
+    if vllm_overrides:
+        for key, value in vllm_overrides.items():
+            if key in ("model_path",) or key.startswith("disaggregation"):
+                continue
+            if key in kwargs:
+                logger.info(f"vllm_overrides: overriding {key}={kwargs[key]} -> {value} (rank={rank})")
+            kwargs[key] = value
+        if "model_path" in vllm_overrides:
+            kwargs["model"] = str(vllm_overrides["model_path"])
+
+    kwargs["host"] = _wrap_ipv6(kwargs.get("host") or "127.0.0.1")
+
+    # vLLM-specific: topology metadata consumed by launch_server_process / _build_subprocess_env.
+    # These keys are stripped before passing to vLLM's argparse.
+    kwargs["_args"] = args
+    kwargs["_rank"] = rank
+    kwargs["_worker_type"] = worker_type
+    kwargs["_visible_devices"] = ",".join(str(base + i) for i in range(local_num_gpus))
+    kwargs["_tp_size"] = tp
+    kwargs["_pp_size"] = pp
+    kwargs["_pcp_size"] = pcp
+    kwargs["_dp_size"] = dp
+    kwargs["_disaggregation_bootstrap_port"] = disaggregation_bootstrap_port
+
+    return kwargs, external_engine_need_check_fields
+
+
+def _vllm_server_field_names() -> frozenset[str]:
+    """Return the vLLM fields accepted by CLI generation and config overrides."""
+    from vllm.engine.arg_utils import AsyncEngineArgs
+    try:
+        from vllm.entrypoints.openai.cli_args import FrontendArgs
+    except ImportError:
+        from vllm.entrypoints.launchers.cli_args import FrontendArgs
+
+    return frozenset(f.name for f in (*dataclasses.fields(AsyncEngineArgs), *dataclasses.fields(FrontendArgs)))
+
+
+_VLLM_SERVER_FIELDS: frozenset[str] | None = None
+
+
+_EXTERNAL_ENGINE_SKIP_CHECK_FIELDS = [
+    "model",
+    "trust_remote_code",
+    "seed",
+    "host",
+    "port",
+    "tensor_parallel_size",
+    "logprobs_mode",
+    "enable_prompt_tokens_details",
+    "enable_server_load_tracking",
+]

@@ -1,0 +1,40 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index c782cc326..2f2d55bf9 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -7,7 +7,7 @@ requires = [
+     "setuptools>=77.0.3,<81.0.0",
+     "setuptools-scm>=8.0",
+     "setuptools-rust>=1.9.0",
+-    "torch == 2.11.0",
++    "torch==2.12.0+cpu",
+     "wheel",
+     "jinja2",
+ ]
+diff --git a/requirements/cpu.txt b/requirements/cpu.txt
+index 5ec338af7..1c3a1cb6f 100644
+--- a/requirements/cpu.txt
++++ b/requirements/cpu.txt
+@@ -7,8 +7,8 @@ setuptools==77.0.3 # this version can reuse CMake build dir
+ numba == 0.65.0; platform_machine != "s390x" # Required for N-gram speculative decoding
+ 
+ # Dependencies for CPUs
+-torch==2.11.0+cpu; platform_machine == "x86_64" or platform_machine == "s390x" or platform_machine == "aarch64"
+-torch==2.11.0; platform_system == "Darwin" or platform_machine == "ppc64le" or platform_machine == "riscv64"
++torch==2.12.0+cpu; platform_machine == "x86_64" or platform_machine == "s390x" or platform_machine == "aarch64"
++torch==2.12.0; platform_system == "Darwin" or platform_machine == "ppc64le" or platform_machine == "riscv64"
+ 
+ # required for the image processor of minicpm-o-2_6, this must be updated alongside torch
+ torchaudio; platform_machine != "s390x" and platform_machine != "riscv64"
+diff --git a/vllm/entrypoints/serve/disagg/serving.py b/vllm/entrypoints/serve/disagg/serving.py
+--- a/vllm/entrypoints/serve/disagg/serving.py
++++ b/vllm/entrypoints/serve/disagg/serving.py
+@@ -130,4 +130,8 @@ class ServingTokens(OpenAIServing):
+         sampling_params = request.sampling_params
++        if request.kv_transfer_params is not None:
++            extra_args = dict(sampling_params.extra_args or {})
++            extra_args["kv_transfer_params"] = request.kv_transfer_params
++            sampling_params.extra_args = extra_args
+         max_num_seqs = self.engine_client.vllm_config.scheduler_config.max_num_seqs
+         if sampling_params.n > max_num_seqs:
+             return self.create_error_response(

@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="440" viewBox="0 0 1000 440" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="13">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#374151"/></marker>
+  </defs>
+  <rect width="1000" height="440" fill="#ffffff"/>
+  <text x="20" y="30" font-size="17" font-weight="bold" fill="#111827">图 5　参数分流与 torchtitan 配置合成</text>
+
+  <!-- CLI -->
+  <rect x="20" y="60" width="200" height="300" rx="8" fill="#f9fafb" stroke="#6b7280"/>
+  <text x="120" y="84" text-anchor="middle" font-weight="bold">train.py 命令行</text>
+  <text x="120" y="110" text-anchor="middle" font-size="12">torchtitan_parse_args</text>
+  <text x="120" y="128" text-anchor="middle" font-size="12">（parse_known_args）</text>
+  <rect x="40" y="148" width="160" height="44" rx="4" fill="#ecfdf5" stroke="#16a34a"/>
+  <text x="120" y="167" text-anchor="middle" font-size="12">vime 参数</text>
+  <text x="120" y="184" text-anchor="middle" font-size="11">--save、--colocate …</text>
+  <rect x="40" y="206" width="160" height="44" rx="4" fill="#eff6ff" stroke="#2563eb"/>
+  <text x="120" y="225" text-anchor="middle" font-size="12">torchtitan 参数</text>
+  <text x="120" y="242" text-anchor="middle" font-size="11">--a.b、--module、--config</text>
+  <rect x="40" y="264" width="160" height="44" rx="4" fill="#f3f4f6" stroke="#9ca3af"/>
+  <text x="120" y="283" text-anchor="middle" font-size="12">vLLM 参数</text>
+  <text x="120" y="300" text-anchor="middle" font-size="11">由 vllm_parse_args 单独解析</text>
+  <text x="120" y="336" text-anchor="middle" font-size="11" fill="#6b7280">args.titan_cli_overrides</text>
+  <text x="120" y="352" text-anchor="middle" font-size="11" fill="#6b7280">保存 torchtitan 参数原文</text>
+
+  <!-- three layers -->
+  <text x="420" y="66" text-anchor="middle" font-weight="bold" fill="#374151">_titan_argv 拼出的 argv（后者覆盖前者）</text>
+  <rect x="280" y="80" width="280" height="60" rx="6" fill="#ffffff" stroke="#16a34a"/>
+  <text x="420" y="104" text-anchor="middle">① 预置配置：--module / --config</text>
+  <text x="420" y="124" text-anchor="middle" font-size="11">config_registry 函数返回的 Trainer.Config 作为基线</text>
+  <rect x="280" y="156" width="280" height="60" rx="6" fill="#ffffff" stroke="#16a34a"/>
+  <text x="420" y="180" text-anchor="middle">② vime 派生值</text>
+  <text x="420" y="200" text-anchor="middle" font-size="11">training.seq_len、checkpoint.folder …</text>
+  <rect x="280" y="232" width="280" height="60" rx="6" fill="#ffffff" stroke="#2563eb"/>
+  <text x="420" y="256" text-anchor="middle">③ 脚本点分参数</text>
+  <text x="420" y="276" text-anchor="middle" font-size="11">--parallelism.tensor_parallel_degree 4 …</text>
+  <line x1="200" y1="170" x2="276" y2="186" stroke="#16a34a" marker-end="url(#ar)"/>
+  <line x1="200" y1="228" x2="276" y2="262" stroke="#2563eb" marker-end="url(#ar)"/>
+  <text x="420" y="316" text-anchor="middle" font-size="11" fill="#6b7280">① 在 argv 中以 --module/--config 出现，由 ConfigManager 加载；</text>
+  <text x="420" y="332" text-anchor="middle" font-size="11" fill="#6b7280">② ③ 同为 --a.b 形式，按出现顺序由 tyro 覆盖</text>
+
+  <!-- manager -->
+  <rect x="610" y="120" width="160" height="110" rx="8" fill="#eff6ff" stroke="#2563eb" stroke-width="1.5"/>
+  <text x="690" y="150" text-anchor="middle" font-weight="bold">ConfigManager</text>
+  <text x="690" y="172" text-anchor="middle" font-size="12">parse_args</text>
+  <text x="690" y="194" text-anchor="middle" font-size="11">加载预置配置 → tyro 覆盖</text>
+  <text x="690" y="212" text-anchor="middle" font-size="11">（torchtitan 上游）</text>
+  <line x1="560" y1="186" x2="606" y2="176" stroke="#374151" marker-end="url(#ar)"/>
+
+  <!-- engine side -->
+  <rect x="820" y="60" width="160" height="50" rx="6" fill="#f3f4f6" stroke="#9ca3af"/>
+  <text x="900" y="90" text-anchor="middle">Trainer.Config</text>
+  <rect x="820" y="130" width="160" height="50" rx="6" fill="#f3f4f6" stroke="#9ca3af"/>
+  <text x="900" y="152" text-anchor="middle">apply_overrides</text>
+  <text x="900" y="170" text-anchor="middle" font-size="11">替换命中的配置节点</text>
+  <rect x="820" y="200" width="160" height="66" rx="6" fill="#ecfdf5" stroke="#16a34a"/>
+  <text x="900" y="222" text-anchor="middle">_validate</text>
+  <text x="900" y="240" text-anchor="middle" font-size="11">assert_model_matches</text>
+  <text x="900" y="256" text-anchor="middle" font-size="11">_checkpoint</text>
+  <rect x="820" y="286" width="160" height="50" rx="6" fill="#ecfdf5" stroke="#16a34a"/>
+  <text x="900" y="316" text-anchor="middle">组件装配（4.4 节）</text>
+  <path d="M770,150 L800,150 L800,85 L816,85" fill="none" stroke="#374151" marker-end="url(#ar)"/>
+  <line x1="900" y1="110" x2="900" y2="126" stroke="#374151" marker-end="url(#ar)"/>
+  <line x1="900" y1="180" x2="900" y2="196" stroke="#374151" marker-end="url(#ar)"/>
+  <line x1="900" y1="266" x2="900" y2="282" stroke="#374151" marker-end="url(#ar)"/>
+
+  <text x="20" y="400" font-size="12" fill="#374151">主控进程只解析 vime 参数、保存 torchtitan 参数原文；torchtitan 配置在每个训练 rank 的 TitanEngine.initialize 中合成，</text>
+  <text x="20" y="420" font-size="12" fill="#374151">因此依赖 torchtitan 配置的校验（并行度、精度、seq_len）只能放在 _validate，依赖 vime 参数的校验放在 torchtitan_validate_args。</text>
+</svg>

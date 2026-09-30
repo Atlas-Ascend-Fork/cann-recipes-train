@@ -1,0 +1,248 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 5640851f..2522db5e 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -22,8 +22,8 @@ find_package(Torch REQUIRED)
+ run_python(TORCH_VERSION
+   "import torch; print(torch.__version__)" "Failed to locate torch path")
+ # check torch version is 2.10.0
+-if(NOT ${TORCH_VERSION} VERSION_EQUAL "2.10.0")
+-  message(FATAL_ERROR "Expected PyTorch version 2.10.0, but found ${TORCH_VERSION}")
++if(NOT (${TORCH_VERSION} VERSION_EQUAL "2.10.0+cpu" OR ${TORCH_VERSION} VERSION_EQUAL "2.12.0+cpu"))
++  message(FATAL_ERROR "Expected PyTorch version 2.10.0+cpu or 2.12.0+cpu, but found ${TORCH_VERSION}")
+ endif()
+ 
+ set(RUN_MODE "npu" CACHE STRING "cpu/sim/npu")
+diff --git a/pyproject.toml b/pyproject.toml
+index 1d445b17..74737c60 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -18,8 +18,8 @@ requires = [
+     "setuptools>=64",
+     "setuptools-scm>=8",
+     "transformers==5.5.4",
+-    "torch-npu==2.10.0",
+-    "torch==2.10.0",
++    "torch-npu",
++    "torch",
+     "torchvision",
+     "wheel",
+     "msgpack",
+diff --git a/requirements.txt b/requirements.txt
+index 3e67ac22..36220ba6 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -13,10 +13,10 @@ pandas
+ psutil
+ setuptools>=64
+ setuptools-scm>=8
+-torch==2.10.0
+-torch-npu==2.10.0
+-torchvision==0.25.0
+-torchaudio==2.10.0
++torch>=2.10.0
++torch-npu
++torchvision==0.27.0+cpu
++torchaudio==2.11.0+cpu
+ triton-ascend==3.2.1
+ wheel
+ xgrammar>=0.1.30
+diff --git a/vllm_ascend/compilation/compiler_interface.py b/vllm_ascend/compilation/compiler_interface.py
+index f9c1ba3b..2f34cb91 100644
+--- a/vllm_ascend/compilation/compiler_interface.py
++++ b/vllm_ascend/compilation/compiler_interface.py
+@@ -119,6 +119,13 @@ def _configure_backend(
+             "clone_input": False,
+             "clone_output": False,
+         }
++        capture_limit = os.getenv("VLLM_ASCEND_NPUGRAPH_CAPTURE_LIMIT")
++        if capture_limit:
++            try:
++                options["capture_limit"] = int(capture_limit)
++            except ValueError as exc:
++                raise ValueError("VLLM_ASCEND_NPUGRAPH_CAPTURE_LIMIT must be an integer") from exc
++
+         if ascend_compilation_config.enable_static_kernel:
+             logger.info_once(
+                 "enable_static_kernel is enabled, static shape kernel will be used to accelerate aclgraph execution.",
+@@ -244,6 +251,7 @@ class AscendCompiler(CompilerInterface):
+             "torch_npu_version": torch_npu.__version__,
+             "enable_npugraph_ex": ascend_compilation_config.enable_npugraph_ex,
+             "enable_static_kernel": ascend_compilation_config.enable_static_kernel,
++            "npugraph_capture_limit": os.getenv("VLLM_ASCEND_NPUGRAPH_CAPTURE_LIMIT", ""),
+         }
+         logger.info("AscendCompiler hash factors: %s", factors)
+         return sha256(str(factors).encode(), usedforsecurity=False).hexdigest()[:10]
+diff --git a/vllm_ascend/distributed/weight_transfer/hccl_engine.py b/vllm_ascend/distributed/weight_transfer/hccl_engine.py
+index 9bb563af..babe36a2 100644
+--- a/vllm_ascend/distributed/weight_transfer/hccl_engine.py
++++ b/vllm_ascend/distributed/weight_transfer/hccl_engine.py
+@@ -40,6 +40,12 @@ class HCCLWeightTransferInitInfo(WeightTransferInitInfo):
+     Typically 1 (trainer is rank 0, workers start at rank 1)."""
+     world_size: int
+     """Total number of participants in the HCCL group (trainer + all workers)."""
++    leader_relay: bool = False
++    """Only the first TP rank joins the external trainer HCCL group.
++
++    The leader then relays received checkpoint-format tensors to the other TP
++    ranks through vLLM's already-initialized TP process group.
++    """
+ 
+ 
+ @dataclass
+@@ -154,8 +160,16 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo,
+         # Unique rank across all DP groups
+         worker_rank = dp_rank * world_size_per_dp + rank_within_dp
+         rank = worker_rank + init_info.rank_offset
+-        # Create stateless process group
+         device = torch.accelerator.current_device_index()
++        if init_info.leader_relay and rank_within_dp != 0:
++            # In leader-relay mode only the engine leader (rank 0 inside the
++            # vLLM engine) joins the external trainer<->vLLM HCCL group. Other
++            # TP ranks receive raw checkpoint tensors via the engine's existing
++            # TP group in NPUWorker.update_weights.
++            self.model_update_group = None
++            return
++
++        # Create stateless process group
+         self.model_update_group = HCCLWeightTransferEngine._stateless_init_process_group(
+             init_info.master_address,
+             init_info.master_port,
+diff --git a/vllm_ascend/worker/worker.py b/vllm_ascend/worker/worker.py
+index 062b3ecd..45e69932 100644
+--- a/vllm_ascend/worker/worker.py
++++ b/vllm_ascend/worker/worker.py
+@@ -20,6 +20,8 @@
+ import copy
+ import gc
+ import logging
++import math
++from collections.abc import Callable
+ from types import NoneType
+ 
+ import torch
+@@ -150,6 +152,7 @@ class NPUWorker(WorkerBase):
+         self.weight_transfer_engine = None
+         self._weight_update_active = False
+         self._is_checkpoint_format = True
++        self._weight_transfer_leader_relay = False
+ 
+         # FixMe: this is a patch to fix the issue cause by https://github.com/vllm-project/vllm/commit/de94289a98d7ec52a5ef02719e01a1db8b505170
+         from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
+@@ -280,6 +283,7 @@ class NPUWorker(WorkerBase):
+         self._check_weight_transfer_engine()
+         assert self.weight_transfer_engine is not None
+         typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
++        self._weight_transfer_leader_relay = bool(getattr(typed_init_info, "leader_relay", False))
+         self.weight_transfer_engine.init_transfer_engine(typed_init_info)
+ 
+     def _check_nz_disabled(self) -> None:
+@@ -325,27 +329,102 @@ class NPUWorker(WorkerBase):
+ 
+         with torch.device(self.device):
+             if self._is_checkpoint_format:
+-                self.weight_transfer_engine.receive_weights(
+-                    typed_update_info,
+-                    load_weights=model.load_weights,
+-                )
++                load_weights = model.load_weights
+             else:
+ 
+-                def load_weights_direct(weights: list[tuple[str, torch.Tensor]]) -> None:
++                def load_weights(weights: list[tuple[str, torch.Tensor]]) -> None:
+                     with torch.no_grad():
+                         for name, weight in weights:
+                             param = model.get_parameter(name)
+                             param.copy_(weight)
+ 
++            if self._weight_transfer_leader_relay:
++                self._receive_or_relay_weights(typed_update_info, load_weights)
++            else:
+                 self.weight_transfer_engine.receive_weights(
+                     typed_update_info,
+-                    load_weights=load_weights_direct,
++                    load_weights=load_weights,
+                 )
+ 
+         # HCCL broadcast / packed paths are asynchronous.
+         # Sync so the next step uses the new weights.
+         torch.npu.synchronize()
+ 
++    def _weight_update_groups(self, update_info) -> list[list[tuple[str, list[int], torch.dtype]]]:
++        groups: list[list[tuple[str, list[int], torch.dtype]]] = []
++        current: list[tuple[str, list[int], torch.dtype]] = []
++        current_bytes = 0
++
++        for name, dtype_name, shape in zip(update_info.names, update_info.dtype_names, update_info.shapes):
++            dtype = getattr(torch, dtype_name)
++            current.append((name, shape, dtype))
++            if update_info.packed:
++                current_bytes += math.prod(shape) * dtype.itemsize
++                if current_bytes <= update_info.packed_buffer_size_bytes:
++                    continue
++            groups.append(current)
++            current = []
++            current_bytes = 0
++
++        if current:
++            groups.append(current)
++        return groups
++
++    def _tp_broadcast_weight_group(
++        self,
++        group_meta: list[tuple[str, list[int], torch.dtype]],
++        weights: list[tuple[str, torch.Tensor]] | None,
++    ) -> list[tuple[str, torch.Tensor]]:
++        tp_group = get_tp_group()
++        if tp_group.world_size == 1:
++            return [] if weights is None else weights
++
++        relayed: list[tuple[str, torch.Tensor]] = []
++        if tp_group.rank_in_group == 0:
++            if weights is None:
++                raise RuntimeError("leader relay source rank has no weights to broadcast")
++            if len(weights) != len(group_meta):
++                raise RuntimeError(
++                    f"leader relay weight group size mismatch: got {len(weights)}, expected {len(group_meta)}"
++                )
++            for (expected_name, _shape, _dtype), (name, tensor) in zip(group_meta, weights):
++                if name != expected_name:
++                    raise RuntimeError(f"leader relay weight name mismatch: got {name}, expected {expected_name}")
++                tensor = tensor.contiguous()
++                tp_group.broadcast(tensor, src=0)
++                relayed.append((name, tensor))
++        else:
++            for name, shape, dtype in group_meta:
++                tensor = torch.empty(shape, dtype=dtype, device=self.device)
++                tp_group.broadcast(tensor, src=0)
++                relayed.append((name, tensor))
++        return relayed
++
++    def _receive_or_relay_weights(self, update_info, load_weights: Callable[[list[tuple[str, torch.Tensor]]], None]) -> None:
++        groups = self._weight_update_groups(update_info)
++        tp_group = get_tp_group()
++
++        if tp_group.rank_in_group == 0:
++            group_iter = iter(groups)
++
++            def relay_and_load(weights: list[tuple[str, torch.Tensor]]) -> None:
++                try:
++                    group_meta = next(group_iter)
++                except StopIteration as exc:
++                    raise RuntimeError("leader relay received more weight groups than expected") from exc
++                load_weights(self._tp_broadcast_weight_group(group_meta, weights))
++
++            self.weight_transfer_engine.receive_weights(update_info, load_weights=relay_and_load)
++            try:
++                extra = next(group_iter)
++            except StopIteration:
++                pass
++            else:
++                raise RuntimeError(f"leader relay did not receive expected weight group starting at {extra[0][0]}")
++        else:
++            for group_meta in groups:
++                load_weights(self._tp_broadcast_weight_group(group_meta, None))
++
+     def finish_weight_update(self) -> None:
+         """Finish the current weight update; runs layerwise postprocessing."""
+         self._check_weight_transfer_engine()

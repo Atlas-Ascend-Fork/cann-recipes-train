@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="470" viewBox="0 0 960 470" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="13">
+  <defs>
+    <marker id="ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b45309"/></marker>
+  </defs>
+  <rect width="960" height="470" fill="#ffffff"/>
+  <text x="20" y="30" font-size="17" font-weight="bold" fill="#111827">图 3　训练 actor 的对象组成（单个训练 worker 内）</text>
+
+  <!-- actor -->
+  <rect x="20" y="48" width="920" height="52" rx="8" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="480" y="71" text-anchor="middle" font-weight="bold" fill="#14532d">TorchTitanTrainRayActor（编排层）</text>
+  <text x="480" y="90" text-anchor="middle" font-size="12" fill="#14532d">init / train / update_weights / save_model：决定各对象的调用顺序与时机</text>
+
+  <!-- composition -->
+  <line x1="210" y1="112" x2="210" y2="140" stroke="#16a34a" stroke-width="1.5"/>
+  <line x1="580" y1="112" x2="580" y2="140" stroke="#16a34a" stroke-width="1.5"/>
+  <line x1="820" y1="112" x2="820" y2="140" stroke="#16a34a" stroke-width="1.5"/>
+  <path d="M210,100 L216,106 L210,112 L204,106 Z" fill="#16a34a"/>
+  <path d="M580,100 L586,106 L580,112 L574,106 Z" fill="#16a34a"/>
+  <path d="M820,100 L826,106 L820,112 L814,106 Z" fill="#16a34a"/>
+  <text x="218" y="130" font-size="11" fill="#14532d">组合</text>
+  <text x="588" y="130" font-size="11" fill="#14532d">组合</text>
+  <text x="828" y="130" font-size="11" fill="#14532d">组合</text>
+
+  <!-- engine -->
+  <rect x="40" y="140" width="340" height="236" rx="8" fill="#ffffff" stroke="#16a34a"/>
+  <text x="210" y="164" text-anchor="middle" font-weight="bold">TitanEngine（计算层）</text>
+  <g font-size="12">
+    <rect x="55" y="178" width="150" height="28" rx="4" fill="#f3f4f6" stroke="#9ca3af"/><text x="130" y="197" text-anchor="middle">sd_adapter</text>
+    <rect x="215" y="178" width="150" height="28" rx="4" fill="#f3f4f6" stroke="#9ca3af"/><text x="290" y="197" text-anchor="middle">optimizers</text>
+    <rect x="55" y="214" width="150" height="28" rx="4" fill="#f3f4f6" stroke="#9ca3af"/><text x="130" y="233" text-anchor="middle">lr_schedulers</text>
+    <rect x="215" y="214" width="150" height="28" rx="4" fill="#f3f4f6" stroke="#9ca3af"/><text x="290" y="233" text-anchor="middle">checkpointer</text>
+    <rect x="55" y="250" width="150" height="28" rx="4" fill="#f3f4f6" stroke="#9ca3af"/><text x="130" y="269" text-anchor="middle">parallel_dims</text>
+    <rect x="215" y="250" width="150" height="28" rx="4" fill="#f3f4f6" stroke="#9ca3af"/><text x="290" y="269" text-anchor="middle">train_context</text>
+    <rect x="55" y="290" width="310" height="30" rx="4" fill="#ecfdf5" stroke="#16a34a"/><text x="210" y="310" text-anchor="middle">forward_only / train / train_one_step</text>
+    <rect x="55" y="332" width="310" height="30" rx="4" fill="#fff7ed" stroke="#d97706" stroke-width="1.5"/><text x="210" y="352" text-anchor="middle">model_parts：模型当前的权重（FSDP2 分片）</text>
+  </g>
+
+  <!-- backuper -->
+  <rect x="470" y="140" width="220" height="180" rx="8" fill="#ffffff" stroke="#16a34a"/>
+  <text x="580" y="164" text-anchor="middle" font-weight="bold">TitanWeightsBackuper</text>
+  <text x="580" y="182" text-anchor="middle" font-size="12" fill="#374151">（模型标签管理）</text>
+  <g font-size="12">
+    <rect x="485" y="196" width="92" height="26" rx="4" fill="#fef9c3" stroke="#ca8a04"/><text x="531" y="214" text-anchor="middle">actor</text>
+    <rect x="585" y="196" width="92" height="26" rx="4" fill="#fef9c3" stroke="#ca8a04"/><text x="631" y="214" text-anchor="middle">ref</text>
+    <rect x="485" y="230" width="92" height="26" rx="4" fill="#fef9c3" stroke="#ca8a04"/><text x="531" y="248" text-anchor="middle">old_actor</text>
+    <rect x="585" y="230" width="92" height="26" rx="4" fill="#fef9c3" stroke="#ca8a04"/><text x="631" y="248" text-anchor="middle">rollout_actor</text>
+    <text x="580" y="282" text-anchor="middle">每个标签：本 worker 权重分片</text>
+    <text x="580" y="300" text-anchor="middle">在 CPU 上的一份快照</text>
+  </g>
+
+  <!-- updater -->
+  <rect x="710" y="140" width="220" height="180" rx="8" fill="#ffffff" stroke="#16a34a"/>
+  <text x="820" y="164" text-anchor="middle" font-weight="bold">weight_updater</text>
+  <text x="820" y="182" text-anchor="middle" font-size="12" fill="#374151">（权重传输）</text>
+  <g font-size="12">
+    <rect x="725" y="196" width="190" height="40" rx="4" fill="#ffffff" stroke="#9ca3af"/>
+    <text x="820" y="213" text-anchor="middle">UpdateWeightFromTensor</text>
+    <text x="820" y="229" text-anchor="middle" fill="#374151">共卡：NPU IPC</text>
+    <rect x="725" y="244" width="190" height="40" rx="4" fill="#ffffff" stroke="#9ca3af"/>
+    <text x="820" y="261" text-anchor="middle">UpdateWeightFromDistributed</text>
+    <text x="820" y="277" text-anchor="middle" fill="#374151">分离部署：HCCL broadcast</text>
+    <text x="820" y="304" text-anchor="middle" fill="#374151">按 --colocate 二选一</text>
+  </g>
+
+  <!-- data dependencies on the model weights -->
+  <path d="M369,340 L580,340 L580,324" fill="none" stroke="#b45309" stroke-width="1.5" stroke-dasharray="6,4" marker-start="url(#ao)" marker-end="url(#ao)"/>
+  <text x="392" y="334" font-size="12" fill="#b45309">backup / restore：读写分片</text>
+  <path d="M365,354 L820,354 L820,324" fill="none" stroke="#b45309" stroke-width="1.5" stroke-dasharray="6,4" marker-end="url(#ao)"/>
+  <text x="392" y="372" font-size="12" fill="#b45309">读取权重：get_hf_per_tensor(model_parts, sd_adapter)</text>
+
+  <!-- legend -->
+  <g font-size="12" fill="#374151">
+    <path d="M20,410 L26,404 L32,410 L26,416 Z" fill="#16a34a"/>
+    <line x1="32" y1="410" x2="50" y2="410" stroke="#16a34a" stroke-width="1.5"/>
+    <text x="56" y="414">组合关系：由 actor 创建并管理生命周期；三者彼此独立，均由 actor 调用</text>
+    <line x1="520" y1="410" x2="550" y2="410" stroke="#b45309" stroke-width="1.5" stroke-dasharray="6,4"/>
+    <text x="556" y="414">数据依赖：对 model_parts 中权重的读写</text>
+
+    <rect x="20" y="430" width="26" height="16" rx="3" fill="#f3f4f6" stroke="#9ca3af"/>
+    <text x="54" y="443">torchtitan 上游组件</text>
+    <rect x="200" y="430" width="26" height="16" rx="3" fill="#ecfdf5" stroke="#16a34a"/>
+    <text x="234" y="443">vime 实现</text>
+    <rect x="330" y="430" width="26" height="16" rx="3" fill="#fff7ed" stroke="#d97706" stroke-width="1.5"/>
+    <text x="364" y="443">模型当前的权重（NPU）</text>
+    <rect x="500" y="430" width="26" height="16" rx="3" fill="#fef9c3" stroke="#ca8a04"/>
+    <text x="534" y="443">CPU 快照（模型标签）</text>
+  </g>
+</svg>
