@@ -147,28 +147,10 @@ python3 convert_bf16.py \
 
 ### DeepSeek-V4.1-Flash 训练配置
 
-本次训练单机使用配置文件 CONFIG=deepseek_v4_1_flash_40layers_16experts_multimodal
-本次训练多机使用配置文件 CONFIG=deepseek_v4_1_flash
-拉起训练前请重点确认以下路径配置与实际环境一致：
+- 本次训练多机使用配置文件 CONFIG=deepseek_v4_1_flash
+- 拉起训练前请重点确认以下路径配置与实际环境一致：
 
-
-
-## 启动训练
-
-* 进入各节点上的 `torchtitan-npu` 源码目录后执行如下命令，即可启动 `DeepSeek-V4.1-Flash` 单机 BF16 CPT训练任务, 默认使能 compile AutoFuse：
-
-```shell
-HF_ASSETS_PATH=/data/models/DeepSeek-V4.1-Flash/deepseek_v41_tokenizer \
-bash examples/deepseek_v4_1/debug/deepseek_v4_1_flash_8p_cpt_4k_a5.sh \
---training.steps 500 --extension.quantization.no-enable-quantized-training
-```
-
-* 进入各节点上的 `torchtitan-npu` 源码目录后执行如下命令，即可启动 `DeepSeek-V4.1-Flash` 单机 MXFP8 CPT训练任务，默认使能 MXFP8 低精度, 默认使能 compile AutoFuse：
-
-```shell
-HF_ASSETS_PATH=/data/models/DeepSeek-V4.1-Flash/deepseek_v41_tokenizer \
-bash examples/deepseek_v4_1/debug/deepseek_v4_1_flash_8p_cpt_4k_a5.sh --training.steps 500
-```
+## 启动 CPT 训练
 
 * 根据使用实际的网卡、节点 IP等，修改多机训练脚本配置，参考 `torchtitan-npu` [快速上手](https://gitcode.com/cann/torchtitan-npu/blob/master/docs/user-guides/quickstart.md) 文档中的“[多机训练任务](https://gitcode.com/cann/torchtitan-npu/blob/master/docs/user-guides/quickstart.md#多机训练任务)”一节。
 
@@ -180,3 +162,49 @@ HF_ASSETS_PATH=/data/models/DeepSeek-V4.1-Flash/deepseek_v41_tokenizer \
 bash examples/deepseek_v4_1/deepseek_v4_1_flash_cpt_4k_a5.sh --training.steps 500
 ```
 
+## 启动图文混合 SFT 训练
+
+SFT 的数据适配与官方 encoding 解耦：Encoder 动态调用模型目录内 `encoding/encoding.py` 的 `encode_messages` 接口，保持原始编码规则，训练侧生成 assistant loss mask。
+
+典型数据集可从 Hugging Face 获取：[LLaVA-Instruct-150K 开源数据集下载链接](https://huggingface.co/datasets/liuhaotian/LLaVA-Instruct-150K/resolve/main/conversation_58k.json)。
+
+按前文 CPT 一致多机训练方式配置实际网卡、节点 IP 和权重路径，再在各节点容器内依次执行：
+
+1. 进入源码目录。
+
+   ```shell
+   cd /home/code/torchtitan-npu
+   ```
+
+2. 设置模型资源与数据集路径。
+
+   ```shell
+   export HF_ASSETS_PATH=/data/models/DeepSeek-V4.1-Flash/deepseek_v41_tokenizer
+   export DATASET_PATH=/path/to/train.jsonl
+   ```
+
+3. 在所有参与训练的节点上同时启动 SFT。
+
+   ```shell
+   bash examples/deepseek_v4_1/deepseek_v4_1_flash_sft_4k_a5.sh \
+     --training.steps 128 --lr-scheduler.total-steps 128
+   ```
+
+配置参数可在命令末尾覆盖。
+
+使用 LLaVA 子集训练 128 步后，重新加载权重得到的训练后评测结果如下，评测对象为电脑桌图文对话：
+
+| 指标 | LLaVA 子集 SFT 前 | LLaVA 子集 SFT 后（128 步） |
+| --- | ---: | ---: |
+| 交叉熵（CE） | 3.894351 | 5.180367e-6 |
+| 监督 token 准确率 | 27.12% | 100% |
+| 监督序列完全匹配 | 否 | 是 |
+
+拟合实验中的两个数据样例：
+
+| 图片 | 问题 | 训练答案 |
+| --- | --- | --- |
+| ![船](images/llava_129141.jpg) | What color is the boat in the image? | The boat in the image is blue and white. |
+| ![电脑桌](images/llava_390311.jpg) | What color is the table where the computer is? | The table where the computer is placed is white. |
+
+对于上表第 2 行的问题 "What color is the table where the computer is?"，模型生成回答 "The table where the computer is placed is white."，可见图文混合 SFT 训练之后的结果符合预期。
