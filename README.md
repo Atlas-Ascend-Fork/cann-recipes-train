@@ -179,7 +179,7 @@ flowchart TB
 
 | 模型 | 场景 | 训练后端 | 硬件 | 体验 |
 |------|------|----------|------|:--:|
-| Qwen3-1.7B | 单卡 SFT 训练 | MindSpeed-LLM | A2 / A3 | [🚀 启动](llm_sft/qwen3/README.md#一站式平台快速启动sft训练示例) |
+| Qwen3-1.7B | 单卡 SFT 训练 | MindSpeed-LLM | A2 / A3 | [🚀 启动](llm_sft/qwen3/README.md#一站式平台快速启动sft训练依赖构建) |
 | Qwen3-1.7B | 单卡 SFT 训练 | TorchTitan-NPU | A2 / A3 | [🚀 启动](llm_sft/qwen3_1.7B_torchtitan/README.md#一站式平台快速启动sft训练示例) |
 | Qwen2.5-1.5B-Instruct | 单卡 RL 入门 | veRL | A2 / A3 | [🚀 启动](llm_rl/qwen2_5/verl_npu_demo/README_single.md) |
 

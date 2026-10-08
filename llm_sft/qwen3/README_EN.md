@@ -37,7 +37,7 @@
    cd MindSpeed-LLM
    ```
 
-## Quick Start SFT Training on One‑stop Platform
+## Quick Start SFT Training Dependency Setup on One‑stop Platform
 
 ### Environment Requirements
 
@@ -54,11 +54,15 @@ cd MindSpeed-LLM
 pip install pyarrow==21.0.0
 ```
 
+This section only covers the environment preparation and project/dependency setup steps that are additionally required on the one‑stop platform. The following dataset preparation, model weight preparation, data conversion, model conversion, and SFT training steps are identical to those below; continue with the sections below.
+
 ## Dataset Preparation
+
+All commands in this section are executed in `cann-recipes-train/llm_sft/qwen3/MindSpeed-LLM` (the current directory after the `cd MindSpeed-LLM` step above).
 
 The Alpaca dataset used in this example can be prepared as follows:
 ```bash
-# Create a dataset directory under the current example directory
+# Create a dataset directory under the current directory (MindSpeed-LLM)
 mkdir -p ./dataset
 cd dataset/
 
@@ -119,10 +123,13 @@ modelscope download --model Qwen/Qwen3-1.7B --local_dir ./Qwen3-1.7B
 |-----------|-------------|
 | `--input` | Path to the input data file(s). Can be a directory (all files in it will be processed) or a specific file. Supports `.parquet`, `.csv`, `.json`, `.jsonl`, `.txt`, `.arrow`. All files in the same directory must have the same format. |
 | `--tokenizer-name-or-path` | Path to the tokenizer files. |
+| `--tokenizer-type` | Tokenizer type; set to `PretrainedFromHF` when loading from a HuggingFace-format tokenizer directory. |
 | `--output-prefix` | Prefix for the output data files. |
 | `--handler-name` | For fine‑tuning with Alpaca‑style datasets, specify `AlpacaStyleInstructionHandler`. The `--map-keys` parameter is used to extract the corresponding columns. |
-| `--enable-thinking` | Whether to add reasoning tags, e.g., `<think> </think>`. |
-| `--seq-length` | Sequence length, default is 4096. |
+| `--workers` | Number of worker processes used for data preprocessing. |
+| `--log-interval` | Interval between progress log updates. |
+| `--enable-thinking` | Whether to enable thinking mode and add the reasoning tags `<think>` and `</think>` to samples. |
+| `--seq-length` | Maximum sequence length; no truncation is applied when unspecified (default `None`). This example script does not set it explicitly, so the default is used. |
 | `--prompt-type` | Specifies the model prompt template, default is `qwen3`. |
 
 **Example of Alpaca‑style data:**
@@ -147,11 +154,13 @@ modelscope download --model Qwen/Qwen3-1.7B --local_dir ./Qwen3-1.7B
 
 | Parameter | Description |
 |-----------|-------------|
+| `--load-model-type` | Type of the input model; `hf` for HuggingFace format. |
+| `--save-model-type` | Type of the output model; `mg` for Mcore format. |
 | `--target-tensor-parallel-size` | Tensor parallelism size. |
 | `--target-pipeline-parallel-size` | Pipeline parallelism size. |
 | `--load-dir` | Path to the input model. |
 | `--save-dir` | Path to the output model. |
-| `--moe-grouped-gemm` | Enable MoE grouped GEMM optimization. |
+| `--moe-grouped-gemm` | Enable MoE grouped GEMM optimization. MoE models only; Qwen3-1.7B is a dense model, so this example script does not set it. |
 | `--model-type-hf` | HuggingFace model type. |
 | `--expert-tensor-parallel-size` | Expert tensor parallelism size; must be explicitly set to 1. |
 
@@ -174,8 +183,8 @@ modelscope download --model Qwen/Qwen3-1.7B --local_dir ./Qwen3-1.7B
 |-----------|-------------|
 | `TP` | Tensor parallelism size. |
 | `PP` | Pipeline parallelism size. |
-| `CP` | Context parallelism size. |
-| `CP_TYPE` | Context parallelism algorithm. |
+| `CP` | Context parallelism size, default is 1. This example script does not enable it; it can be enabled for long‑sequence training, and must stay consistent with the model conversion settings. |
+| `CP_TYPE` | Context parallelism algorithm; effective only when `CP` is enabled. This example script does not enable it. |
 
 - **Training Configuration**
 
