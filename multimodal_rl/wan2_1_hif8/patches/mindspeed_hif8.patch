@@ -1,0 +1,1608 @@
+diff --git a/mindspeed/core/fp8_utils.py b/mindspeed/core/fp8_utils.py
+index 1ec13a6a..80201cd4 100644
+--- a/mindspeed/core/fp8_utils.py
++++ b/mindspeed/core/fp8_utils.py
+@@ -21,14 +21,16 @@ def quantize_param_shard(
+     warnings.warn("Currently, it is not supported to Cast shard fp32 main params to fp8 model params")
+ 
+ 
+-def get_fp8_context(config: TransformerConfig, layer_no: int = -1, is_init: bool = False):
+-    """Return fp8 context manager.
++def get_fp8_context(config: TransformerConfig, layer_no: int = -1, is_init: bool = False,
++                    dual_recipe_config=None):
++    """Return fp8 context manager with dual recipe support.
+ 
+     Arguments:
+         config (TransformerConfig): Configuration object.
+         layer_no (int): *Global* layer index (including layers on other
+             pipeline-parallel ranks).
+         is_init (bool): Whether the context is fp8_model_init (True) or fp8_autocast (False).
++        dual_recipe_config: 双 recipe 配置对象, 如果提供则启用双 recipe 模式
+ 
+     Returns:
+         FP8 context.
+@@ -59,6 +61,9 @@ def get_fp8_context(config: TransformerConfig, layer_no: int = -1, is_init: bool
+         from transformer_engine.common.recipe import Float8CurrentScaling, MXFP8BlockScaling, Format
+         from transformer_engine.pytorch import fp8_autocast, fp8_model_init
+         from mindspeed.te.pytorch.fp8.recipes import Float8BlockScaling
++        # 新增: 支持 DualDelayedScaling
++        from mindspeed.te.pytorch.fp8.recipes.dual_delayed_scaling_recipe import DualDelayedScaling
++
+         if config.fp8 == "e4m3":
+             fp8_format = Format.E4M3
+         elif config.fp8 == "hybrid":
+@@ -70,11 +75,14 @@ def get_fp8_context(config: TransformerConfig, layer_no: int = -1, is_init: bool
+ 
+         # Select fp8 recipe (TE version >= 2.1.0).
+         if config.fp8_recipe == Fp8Recipe.delayed:
+-            fp8_recipe = TEDelayedScaling(
+-                config=config,
+-                fp8_format=fp8_format,
+-                override_linear_precision=(False, False, not config.fp8_wgrad),
+-            )
++            if dual_recipe_config is not None and hasattr(dual_recipe_config, 'is_dual_recipe') and dual_recipe_config.is_dual_recipe():
++                fp8_recipe = dual_recipe_config
++            else:
++                fp8_recipe = TEDelayedScaling(
++                    config=config,
++                    fp8_format=fp8_format,
++                    override_linear_precision=(False, False, not config.fp8_wgrad),
++                )
+         elif config.fp8_recipe == Fp8Recipe.tensorwise:
+             fp8_recipe = Float8CurrentScaling(
+                 fp8_format=fp8_format
+@@ -128,13 +136,14 @@ def get_fp8_context(config: TransformerConfig, layer_no: int = -1, is_init: bool
+     return fp8_context
+ 
+ 
+-def fp8_context_wrapper(config: TransformerConfig, layer_no: int = -1, is_init: bool = False):
+-    """Wraps the fp8_context_wrapper function."""
++def fp8_context_wrapper(config: TransformerConfig, layer_no: int = -1, is_init: bool = False,
++                        dual_recipe_config=None):
++    """Wraps the fp8_context_wrapper function with dual recipe support."""
+ 
+     def wrapper_fn(fn):
+         @wraps(fn)
+         def wrapper(*args, **kwargs):
+-            with get_fp8_context(config, layer_no, is_init):
++            with get_fp8_context(config, layer_no, is_init, dual_recipe_config):
+                 return fn(*args, **kwargs)
+ 
+         return wrapper
+diff --git a/mindspeed/features_manager/megatron_basic/transformer_engine_basic.py b/mindspeed/features_manager/megatron_basic/transformer_engine_basic.py
+index 3a7203f9..1e8d2c6a 100644
+--- a/mindspeed/features_manager/megatron_basic/transformer_engine_basic.py
++++ b/mindspeed/features_manager/megatron_basic/transformer_engine_basic.py
+@@ -30,6 +30,8 @@ class TransformerEngineBasicFeature(MindSpeedFeature):
+                                 '"compatible": Default. Ensures compatibility with native TE behavior.',
+                            dest='te_gmm_mode'
+                          )
++        group.add_argument('--dual-delayed-scaling', action='store_true',
++                           default=False, help='dual delayed scaling.')
+ 
+ 
+     def validate_args(self, args):
+@@ -43,8 +45,8 @@ class TransformerEngineBasicFeature(MindSpeedFeature):
+                 and getattr(args, "use_legacy_models", False)):
+             raise AssertionError('transformer engine only support for mcore models')
+         if args.fp8 == 'hif8':
+-            if args.fp8_recipe != 'tensorwise':
+-                raise ValueError("hif8 only support tensorwise scaling type")
++            if args.fp8_recipe not in ['tensorwise', 'delayed']:
++                raise ValueError("hif8 only support tensorwise or delayed scaling type")
+         if args.use_gmm_fp8:
+             if args.fp8_recipe not in ('mxfp8', 'tensorwise', 'delayed'):
+                 warnings.warn(f"gmm fp8 only supports tensorwise, mxfp8, and delayed recipe, but {args.fp8_recipe} provided, "
+@@ -154,4 +156,4 @@ class TransformerEngineBasicFeature(MindSpeedFeature):
+                                   MindSpeedTEDotProductAttention)
+ 
+             pm.register_patch('megatron.core.extensions.transformer_engine.TELayerNormColumnParallelLinear',
+-                              MindSpeedTELayerNormColumnParallelLinear)
+\ No newline at end of file
++                              MindSpeedTELayerNormColumnParallelLinear)
+diff --git a/mindspeed/te/pytorch/fp8/constants.py b/mindspeed/te/pytorch/fp8/constants.py
+index 3128c274..d95b7a67 100644
+--- a/mindspeed/te/pytorch/fp8/constants.py
++++ b/mindspeed/te/pytorch/fp8/constants.py
+@@ -80,7 +80,16 @@ def amax_compute_most_recent(amax: torch.Tensor, amax_history, last_history_inde
+     amax.copy_(amax_history[last_history_index], non_blocking=True)
+ 
+ 
++def amax_compute_mean(amax, amax_history, last_history_index):
++    # before the history window is full, unfilled entries are zero and must not be averaged
++    if last_history_index >= 0:
++        amax.copy_(torch.mean(amax_history[:last_history_index + 1], dim=0), non_blocking=True)
++    else:
++        amax.copy_(torch.mean(amax_history, dim=0), non_blocking=True)
++
++
+ AMAX_COMPUTE_MAP = {
+     'max': amax_compute_max,
+-    "most_recent": amax_compute_most_recent
++    "most_recent": amax_compute_most_recent,
++    'mean': amax_compute_mean
+ }
+diff --git a/mindspeed/te/pytorch/fp8/dual_metadata.py b/mindspeed/te/pytorch/fp8/dual_metadata.py
+new file mode 100644
+index 00000000..e6c02bc3
+--- /dev/null
++++ b/mindspeed/te/pytorch/fp8/dual_metadata.py
+@@ -0,0 +1,193 @@
++# 目标文件: MindSpeed/mindspeed/te/pytorch/fp8/dual_metadata.py
++# 改动性质: U 新增文件(标签页 "1, U",非 diff 视图,全文即新增)
++import torch
++from typing import Optional
++
++from mindspeed.te.pytorch.fp8.metadata import FP8Metadata
++from mindspeed.te.pytorch.fp8.constants import TensorKey
++from mindspeed.te.pytorch.module_typing import FP8Recipe, FP8Tensor 
++
++
++class FP8DualMetadata(FP8Metadata):
++    """
++    支持前后向分离 recipe 管理的 FP8 元数据类
++    继承自 FP8Metadata, 扩展了对 Forward 和 Backward 阶段分别管理的能力
++    """
++
++    def __init__(self, keys=None):
++        """
++        初始化双 recipe 管理的元数据
++
++        Args:
++            keys: 需要管理的张量键列表, 默认为 [inputs, weight, grads]
++        """
++        super().__init__(keys)
++        # 分别存储 forward 和 backward 阶段的 recipes
++        self.forward_recipes = {}
++        self.backward_recipes = {}
++        # 标记当前处于哪个阶段
++        self.is_forward_phase = True
++
++    def set_forward_phase(self):
++        """设置为 forward 阶段"""
++        self.is_forward_phase = True
++
++    def set_backward_phase(self):
++        """设置为 backward 阶段"""
++        self.is_forward_phase = False
++
++    def is_in_forward_phase(self) -> bool:
++        """判断是否处于 forward 阶段"""
++        return self.is_forward_phase
++
++    def create_recipe(self, key: TensorKey, config, tensor_shape) -> 'FP8Recipe':
++        """
++        根据当前阶段创建对应的 recipe
++
++        Args:
++            key: 张量键
++            config: 配置对象
++            tensor_shape: 张量形状
++
++        Returns:
++            对应阶段的 recipe 实例
++        """
++        # 检查是否为双重配置
++        if hasattr(config, 'is_dual_recipe') and config.is_dual_recipe():
++            if self.is_forward_phase:
++                # 使用 forward 专用配置
++                forward_config = config.get_forward_config()
++                return forward_config.recipe(key, forward_config, tensor_shape)
++            else:
++                # 使用 backward 专用配置
++                backward_config = config.get_backward_config()
++                return backward_config.recipe(key, backward_config, tensor_shape)
++        else:
++            # 非双重配置, 回退到原有逻辑
++            return super().create_recipe(key, config, tensor_shape)
++
++    def init_recipes_if_necessarily(self, key, tensor_shape=None):
++        """
++        根据当前阶段初始化对应的 recipes
++
++        Args:
++            key: 张量键
++            tensor_shape: 张量形状
++        """
++        recipe_dict = self.forward_recipes if self.is_forward_phase else self.backward_recipes
++
++        if key in recipe_dict:
++            return
++
++        recipe = self.create_recipe(key, self.fp8_recipe, tensor_shape)
++        recipe_dict[key] = recipe
++
++    def get_current_recipe(self, key: TensorKey):
++        """
++        获取当前阶段对应键的 recipe
++
++        Args:
++            key: 张量键
++
++        Returns:
++            当前阶段的 recipe 实例
++        """
++        recipe_dict = self.forward_recipes if self.is_forward_phase else self.backward_recipes
++        return recipe_dict.get(key)
++
++    def quantization(self, key: TensorKey, tensor: torch.Tensor, colwise=True, rowwise=True) -> 'FP8Tensor':
++        """
++        根据当前阶段进行量化
++
++        Args:
++            key: 张量键
++            tensor: 待量化的张量
++            colwise: 列方向量化标志
++            rowwise: 行方向量化标志
++
++        Returns:
++            量化后的 FP8Tensor
++        """
++        self.init_recipes_if_necessarily(key, tensor.shape)
++        recipe = self.get_current_recipe(key)
++        if recipe is None:
++            # 如果当前阶段没有对应的 recipe, 尝试初始化
++            recipe = self.create_recipe(key, self.fp8_recipe, tensor.shape)
++            if self.is_forward_phase:
++                self.forward_recipes[key] = recipe
++            else:
++                self.backward_recipes[key] = recipe
++
++        return recipe.quantization(tensor, key, colwise=colwise, rowwise=rowwise)
++
++    def cleanup_forward_recipes(self):
++        """清理 forward 阶段的 recipes, 释放内存"""
++        self.forward_recipes.clear()
++
++    def cleanup_backward_recipes(self):
++        """清理 backward 阶段的 recipes, 释放内存"""
++        self.backward_recipes.clear()
++
++    def cleanup_all_recipes(self):
++        """清理所有阶段的 recipes"""
++        self.cleanup_forward_recipes()
++        self.cleanup_backward_recipes()
++
++
++# 上下文管理器用于自动切换阶段
++class DualPhaseContext:
++    """
++    双阶段上下文管理器
++    自动处理 forward/backward 阶段的切换
++    """
++
++    def __init__(self, fp8_meta: FP8DualMetadata, phase: str):
++        """
++        初始化上下文管理器
++
++        Args:
++            fp8_meta: FP8DualMetadata 实例
++            phase: 阶段名称 ('forward' 或 'backward')
++        """
++        self.fp8_meta = fp8_meta
++        self.phase = phase
++        self.previous_phase = None
++
++    def __enter__(self):
++        """进入上下文, 切换到指定阶段"""
++        self.previous_phase = self.fp8_meta.is_forward_phase
++        if self.phase == 'forward':
++            self.fp8_meta.set_forward_phase()
++        else:
++            self.fp8_meta.set_backward_phase()
++        return self.fp8_meta
++
++    def __exit__(self, exc_type, exc_val, exc_tb):
++        """退出上下文, 恢复之前的阶段"""
++        if self.previous_phase is not None:
++            self.fp8_meta.is_forward_phase = self.previous_phase
++
++
++# 便捷函数
++def forward_phase_context(fp8_meta: FP8DualMetadata):
++    """创建 forward 阶段上下文"""
++    return DualPhaseContext(fp8_meta, 'forward')
++
++
++def backward_phase_context(fp8_meta: FP8DualMetadata):
++    """创建 backward 阶段上下文"""
++    return DualPhaseContext(fp8_meta, 'backward')
++
++
++# 工厂函数创建双重元数据实例
++def create_dual_metadata(keys=None) -> FP8DualMetadata:
++    """
++    创建支持双 recipe 管理的 FP8 元数据实例
++
++    Args:
++        keys: 需要管理的张量键列表
++
++    Returns:
++        FP8DualMetadata 实例
++    """
++    return FP8DualMetadata(keys)
+diff --git a/mindspeed/te/pytorch/fp8/recipes/__init__.py b/mindspeed/te/pytorch/fp8/recipes/__init__.py
+index 3ec9ff08..ef5e764c 100644
+--- a/mindspeed/te/pytorch/fp8/recipes/__init__.py
++++ b/mindspeed/te/pytorch/fp8/recipes/__init__.py
+@@ -2,7 +2,7 @@ import torch
+ 
+ from mindspeed.args_utils import get_full_args as get_args
+ from .current_scaling_recipe import CurrentScalingRecipe, Float8CurrentScaling, TensorwiseMatMul
+-from .delayed_scaling_recipe import DelayedScalingRecipe, TEDelayedScaling
++from .delayed_scaling_recipe import DelayedScalingRecipe, TEDelayedScaling, DelayedScalingRecipeFA
+ from .float8_block_scaling_recipe import Float8BlockRecipe, Float8BlockScaling, Float8BlockMatMul
+ from .mxfp8_scaling_recipe import MXFP8ScalingRecipe, MXFP8BlockScaling, MXFP8MatMul
+ from ..constants import Fp8Recipe
+diff --git a/mindspeed/te/pytorch/fp8/recipes/backward_delayed_scaling_recipe.py b/mindspeed/te/pytorch/fp8/recipes/backward_delayed_scaling_recipe.py
+new file mode 100644
+index 00000000..d445b5d4
+--- /dev/null
++++ b/mindspeed/te/pytorch/fp8/recipes/backward_delayed_scaling_recipe.py
+@@ -0,0 +1,77 @@
++import dataclasses
++import typing
++from typing import Optional
++
++import torch
++
++import torch_npu
++from mindspeed.te.pytorch.fp8.recipes.recipe import Recipe, RecipeScaling
++from mindspeed.te.pytorch.fp8.scale_data import ScaleData
++from mindspeed.te.pytorch.fp8.tensor import Float8Tensor, is_fp8_tensor
++from mindspeed.te.pytorch.fp8.recipes.recipe import MyRecipeConfig
++
++
++class BackwardDelayedScalingRecipe(Recipe):
++    """
++    Backward 阶段专用的 Delayed Scaling Recipe
++    用于 backward pass 中的 FP8 量化, 具有独立的配置和状态管理
++    """
++    ALL_BACKWARD_SCALING = []
++    BACKWARD_MAX_STREAM = None
++
++    def __init__(self, key, recipe_config: 'BackwardDelayedScaling', tensor_shape) -> None:
++        """
++        初始化 Backward 阶段的 delayed scaling recipe
++
++        Args:
++            key: 张量键值 (inputs/weight/grads)
++            recipe_config: Backward 专用的配置对象
++            tensor_shape: 输入张量形状
++        """
++        super().__init__(key, recipe_config, tensor_shape)
++        if BackwardDelayedScalingRecipe.BACKWARD_MAX_STREAM is None:
++            BackwardDelayedScalingRecipe.BACKWARD_MAX_STREAM = torch.cuda.Stream()
++        self.scale = ScaleData(recipe_config, self.fp8_format)
++
++        BackwardDelayedScalingRecipe.ALL_BACKWARD_SCALING.append(self)
++        # 等待 ScaleData 完成初始化
++        BackwardDelayedScalingRecipe.BACKWARD_MAX_STREAM.wait_stream(torch.cuda.current_stream())
++
++    def finally_step(self):
++        """Backward 阶段结束时的清理操作"""
++        torch.cuda.current_stream().wait_stream(BackwardDelayedScalingRecipe.BACKWARD_MAX_STREAM)
++        self.scale.delayed_recipe_update_scale()
++
++    def quantization(self, tensor, key, colwise=True, rowwise=True):
++        """
++        Backward 阶段的量化方法
++
++        Args:
++            tensor: 待量化的张量
++            key: 张量类型标识
++            colwise: 列方向量化标志
++            rowwise: 行方向量化标志
++
++        Returns:
++            量化后的 Float8Tensor
++        """
++        if tensor is None:
++            return tensor
++        if is_fp8_tensor(tensor):  # 如果已经是 fp8 格式则直接返回
++            return tensor
++        # 使用 backward 专用的流进行 amax 更新
++        scale = self.scale.delayed_recipe_update_amax(tensor, BackwardDelayedScalingRecipe.BACKWARD_MAX_STREAM)  
++        quant_tensor = torch_npu.npu_quantize(tensor, scale, zero_points=None, dtype=self.quant_dtype, axis=-1)
++        return Float8Tensor(quant_tensor, self.quant_dtype, scale, dtype=tensor.dtype)
++
++
++@dataclasses.dataclass
++class BackwardDelayedScaling(RecipeScaling):
++    """
++    Backward 阶段 Delayed Scaling 的配置类
++    可以设置与 forward 不同的参数
++    """
++    recipe = BackwardDelayedScalingRecipe
++    amax_reduce_group: torch.distributed.ProcessGroup = None
++    override_linear_precision: Optional[typing.Tuple] = None
++    config: MyRecipeConfig = None  
+\ No newline at end of file
+diff --git a/mindspeed/te/pytorch/fp8/recipes/delayed_scaling_recipe.py b/mindspeed/te/pytorch/fp8/recipes/delayed_scaling_recipe.py
+index e069e701..d2bff3fe 100644
+--- a/mindspeed/te/pytorch/fp8/recipes/delayed_scaling_recipe.py
++++ b/mindspeed/te/pytorch/fp8/recipes/delayed_scaling_recipe.py
+@@ -6,9 +6,54 @@ import torch
+ 
+ import torch_npu
+ from mindspeed.te.pytorch.fp8.recipes.recipe import Recipe, RecipeScaling
+-from mindspeed.te.pytorch.fp8.scale_data import ScaleData
++from mindspeed.te.pytorch.fp8.scale_data import ScaleData, ScaleDataFA
+ from mindspeed.te.pytorch.fp8.tensor import Float8Tensor, is_fp8_tensor
+ 
++class DelayedScalingRecipeFA(Recipe):
++    ALL_SCALING = []
++    MAX_STREAM = None
++
++    def __init__(self, key, recipe_config: 'TEDelayedScaling', tensor_shape) -> None:
++        super().__init__(key, recipe_config, tensor_shape)
++        if DelayedScalingRecipeFA.MAX_STREAM is None:
++            DelayedScalingRecipeFA.MAX_STREAM = torch.cuda.Stream()
++        self.scale = None
++        self.recipe_config = recipe_config
++
++        DelayedScalingRecipeFA.ALL_SCALING.append(self)
++        # MAX_STREAM need to wait ScaleData finished the initialization
++        DelayedScalingRecipeFA.MAX_STREAM.wait_stream(torch.cuda.current_stream())
++
++    def finally_step(self):
++        torch.cuda.current_stream().wait_stream(DelayedScalingRecipeFA.MAX_STREAM)
++        if self.scale is not None:
++            self.scale.delayed_recipe_update_scale()
++
++    def quantization(self, tensor, key, colwise, rowwise):
++        if tensor is None:
++            return tensor
++        if is_fp8_tensor(tensor):  # if dtype is fp8 return
++            return tensor
++        if self.scale == None:
++            self.scale = ScaleDataFA(self.recipe_config, self.fp8_format)
++        scale = self.scale.delayed_recipe_update_amax(tensor, DelayedScalingRecipeFA.MAX_STREAM)
++        quant_tensor = torch_npu.npu_quantize(tensor, scale, zero_points=None, dtype=self.quant_dtype, axis=-1)
++        return Float8Tensor(quant_tensor, self.quant_dtype, scale, dtype=tensor.dtype)
++
++    def pertoken_quantization(self, tensor, key, colwise, rowwise):
++        if tensor is None:
++            return tensor
++        if is_fp8_tensor(tensor):  # if dtype is fp8 return
++            return tensor
++        self.shape = tensor.shape
++        tensor = tensor.view(-1, tensor.shape[-1])
++        if self.scale == None:
++            self.scale = ScaleDataFA(self.recipe_config, self.fp8_format, [tensor.shape[-2]])
++        scale = self.scale.delayed_recipe_update_amax(tensor, DelayedScalingRecipeFA.MAX_STREAM, amax_dim=1)
++        quant_tensor = torch_npu.npu_quantize(tensor, scale, zero_points=None, dtype=self.quant_dtype, axis=-2)
++        quant_tensor = quant_tensor.view(self.shape)
++        scale = scale.view(*self.shape[:-1], 1)
++        return Float8Tensor(quant_tensor, self.quant_dtype, scale, dtype=tensor.dtype)
+ 
+ class DelayedScalingRecipe(Recipe):
+     ALL_SCALING = []
+diff --git a/mindspeed/te/pytorch/fp8/recipes/dual_delayed_scaling_recipe.py b/mindspeed/te/pytorch/fp8/recipes/dual_delayed_scaling_recipe.py
+new file mode 100644
+index 00000000..e4855203
+--- /dev/null
++++ b/mindspeed/te/pytorch/fp8/recipes/dual_delayed_scaling_recipe.py
+@@ -0,0 +1,145 @@
++import dataclasses
++import typing
++from typing import Optional, Tuple
++
++import torch
++
++from mindspeed.te.pytorch.fp8.recipes.forward_delayed_scaling_recipe import ForwardDelayedScaling
++from mindspeed.te.pytorch.fp8.recipes.backward_delayed_scaling_recipe import BackwardDelayedScaling
++from mindspeed.te.pytorch.fp8.recipes.recipe import RecipeScaling
++from mindspeed.te.pytorch.fp8.recipes.recipe import MyRecipeConfig
++
++
++@dataclasses.dataclass
++class DualDelayedScaling(RecipeScaling):
++    """
++    双重 Delayed Scaling 配置类
++    同时管理 Forward 和 Backward 阶段的不同配置
++    """
++
++    def __init__(
++        self,
++        # 通用参数
++        amax_reduce_group: Optional[torch.distributed.ProcessGroup] = None,
++        override_linear_precision: Optional[Tuple] = None,
++
++        # Forward 阶段专用参数
++        fp8_forward_margin: float = 0.0,
++        fp8_forward_amax_history_len: int = 1024,
++        fp8_forward_amax_compute_algo: str = "max",
++        fp8_forward_interval: int = 1,
++
++        # Backward 阶段专用参数
++        fp8_backward_margin: float = 0.0,
++        fp8_backward_amax_history_len: int = 1024,
++        fp8_backward_amax_compute_algo: str = "max",
++        fp8_backward_interval: int = 1,
++
++        # 其他配置
++        fp8_format: str = "E4M3",
++        fp8_block_size: int = 128,
++        config=None
++    ):
++        """
++        初始化双重 delayed scaling 配置
++
++        Args:
++            amax_reduce_group: amax 归约的进程组
++            override_linear_precision: 覆盖线性精度的配置
++
++            fp8_forward_*: Forward 阶段的专用参数
++            fp8_backward_*: Backward 阶段的专用参数
++
++            fp8_format: FP8 格式 (e4m3/hybrid/hif8)
++            fp8_block_size: 块大小 (用于块状量化)
++        """
++        self.amax_reduce_group = amax_reduce_group
++        self.override_linear_precision = override_linear_precision
++        forward_recipe_config = MyRecipeConfig(
++            fp8_margin=fp8_forward_margin,
++            fp8_amax_compute_algo=fp8_forward_amax_compute_algo,
++            fp8_amax_history_len=fp8_forward_amax_history_len,
++            fp8_interval=fp8_forward_interval
++        )
++
++        backward_recipe_config = MyRecipeConfig(
++            fp8_margin=fp8_backward_margin,
++            fp8_amax_compute_algo=fp8_backward_amax_compute_algo,
++            fp8_amax_history_len=fp8_backward_amax_history_len,
++            fp8_interval=fp8_backward_interval
++        )
++
++        # 创建 Forward 专用配置
++        self.forward_config = ForwardDelayedScaling(
++            fp8_format=fp8_format,
++            config=forward_recipe_config,
++            override_linear_precision=(False, False, not config.fp8_wgrad),
++            amax_reduce_group=amax_reduce_group
++        )
++
++        # 创建 Backward 专用配置
++        self.backward_config = BackwardDelayedScaling(
++            fp8_format=fp8_format,
++            config=backward_recipe_config,
++            override_linear_precision=(False, False, not config.fp8_wgrad),
++            amax_reduce_group=amax_reduce_group
++        )
++
++        # 通用配置
++        self.fp8_format = fp8_format
++        self.fp8_block_size = fp8_block_size
++
++    def get_forward_config(self):
++        """获取 Forward 阶段的配置"""
++        return self.forward_config
++
++    def get_backward_config(self):
++        """获取 Backward 阶段的配置"""
++        return self.backward_config
++
++    def is_dual_recipe(self):
++        """判断是否为双重 recipe 配置"""
++        return True
++
++
++# 工厂函数用于创建双重配置
++def create_dual_delayed_scaling(
++    forward_margin: float = 0.0,
++    forward_history_len: int = 1024,
++    forward_compute_algo: str = "max",
++    forward_interval: int = 1,
++
++    backward_margin: float = 0.0,
++    backward_history_len: int = 1024,
++    backward_compute_algo: str = "max",
++    backward_interval: int = 1,
++
++    amax_reduce_group: Optional[torch.distributed.ProcessGroup] = None,
++    fp8_format: str = "E4M3",
++    config=None
++) -> DualDelayedScaling:
++    """
++    创建具有不同前后向配置的双重 delayed scaling
++
++    Args:
++        forward_*: Forward 阶段参数
++        backward_*: Backward 阶段参数
++        amax_reduce_group: 进程组
++        fp8_format: FP8 格式
++
++    Returns:
++        DualDelayedScaling 配置对象
++    """
++    return DualDelayedScaling(
++        amax_reduce_group=amax_reduce_group,
++        fp8_forward_margin=forward_margin,
++        fp8_forward_amax_history_len=forward_history_len,
++        fp8_forward_amax_compute_algo=forward_compute_algo,
++        fp8_forward_interval=forward_interval,
++        fp8_backward_margin=backward_margin,
++        fp8_backward_amax_history_len=backward_history_len,
++        fp8_backward_amax_compute_algo=backward_compute_algo,
++        fp8_backward_interval=backward_interval,
++        fp8_format=fp8_format,
++        config=config
++    )
+diff --git a/mindspeed/te/pytorch/fp8/recipes/forward_delayed_scaling_recipe.py b/mindspeed/te/pytorch/fp8/recipes/forward_delayed_scaling_recipe.py
+new file mode 100644
+index 00000000..b4c44adc
+--- /dev/null
++++ b/mindspeed/te/pytorch/fp8/recipes/forward_delayed_scaling_recipe.py
+@@ -0,0 +1,77 @@
++import dataclasses
++import typing
++from typing import Optional
++
++import torch
++
++import torch_npu
++from mindspeed.te.pytorch.fp8.recipes.recipe import Recipe, RecipeScaling
++from mindspeed.te.pytorch.fp8.scale_data import ScaleData
++from mindspeed.te.pytorch.fp8.tensor import Float8Tensor, is_fp8_tensor
++from mindspeed.te.pytorch.fp8.recipes.recipe import MyRecipeConfig
++
++
++class ForwardDelayedScalingRecipe(Recipe):
++    """
++    Forward 阶段专用的 Delayed Scaling Recipe
++    用于 forward pass 中的 FP8 量化, 具有独立的配置和状态管理
++    """
++    ALL_FORWARD_SCALING = []
++    FORWARD_MAX_STREAM = None
++
++    def __init__(self, key, recipe_config: 'ForwardDelayedScaling', tensor_shape) -> None:
++        """
++        初始化 Forward 阶段的 delayed scaling recipe
++
++        Args:
++            key: 张量键值 (inputs/weight/grads)
++            recipe_config: Forward 专用的配置对象
++            tensor_shape: 输入张量形状
++        """
++        super().__init__(key, recipe_config, tensor_shape)
++        if ForwardDelayedScalingRecipe.FORWARD_MAX_STREAM is None:
++            ForwardDelayedScalingRecipe.FORWARD_MAX_STREAM = torch.cuda.Stream()
++        self.scale = ScaleData(recipe_config, self.fp8_format)
++
++        ForwardDelayedScalingRecipe.ALL_FORWARD_SCALING.append(self)
++        # 等待 ScaleData 完成初始化
++        ForwardDelayedScalingRecipe.FORWARD_MAX_STREAM.wait_stream(torch.cuda.current_stream())
++
++    def finally_step(self):
++        """Forward 阶段结束时的清理操作"""
++        torch.cuda.current_stream().wait_stream(ForwardDelayedScalingRecipe.FORWARD_MAX_STREAM)
++        self.scale.delayed_recipe_update_scale()
++
++    def quantization(self, tensor, key, colwise=True, rowwise=True):
++        """
++        Forward 阶段的量化方法
++
++        Args:
++            tensor: 待量化的张量
++            key: 张量类型标识
++            colwise: 列方向量化标志
++            rowwise: 行方向量化标志
++
++        Returns:
++            量化后的 Float8Tensor
++        """
++        if tensor is None:
++            return tensor
++        if is_fp8_tensor(tensor):  # 如果已经是 fp8 格式则直接返回
++            return tensor
++        # 使用 forward 专用的流进行 amax 更新
++        scale = self.scale.delayed_recipe_update_amax(tensor, ForwardDelayedScalingRecipe.FORWARD_MAX_STREAM)
++        quant_tensor = torch_npu.npu_quantize(tensor, scale, zero_points=None, dtype=self.quant_dtype, axis=-1)
++        return Float8Tensor(quant_tensor, self.quant_dtype, scale, dtype=tensor.dtype)
++
++
++@dataclasses.dataclass
++class ForwardDelayedScaling(RecipeScaling):
++    """
++    Forward 阶段 Delayed Scaling 的配置类
++    可以设置与 backward 不同的参数
++    """
++    recipe = ForwardDelayedScalingRecipe
++    amax_reduce_group: torch.distributed.ProcessGroup = None
++    override_linear_precision: Optional[typing.Tuple] = None
++    config: MyRecipeConfig = None  
+diff --git a/mindspeed/te/pytorch/fp8/recipes/recipe.py b/mindspeed/te/pytorch/fp8/recipes/recipe.py
+index ab45fc25..21c60dda 100644
+--- a/mindspeed/te/pytorch/fp8/recipes/recipe.py
++++ b/mindspeed/te/pytorch/fp8/recipes/recipe.py
+@@ -48,3 +48,10 @@ class RecipeScaling:
+ class BlockDim(TypedDict):
+     row_block_size: int
+     col_block_size: int
++
++@dataclasses.dataclass
++class MyRecipeConfig():
++    fp8_margin: float = 0.0  # Forward 阶段的边距
++    fp8_amax_history_len: int = 1024  # Forward 阶段的历史长度
++    fp8_amax_compute_algo: str = "max"  # Forward 阶段的 amax 计算算法
++    fp8_interval: int = 1  # Forward 阶段的更新间隔
+diff --git a/mindspeed/te/pytorch/fp8/scale_data.py b/mindspeed/te/pytorch/fp8/scale_data.py
+index bab5da39..c4d253ba 100644
+--- a/mindspeed/te/pytorch/fp8/scale_data.py
++++ b/mindspeed/te/pytorch/fp8/scale_data.py
+@@ -8,6 +8,99 @@ from mindspeed.te.pytorch.fp8.constants import AMAX_COMPUTE_MAP, FP8Format
+ logger = logging.getLogger(__name__)
+ 
+ 
++class ScaleDataFA:
++    def __init__(self, recipe_config, fp8_format, scale_shape: List[int] = None):
++        self.config = recipe_config
++        self.ori_dtype = None
++        self.scale_shape = scale_shape if scale_shape is not None else [1]
++        self.device = 'npu:{}'.format(torch.npu.current_device())
++
++        self.fp8_format: FP8Format = fp8_format
++        self.fp8_max = self.fp8_format.max
++        self.margin = self.config.config.fp8_margin
++        self.scale = torch.ones(self.scale_shape, device=self.device)
++
++        self.amax_history_len = self.config.config.fp8_amax_history_len
++        self.amax_history_current_len = 0
++        if self.config.config.fp8_amax_compute_algo not in AMAX_COMPUTE_MAP:
++            raise AssertionError('Unsupported amax compute algo {}'.format(self.config.config.fp8_amax_compute_algo))
++        self.amax_compute = AMAX_COMPUTE_MAP[self.config.config.fp8_amax_compute_algo]
++        # 存储结构 -> tensor([amax_len, block])
++        self.amax_history = torch.zeros([self.amax_history_len] + self.scale_shape, device=self.device)
++        self.amax = torch.zeros(self.scale_shape, device=self.device)
++        self.current_interval = 1
++
++    @property
++    def quantization_scale(self):
++        return self.scale if self.scale.numel() == 1 else self.scale[0][0]
++
++    @property
++    def last_history_index(self):
++        if self.amax_history_current_len < self.amax_history_len:
++            return self.amax_history_current_len - 1
++        return -1
++
++    def append_amax(self, amax):
++        if self.amax_history_current_len < self.amax_history_len:
++            self.amax_history[self.amax_history_current_len, :].copy_(amax, non_blocking=True)
++            self.amax_history_current_len += 1
++        else:
++            self.amax_history = self.amax_history.roll(-1, 0)
++            self.amax_history[self.amax_history_len - 1, :].copy_(amax, non_blocking=True)
++
++    def reduce_amax(self, group=None):
++        if group is None or torch.distributed.get_world_size(group) <= 1:
++            return
++        if self.amax_history_current_len < self.amax_history_len:
++            amax = self.amax_history[self.amax_history_current_len - 1, :]
++        else:
++            amax = self.amax_history[self.amax_history_len - 1, :]
++        torch.distributed.all_reduce(amax, op=torch.distributed.ReduceOp.MAX, group=group)
++
++    def delayed_recipe_update_scale(self):
++        self.reduce_amax(self.config.amax_reduce_group)
++        self.amax_compute(self.amax, self.amax_history, self.last_history_index)
++        # 这里为适配算子对原始公式进行取反
++        # 原始公式 (self.fp8_max / self.amax) / (2 ** self.margin)
++        # 规避amax nan问题
++        if torch.any(self.amax == 0):
++            # amax 为 0(如全零输入块)时按公式算出的 scale 为 0, 反量化会出现除零/NaN,
++            # 因此把零值 amax 对应位置的 scale 复位为 1, 其余位置沿用上一轮的有效 scale
++            one = torch.ones_like(self.scale)
++            self.scale = torch.where(self.amax == 0, one, self.scale)
++        else:
++            # 使用直接赋值代替copy_操作, 创建新的tensor
++            self.scale = ((self.amax * (2 ** self.margin)) / self.fp8_max)
++            # self.scale.copy_(((self.amax * (2 ** self.margin)) / self.fp8_max), non_blocking=True)
++        # self.scale.copy_(((self.amax * (2 ** self.margin)) / self.fp8_max), non_blocking=True)
++
++    def delayed_recipe_update_amax(self, tensor, stream, amax_dim=None):
++        # 对齐解决方案, max和mean策略达到最大窗口长度前均使用current scaling
++        if self.amax_history_current_len < self.amax_history_len:
++            # first amax will use current max
++            self.current_interval = 1
++            amax = torch.amax(torch.abs(tensor))
++            self.append_amax(amax)
++            self.delayed_recipe_update_scale()
++            # 直接返回scale引用, 避免clone操作
++            scale = self.scale
++            # scale = self.scale.clone()
++        else:
++            stream.wait_stream(torch.cuda.current_stream())
++            # 直接返回scale引用, 避免clone操作
++            scale = self.scale
++            # scale = self.scale.clone()
++
++            if self.current_interval >= self.config.config.fp8_interval:
++                self.current_interval = 1
++                with torch.cuda.stream(stream):
++                    amax = torch.amax(torch.abs(tensor), dim=amax_dim)
++                    self.append_amax(amax)
++                    self.delayed_recipe_update_scale()
++            else:
++                self.current_interval += 1
++        return scale
++
+ class ScaleData:
+     def __init__(self, recipe_config, fp8_format, scale_shape: List[int] = None):
+         self.config = recipe_config
+@@ -45,7 +138,7 @@ class ScaleData:
+             self.amax_history[self.amax_history_current_len, :].copy_(amax, non_blocking=True)
+             self.amax_history_current_len += 1
+         else:
+-            self.amax_history = self.amax_history.roll(-1, 1)
++            self.amax_history = self.amax_history.roll(-1, 0)
+             self.amax_history[self.amax_history_len - 1, :].copy_(amax, non_blocking=True)
+ 
+     def reduce_amax(self, group=None):
+diff --git a/mindspeed/te/pytorch/module/dual_recipe_column_linear.py b/mindspeed/te/pytorch/module/dual_recipe_column_linear.py
+new file mode 100644
+index 00000000..2df81f72
+--- /dev/null
++++ b/mindspeed/te/pytorch/module/dual_recipe_column_linear.py
+@@ -0,0 +1,376 @@
++from typing import Any, Callable, Optional
++import torch
++from torch.nn.parameter import Parameter
++
++from megatron.core.model_parallel_config import ModelParallelConfig
++from megatron.core.parallel_state import (
++    get_expert_tensor_parallel_rank,
++    get_expert_tensor_parallel_world_size,
++    get_tensor_model_parallel_group,
++    get_tensor_model_parallel_rank,
++    get_tensor_model_parallel_world_size,
++    get_expert_tensor_and_model_parallel_group,
++)
++from megatron.core.tensor_parallel.layers import _initialize_affine_weight_cpu, _initialize_affine_weight_gpu, \
++    set_tensor_model_parallel_attributes
++from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
++from megatron.core.utils import divide  
++from mindspeed.args_utils import get_full_args as get_args
++from mindspeed.te.pytorch.fp8 import fp8_matmul, MatmulKey, is_fp8_tensor_2d
++from mindspeed.te.pytorch.fp8.constants import TensorKey
++from mindspeed.te.pytorch.fp8.dual_metadata import FP8DualMetadata, forward_phase_context, backward_phase_context
++from mindspeed.te.pytorch.module.ops import get_ops, DummyHandle
++
++
++class DualRecipeColumnParallelLinear(torch.nn.Module):
++    """
++    支持前后向不同 delayed scaling recipe 的 ColumnParallelLinear
++    继承自原有 TEColumnParallelLinear,扩展了双 recipe 支持能力
++    """
++
++    def __init__(
++        self,
++        input_size: int,
++        output_size: int,
++        *,
++        config: ModelParallelConfig,
++        init_method: Callable,
++        gather_output: bool,
++        bias: bool,
++        skip_bias_add: bool,
++        is_expert: bool,
++        skip_weight_param_allocation: bool = False,
++        tp_comm_buffer_name: str = None,
++        stride: int = 1,
++        keep_master_weight_for_test: bool = False,
++    ):
++        """
++        初始化支持双 recipe 的 ColumnParallelLinear
++
++        Args:
++            input_size: 输入维度
++            output_size: 输出维度
++            config: 模型并行配置
++            init_method: 参数初始化方法
++            gather_output: 是否聚合输出
++            bias: 是否使用偏置
++            skip_bias_add: 是否跳过偏置相加
++            is_expert: 是否为专家层
++            skip_weight_param_allocation: 是否跳过权重参数分配
++            tp_comm_buffer_name: TP 通信缓冲区名称
++            stride: 步长
++            keep_master_weight_for_test: 是否保留主权重用于测试
++        """
++        if gather_output:
++            raise ValueError('Transformer Engine linear layers do not support gather_output = True')
++
++        super(DualRecipeColumnParallelLinear, self).__init__()
++        # 使用双 recipe 元数据管理器
++        self.fp8_meta = FP8DualMetadata()
++
++        # 保持原有参数
++        self.input_size = input_size
++        self.output_size = output_size
++        self.gather_output = gather_output
++        self.skip_bias_add = skip_bias_add
++        self.is_expert = is_expert
++        self.expert_parallel = config.expert_model_parallel_size > 1
++        self.config = config
++        self.skip_weight_param_allocation = skip_weight_param_allocation
++
++        if is_expert:
++            world_size = get_expert_tensor_parallel_world_size()
++            rank = get_expert_tensor_parallel_rank()
++            tp_group = get_expert_tensor_and_model_parallel_group()
++        else:
++            world_size = get_tensor_model_parallel_world_size()
++            rank = get_tensor_model_parallel_rank()
++            tp_group = get_tensor_model_parallel_group()
++
++        self.fp8_meta.set_tp_config(world_size, rank, tp_group)
++        self.explicit_expert_comm = self.is_expert and (world_size > 1 or self.expert_parallel)
++        self.output_size_per_partition = divide(output_size, world_size)
++
++        # 初始化权重
++        if not skip_weight_param_allocation:
++            if config.use_cpu_initialization:
++                self.weight = Parameter(
++                    torch.empty(
++                        self.output_size_per_partition, self.input_size, dtype=config.params_dtype
++                    )
++                )
++                if config.perform_initialization:
++                    self.master_weight = _initialize_affine_weight_cpu(
++                        self.weight,
++                        self.output_size,
++                        self.input_size,
++                        self.output_size_per_partition,
++                        0,
++                        init_method,
++                        stride=stride,
++                        return_master_weight=keep_master_weight_for_test,
++                        rank=rank,
++                        world_size=world_size,
++                    )
++            else:
++                self.weight = Parameter(
++                    torch.empty(
++                        self.output_size_per_partition,
++                        self.input_size,
++                        device=torch.cuda.current_device(),
++                        dtype=config.params_dtype,
++                    )
++                )
++                if config.perform_initialization:
++                    _initialize_affine_weight_gpu(
++                        self.weight,
++                        init_method,
++                        partition_dim=0,
++                        stride=stride,
++                        is_expert=self.is_expert,
++                    )
++
++            setattr(self.weight, 'allreduce', not (self.is_expert and self.expert_parallel))
++        else:
++            self.weight = None
++
++        # 初始化偏置
++        if bias:
++            if config.use_cpu_initialization:
++                self.bias = Parameter(
++                    torch.empty(self.output_size_per_partition, dtype=config.params_dtype)
++                )
++            else:
++                self.bias = Parameter(
++                    torch.empty(
++                        self.output_size_per_partition,
++                        device=torch.cuda.current_device(),
++                        dtype=config.params_dtype,
++                    )
++                )
++            set_tensor_model_parallel_attributes(self.bias, True, 0, stride)
++            if config.perform_initialization:
++                with torch.no_grad():
++                    self.bias.zero_()
++            setattr(self.bias, 'allreduce', not (self.is_expert and self.expert_parallel))
++        else:
++            self.register_parameter('bias', None)
++
++        self.sequence_parallel = config.sequence_parallel and world_size > 1
++        self.allreduce_dgrad = world_size > 1 and not self.sequence_parallel
++
++        # 注册状态字典钩子
++        self._register_load_state_dict_pre_hook(
++            lambda state_dict, prefix, *args, **kwargs: state_dict.setdefault(
++                f'{prefix}_extra_state'
++            )
++        )
++
++    def forward(self, input_: torch.Tensor, weight: Optional[torch.Tensor] = None):
++        """
++        Forward pass,使用 forward 阶段的 recipe
++
++        Args:
++            input_: 输入张量
++            weight: 可选的权重张量
++
++        Returns:
++            output: 输出张量
++            output_bias: 输出偏置
++        """
++        if weight is None:
++            if self.weight is None:
++                raise RuntimeError(
++                    "weight was not supplied to ColumnParallelLinear forward"
++                    "and skip_weight_param_allocation is True."
++                )
++            weight = self.weight
++        else:
++            expected_shape = (self.output_size_per_partition, self.input_size)
++            if weight.shape != expected_shape:
++                raise RuntimeError(
++                    f"supplied weight's shape is {tuple(weight.shape)},"
++                    f"not {expected_shape} as expected"
++                )
++
++        bias = self.bias if not self.skip_bias_add else None
++
++        # 在 forward 阶段上下文中执行
++        with forward_phase_context(self.fp8_meta):
++            if self.explicit_expert_comm and self.fp8_meta.fp8_enable:
++                from mindspeed.te.pytorch.fp8.recipes import matmul_fp8
++                output = matmul_fp8(input_, weight)
++            elif self.explicit_expert_comm:
++                output = input_.matmul(weight.t())
++            elif self.sequence_parallel:
++                output = DualColumnParallelSeq.apply(input_, weight, bias, self.fp8_meta)
++            else:
++                output = DualColumnParallelNoSeq.apply(input_, weight, bias, self.fp8_meta)
++
++        output_bias = self.bias if self.skip_bias_add else None
++        return output, output_bias
++
++    def sharded_state_dict(self, prefix='', sharded_offsets=(), metadata=None):
++        """分片状态字典"""
++        state_dict = self.state_dict(prefix='', keep_vars=True)
++        return make_sharded_tensors_for_checkpoint(
++            state_dict, prefix, {'weight': 0, 'bias': 0}, sharded_offsets
++        )
++
++    def set_extra_state(self, state: Any):
++        """设置额外状态"""
++        pass
++
++    def get_extra_state(self) -> None:
++        """获取额外状态"""
++        return None
++
++
++class DualColumnParallelSeq(torch.autograd.Function):
++    """
++    支持双 recipe 的序列并行 ColumnParallel 前向/反向传播
++    """
++
++    @staticmethod
++    def forward(ctx, input_, weight, bias, fp8_meta: FP8DualMetadata):
++        """Forward pass"""
++        ctx.use_bias = bias is not None
++        ctx.fp8_meta = fp8_meta
++        ctx.fp8_enable = fp8_meta.is_fp8_enable()
++        ctx.total_input = None
++        ctx.gradient_accumulation_fusion = get_args().gradient_accumulation_fusion
++
++        # Forward 阶段量化和计算
++        with forward_phase_context(fp8_meta):
++            output_parallel, total_input, weight_fp8 = get_ops().allgather_matmul(
++                input_, weight, None, fp8_meta, MatmulKey.forward, ctx.fp8_enable, (False, True)
++            )
++
++        if COMM_OVERLAP_CONFIG.save_allgather_input:
++            ctx.total_input = total_input
++
++        if ctx.fp8_enable:
++            save_xw_for_backword(ctx, None, weight_fp8)
++        else:
++            save_xw_for_backword(ctx, input_, weight)
++        ctx.input_size = input_.size()
++
++        return output_parallel
++
++    @staticmethod
++    def backward(ctx, grad_output):
++        """Backward pass"""
++        fp8_meta: FP8DualMetadata = ctx.fp8_meta
++        fp8_enable = ctx.fp8_enable
++        input_size = ctx.input_size
++        tp_group = get_tensor_model_parallel_group()
++        tp_world_size = get_tensor_model_parallel_world_size()
++        grad_output_ori = grad_output
++
++        input_, weight = load_xw_from_forward(ctx)
++
++        all_gather_handle, total_input = DummyHandle, ctx.total_input
++        if ctx.needs_input_grad[1] and not COMM_OVERLAP_CONFIG.save_allgather_input:
++            if fp8_enable:
++                # Backward 阶段量化
++                with backward_phase_context(fp8_meta):
++                    grad_output = fp8_meta.quantization(TensorKey.grads, grad_output)
++                    input_ = fp8_meta.quantization(TensorKey.inputs, input_)
++            all_gather_handle, total_input = async_gather_along_first_dim(input_, tp_group, tp_world_size)
++
++        # Backward 阶段计算
++        with backward_phase_context(fp8_meta):
++            if not fp8_enable:
++                grad_input = grad_output.matmul(weight)
++                sub_grad_input = torch.empty(input_.size(), dtype=input_.dtype, device=input_.device, requires_grad=False) 
++            else:
++                grad_input, grad_output, _ = fp8_matmul(grad_output, weight, fp8_meta, MatmulKey.dx)
++                sub_grad_input = torch.empty(input_size, dtype=total_input.dtype, device=weight.device, requires_grad=False) 
++
++        reduce_scatter_handle = torch.distributed._reduce_scatter_base(
++            sub_grad_input, grad_input, group=tp_group, async_op=True
++        )
++
++        all_gather_handle.wait()
++
++        # Backward 阶段梯度计算
++        with backward_phase_context(fp8_meta):
++            grad_weight, grad_bias = calculate_grad(ctx, total_input, weight, grad_output, grad_output_ori)
++
++        reduce_scatter_handle.wait()
++        return sub_grad_input, grad_weight, grad_bias, None
++
++
++class DualColumnParallelNoSeq(torch.autograd.Function):
++    """
++    支持双 recipe 的非序列并行 ColumnParallel 前向/反向传播
++    """
++
++    @staticmethod
++    def forward(ctx, input_, weight, bias, fp8_meta: FP8DualMetadata):
++        """Forward pass"""
++        ctx.use_bias = bias is not None
++        ctx.fp8_meta = fp8_meta
++        ctx.fp8_enable = fp8_meta.is_fp8_enable()
++        ctx.gradient_accumulation_fusion = get_args().gradient_accumulation_fusion
++
++        # Forward 阶段计算
++        with forward_phase_context(fp8_meta):
++            if fp8_meta is None or not fp8_meta.is_fp8_enable():
++                output = torch.matmul(input_, weight.t())
++            else:
++                output, input_, weight = fp8_matmul(input_, weight, fp8_meta, MatmulKey.forward)
++
++        save_xw_for_backword(ctx, input_, weight)
++
++        if bias is not None:
++            output = output + bias
++        return output
++
++    @staticmethod
++    def backward(ctx, grad_output):
++        """Backward pass"""
++        tp_group = get_tensor_model_parallel_group()
++        tp_world_size = get_tensor_model_parallel_world_size()
++        grad_output_ori = grad_output
++        input_, weight = load_xw_from_forward(ctx)
++
++        # Backward 阶段计算
++        with backward_phase_context(ctx.fp8_meta):
++            if not ctx.fp8_enable:
++                grad_input = grad_output.matmul(weight)
++            else:
++                grad_input, grad_output, _ = fp8_matmul(grad_output, weight, ctx.fp8_meta, MatmulKey.dx)
++
++        handle = DummyHandle
++        if tp_world_size > 1:
++            handle = torch.distributed.all_reduce(grad_input, group=tp_group, async_op=True)
++
++        # Backward 阶段梯度计算
++        with backward_phase_context(ctx.fp8_meta):
++            grad_weight, grad_bias = calculate_grad(ctx, input_, weight, grad_output, grad_output_ori)
++
++        handle.wait()
++        return grad_input, grad_weight, grad_bias, None
++
++
++# 导入需要的辅助函数和常量
++try:
++    from mindspeed.te.pytorch.module.linear import (
++        save_xw_for_backword, load_xw_from_forward,
++        calculate_grad, async_gather_along_first_dim,
++        COMM_OVERLAP_CONFIG
++    )
++except ImportError:
++    # 如果无法导入,提供基本实现
++    def save_xw_for_backword(ctx, input_, weight):
++        ctx.save_for_backward(input_, weight)
++
++    def load_xw_from_forward(ctx):
++        return ctx.saved_tensors
++
++    def calculate_grad(ctx, inp, weight, grad, ori_grad):
++        return None, None
++
++    class COMM_OVERLAP_CONFIG:
++        save_allgather_input = False
+diff --git a/mindspeed/te/pytorch/module/dual_recipe_row_linear.py b/mindspeed/te/pytorch/module/dual_recipe_row_linear.py
+new file mode 100644
+index 00000000..8cf11b7e
+--- /dev/null
++++ b/mindspeed/te/pytorch/module/dual_recipe_row_linear.py
+@@ -0,0 +1,301 @@
++from typing import Any, Callable, Optional
++import torch
++from torch.nn.parameter import Parameter
++
++from megatron.core.model_parallel_config import ModelParallelConfig
++from megatron.core.parallel_state import (
++    get_expert_tensor_parallel_rank,
++    get_expert_tensor_parallel_world_size,
++    get_tensor_model_parallel_group,
++    get_tensor_model_parallel_rank,
++    get_tensor_model_parallel_world_size,
++    get_expert_tensor_and_model_parallel_group,
++)
++from megatron.core.tensor_parallel.layers import _initialize_affine_weight_cpu, _initialize_affine_weight_gpu, \
++    set_tensor_model_parallel_attributes
++from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
++from megatron.core.utils import divide
++from mindspeed.args_utils import get_full_args as get_args
++from mindspeed.te.pytorch.fp8 import fp8_matmul, MatmulKey, is_fp8_tensor_2d
++from mindspeed.te.pytorch.fp8.constants import TensorKey
++from mindspeed.te.pytorch.fp8.dual_metadata import FP8DualMetadata, forward_phase_context, backward_phase_context
++from mindspeed.te.pytorch.module.ops import get_ops, DummyHandle
++
++
++class DualRecipeRowParallelLinear(torch.nn.Module):
++    """
++    支持前后向不同 delayed scaling recipe 的 RowParallelLinear
++    继承自原有 TERowParallelLinear,扩展了双 recipe 支持能力
++    """
++
++    def __init__(
++        self,
++        input_size: int,
++        output_size: int,
++        *,
++        config: ModelParallelConfig,
++        init_method: Callable,
++        bias: bool,
++        input_is_parallel: bool,
++        skip_bias_add: bool,
++        is_expert: bool,
++        tp_comm_buffer_name: str = None,
++        stride: int = 1,
++        keep_master_weight_for_test: bool = False,
++    ):
++        """
++        初始化支持双 recipe 的 RowParallelLinear
++
++        Args:
++            input_size: 输入维度
++            output_size: 输出维度
++            config: 模型并行配置
++            init_method: 参数初始化方法
++            bias: 是否使用偏置
++            input_is_parallel: 输入是否已并行化
++            skip_bias_add: 是否跳过偏置相加
++            is_expert: 是否为专家层
++            tp_comm_buffer_name: TP 通信缓冲区名称
++            stride: 步长
++            keep_master_weight_for_test: 是否保留主权重用于测试
++        """
++        if not input_is_parallel:
++            raise ValueError(
++                "Transformer Engine linear layers do not support input_is_parallel = False"
++            )
++
++        super(DualRecipeRowParallelLinear, self).__init__()
++        # 使用双 recipe 元数据管理器
++        self.fp8_meta = FP8DualMetadata()
++
++        # 保持原有参数
++        self.input_size = input_size
++        self.output_size = output_size
++        self.config = config
++        self.is_expert = is_expert
++        self.expert_parallel = config.expert_model_parallel_size > 1
++        self.skip_bias_add = skip_bias_add
++        self.sequence_parallel = config.sequence_parallel and config.tensor_model_parallel_size > 1
++
++        # 设置 TP 配置
++        if self.is_expert:
++            world_size = get_expert_tensor_parallel_world_size()
++            rank = get_expert_tensor_parallel_rank()
++            tp_group = get_expert_tensor_and_model_parallel_group()
++        else:
++            world_size = get_tensor_model_parallel_world_size()
++            rank = get_tensor_model_parallel_rank()
++            tp_group = get_tensor_model_parallel_group()
++
++        self.fp8_meta.set_tp_config(world_size, rank, tp_group)
++        self.explicit_expert_comm = self.is_expert and (world_size > 1 or self.expert_parallel)
++        self.input_size_per_partition = divide(input_size, world_size)
++
++        # 初始化权重
++        if config.use_cpu_initialization:
++            self.weight = Parameter(
++                torch.empty(
++                    self.output_size, self.input_size_per_partition, dtype=config.params_dtype
++                )
++            )
++            if config.perform_initialization:
++                self.master_weight = _initialize_affine_weight_cpu(
++                    self.weight,
++                    self.output_size,
++                    self.input_size,
++                    self.input_size_per_partition,
++                    1,
++                    init_method,
++                    stride=stride,
++                    return_master_weight=keep_master_weight_for_test,
++                    params_dtype=config.params_dtype,
++                    rank=rank,
++                    world_size=world_size,
++                )
++        else:
++            self.weight = Parameter(
++                torch.empty(
++                    self.output_size,
++                    self.input_size_per_partition,
++                    device=torch.cuda.current_device(),
++                    dtype=config.params_dtype,
++                )
++            )
++            if config.perform_initialization:
++                _initialize_affine_weight_gpu(
++                    self.weight,
++                    init_method,
++                    partition_dim=1,
++                    stride=stride,
++                    is_expert=self.is_expert,
++                )
++        setattr(self.weight, 'allreduce', not (self.is_expert and self.expert_parallel))
++
++        # 初始化偏置
++        if bias:
++            if config.use_cpu_initialization:
++                self.bias = Parameter(torch.empty(self.output_size, dtype=config.params_dtype))
++            else:
++                self.bias = Parameter(
++                    torch.empty(
++                        self.output_size,
++                        device=torch.cuda.current_device(),
++                        dtype=config.params_dtype,
++                    )
++                )
++
++            if config.perform_initialization:
++                with torch.no_grad():
++                    self.bias.zero_()
++            setattr(self.bias, 'allreduce', not (self.is_expert and self.expert_parallel))
++            setattr(self.bias, 'sequence_parallel', self.sequence_parallel)
++        else:
++            self.register_parameter('bias', None)
++
++        # 注册状态字典钩子
++        self._register_load_state_dict_pre_hook(
++            lambda state_dict, prefix, *args, **kwargs: state_dict.setdefault(
++                f'{prefix}_extra_state'
++            )
++        )
++
++    def forward(self, input_: torch.Tensor):
++        """
++        Forward pass,使用 forward 阶段的 recipe
++
++        Args:
++            input_: 输入张量
++
++        Returns:
++            output: 输出张量
++            output_bias: 输出偏置
++        """
++        # 在 forward 阶段上下文中执行
++        with forward_phase_context(self.fp8_meta):
++            if self.explicit_expert_comm and self.fp8_meta.fp8_enable:
++                from mindspeed.te.pytorch.fp8.recipes import matmul_fp8
++                output = matmul_fp8(input_, self.weight)
++            elif self.explicit_expert_comm:
++                output = input_.matmul(self.weight.t())
++            elif self.sequence_parallel:
++                output = DualRowParallelSeq.apply(input_, self.weight, None, self.fp8_meta)
++            else:
++                output = DualRowParallelNoSeq.apply(input_, self.weight, None, self.fp8_meta)
++
++        if not self.skip_bias_add:
++            output = (output + self.bias) if self.bias is not None else output
++            output_bias = None
++        else:
++            output_bias = self.bias
++
++        return output, output_bias
++
++    def sharded_state_dict(self, prefix='', sharded_offsets=(), metadata=None):
++        """分片状态字典"""
++        state_dict = self.state_dict(prefix='', keep_vars=True)
++        return make_sharded_tensors_for_checkpoint(
++            state_dict, prefix, {'weight': 1}, sharded_offsets
++        )
++
++    def set_extra_state(self, state: Any):
++        """设置额外状态"""
++        pass
++
++    def get_extra_state(self) -> None:
++        """获取额外状态"""
++        return None
++
++
++class DualRowParallelSeq(torch.autograd.Function):
++    """
++    支持双 recipe 的序列并行 RowParallel 前向/反向传播
++    """
++
++    @staticmethod
++    def forward(ctx, input_, weight, bias, fp8_meta: FP8DualMetadata):
++        """Forward pass"""
++        ctx.use_bias = bias is not None
++        ctx.fp8_meta = fp8_meta
++        ctx.fp8_enable = fp8_meta.is_fp8_enable()
++        ctx.gradient_accumulation_fusion = get_args().gradient_accumulation_fusion
++
++        # Forward 阶段计算
++        with forward_phase_context(fp8_meta):
++            output_parallel, input_, weight = get_ops().matmul_reduce_scatter(
++                input_, weight, bias, fp8_meta, MatmulKey.forward, ctx.fp8_enable
++            )
++
++        save_xw_for_backword(ctx, input_, weight)
++        return output_parallel
++
++    @staticmethod
++    def backward(ctx, grad_output):
++        """Backward pass"""
++        grad_output_ori = grad_output
++        input_, weight = load_xw_from_forward(ctx)
++
++        # Backward 阶段计算
++        with backward_phase_context(ctx.fp8_meta):
++            grad_input, grad_output, _ = get_ops().allgather_matmul(
++                grad_output, weight, None, ctx.fp8_meta, MatmulKey.dx, ctx.fp8_enable
++            )
++            grad_weight, grad_bias = calculate_grad(ctx, input_, weight, grad_output, grad_output_ori)
++
++        return grad_input, grad_weight, grad_bias, None
++
++
++class DualRowParallelNoSeq(torch.autograd.Function):
++    """
++    支持双 recipe 的非序列并行 RowParallel 前向/反向传播
++    """
++
++    @staticmethod
++    def forward(ctx, input_, weight, bias, fp8_meta: FP8DualMetadata):
++        """Forward pass"""
++        ctx.use_bias = bias is not None
++        ctx.fp8_meta = fp8_meta
++        ctx.fp8_enable = fp8_meta.is_fp8_enable()
++        ctx.gradient_accumulation_fusion = get_args().gradient_accumulation_fusion
++
++        # Forward 阶段计算
++        with forward_phase_context(fp8_meta):
++            output_, input_, weight = get_ops().matmul_all_reduce(
++                input_, weight, bias, fp8_meta, MatmulKey.forward, ctx.fp8_enable
++            )
++
++        save_xw_for_backword(ctx, input_, weight)
++        return output_
++
++    @staticmethod
++    def backward(ctx, grad_output):
++        """Backward pass"""
++        grad_output_ori = grad_output
++        input_, weight = load_xw_from_forward(ctx)
++
++        # Backward 阶段计算
++        with backward_phase_context(ctx.fp8_meta):
++            if not ctx.fp8_enable:
++                grad_input = grad_output.matmul(weight)
++            else:
++                grad_input, grad_output, _ = fp8_matmul(grad_output, weight, ctx.fp8_meta, MatmulKey.dx)
++
++            grad_weight, grad_bias = calculate_grad(ctx, input_, weight, grad_output, grad_output_ori)
++
++        return grad_input, grad_weight, grad_bias, None
++
++
++# 导入需要的辅助函数
++try:
++    from mindspeed.te.pytorch.module.linear import (
++        save_xw_for_backword, load_xw_from_forward, calculate_grad
++    )
++except ImportError:
++    # 如果无法导入,提供基本实现
++    def save_xw_for_backword(ctx, input_, weight):
++        ctx.save_for_backward(input_, weight)
++
++    def load_xw_from_forward(ctx):
++        return ctx.saved_tensors
++
++    def calculate_grad(ctx, inp, weight, grad, ori_grad):
++        return None, None
+diff --git a/mindspeed/te/pytorch/module/ffn.py b/mindspeed/te/pytorch/module/ffn.py
+new file mode 100644
+index 00000000..d2a23bdb
+--- /dev/null
++++ b/mindspeed/te/pytorch/module/ffn.py
+@@ -0,0 +1,71 @@
++import torch
++import torch.nn as nn
++from mindspeed.te.pytorch.module.linear import TEColumnParallelLinear
++from mindspeed.te.pytorch.module.dual_recipe_column_linear import DualRecipeColumnParallelLinear
++from megatron.core.model_parallel_config import ModelParallelConfig
++from megatron.core.utils import init_method_normal
++
++
++class TEFFN(nn.Module):
++    """
++    兼容旧权重格式的FFN模块。
++    将层名称修改为 '0', '1', '2' 以匹配 nn.Sequential 的权重命名。
++    """
++
++    def __init__(self, hidden_size, ffn_dim, config=None):
++        super().__init__()
++        self.hidden_size = hidden_size
++        self.ffn_dim = ffn_dim
++
++        #ColumnParallelLinear = TEColumnParallelLinear
++        ColumnParallelLinear = DualRecipeColumnParallelLinear
++
++        # === 关键修改开始 ===
++        # 创建层对象,但不直接赋值给 self.linear1,而是先用变量保存
++        _linear1 = ColumnParallelLinear(
++            input_size=hidden_size,
++            output_size=ffn_dim,
++            config=config,
++            init_method=config.init_method,
++            gather_output=False,
++            bias=True,
++            skip_bias_add=False,
++            is_expert=False,
++            skip_weight_param_allocation=False
++        )
++
++        _activation = nn.GELU(approximate="tanh")
++
++        _linear2 = ColumnParallelLinear(
++            input_size=ffn_dim,
++            output_size=hidden_size,
++            config=config,
++            init_method=config.init_method,
++            gather_output=False,
++            bias=True,
++            skip_bias_add=False,
++            is_expert=False,
++            skip_weight_param_allocation=False
++        )
++
++        # 使用 add_module 将层注册为 '0', '1', '2'
++        # 这样在 state_dict 中就会出现 ffn.0.weight, ffn.2.weight 等
++        # 从而能够直接加载旧权重的 blocks.x.ffn.0.weight
++        self.add_module('0', _linear1)
++        self.add_module('1', _activation)
++        self.add_module('2', _linear2)
++
++    def forward(self, x):
++        # 前向传播时, 通过 _modules 字典或 getattr 获取层
++        # 因为 Python 不支持 self.0 这种写法
++
++        # 第一层线性变换 (对应 self._modules['0'])
++        hidden, _ = self._modules['0'](x)
++
++        # GELU激活 (对应 self._modules['1'])
++        hidden = self._modules['1'](hidden)
++
++        # 第二层线性变换 (对应 self._modules['2'])
++        output, _ = self._modules['2'](hidden)
++
++        return output

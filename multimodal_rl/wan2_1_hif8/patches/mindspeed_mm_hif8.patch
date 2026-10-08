@@ -1,0 +1,1871 @@
+diff --git a/examples/wan2.1/14b/t2v_fp8/feature_data.json b/examples/wan2.1/14b/t2v_fp8/feature_data.json
+new file mode 100644
+index 00000000..d21de16e
+--- /dev/null
++++ b/examples/wan2.1/14b/t2v_fp8/feature_data.json
+@@ -0,0 +1,47 @@
++{
++    "dataset_param": {
++        "dataset_type": "feature",
++        "basic_parameters": {
++            "data_path": "./sora_features/data.jsonl",
++            "data_folder": "./sora_features/"
++        },
++        "preprocess_parameters": {
++            "video_processor_type": "OpensoraplanVideoProcessor",
++            "video_reader_type": "DecordVideo",
++            "image_reader_type": "Image",
++            "num_frames": 61,
++            "frame_interval": 1,
++            "max_height": 720,
++            "max_width": 1280,
++            "max_hxw": 921600, 
++            "train_fps": 24,
++            "speed_factor": 1.0,
++            "drop_short_ratio": 0.0,
++            "cfg": 0.0,
++            "hw_stride": 8,
++            "force_resolution": false,
++            "hw_aspect_thr": 2.0
++        },
++        "use_text_processer": true,
++        "enable_text_preprocessing": false,
++        "tokenizer_config": [
++            {
++                "autotokenizer_name": "AutoTokenizer",
++                "hub_backend": "hf",
++                "from_pretrained": "./weights/Wan-AI/Wan2.1-T2V-14B-Diffusers/tokenizer",
++                "model_max_length": 256
++            }
++        ]
++    },
++    "dataloader_param": {
++        "dataloader_mode": "sampler",
++        "sampler_type": "LengthGroupedSampler",
++        "shuffle": false,
++        "drop_last": true,
++        "pin_memory": true,
++        "group_frame": false,
++        "group_resolution": false,
++        "group_data": true,
++        "initial_global_step_for_sampler": 0
++    }
++}
+diff --git a/examples/wan2.1/14b/t2v_fp8/pretrain_fsdp2.sh b/examples/wan2.1/14b/t2v_fp8/pretrain_fsdp2.sh
+new file mode 100644
+index 00000000..c55184b0
+--- /dev/null
++++ b/examples/wan2.1/14b/t2v_fp8/pretrain_fsdp2.sh
+@@ -0,0 +1,157 @@
++#!/bin/bash
++set -euo pipefail
++
++# 根据实际情况修改 ascend-toolkit 路径；需包含 HiF8 量化融合算子支持
++ASCEND_TOOLKIT_ENV="/usr/local/Ascend/ascend-toolkit/set_env.sh"
++if [ ! -f "${ASCEND_TOOLKIT_ENV}" ]; then
++    echo "[ERROR] 未找到 CANN 环境脚本: ${ASCEND_TOOLKIT_ENV}，请按实际安装路径修改后重试。" >&2
++    exit 1
++fi
++# set_env.sh 内部会引用可能尚未定义的环境变量(如 LD_LIBRARY_PATH)，source 期间临时关闭 -u
++set +u
++source "${ASCEND_TOOLKIT_ENV}"
++set -u
++
++# 该变量只用于规避megatron对其校验，对npu无效
++export CUDA_DEVICE_MAX_CONNECTIONS=2 # 开启FSDP2时，不能置为1
++export ASCEND_SLOG_PRINT_TO_STDOUT=0
++export ASCEND_GLOBAL_LOG_LEVEL=3
++export TASK_QUEUE_ENABLE=1
++export COMBINED_ENABLE=1
++export CPU_AFFINITY_CONF=1
++export HCCL_CONNECT_TIMEOUT=1200
++export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
++export MULTI_STREAM_MEMORY_REUSE=2
++export ASCEND_LAUNCH_BLOCKING=0
++# FP8
++# 量化 FlashAttention: 默认关闭。开启需要 CANN 提供 hifloat8 量化融合注意力算子
++# (npu_quant_fusion_attention / npu_quant_fusion_attention_grad), 商发 CANN 9.2.0 暂不包含;
++# 关闭后仍保留线性层 GEMM 的 HiF8 量化(9.2.0 商发包完整支持), 注意力回退到 BF16 融合算子。
++export FP8_FA='false'
++# export FP8_ALL2ALL='true'
++
++NPUS_PER_NODE=8
++MASTER_ADDR=localhost
++MASTER_PORT=6000
++NNODES=1
++NODE_RANK=0
++WORLD_SIZE=$(($NPUS_PER_NODE*$NNODES))
++
++# 注意：目前开启FSDP2训练时，尚不支持TP/PP/VPP
++TP=1
++PP=1
++VP=1
++CP=8
++MBS=1
++GRAD_ACC_STEP=1
++DP=$(($WORLD_SIZE/$TP/$PP/$CP))
++GBS=$(($MBS*$GRAD_ACC_STEP*$DP))
++
++MM_DATA="examples/wan2.1/14b/t2v_fp8/feature_data.json"
++MM_MODEL="examples/wan2.1/14b/t2v_fp8/pretrain_model_fsdp2.json"
++MM_TOOL="./mindspeed_mm/tools/tools.json"
++LOAD_PATH="./weights/Wan2.1-T2V-14B-Converted/"  # 转换后的 wandit 权重路径
++SAVE_PATH="./save_dir"
++
++DISTRIBUTED_ARGS="
++    --nproc_per_node $NPUS_PER_NODE \
++    --nnodes $NNODES \
++    --node_rank $NODE_RANK \
++    --master_addr $MASTER_ADDR \
++    --master_port $MASTER_PORT
++"
++
++GPT_ARGS="
++    --tensor-model-parallel-size ${TP} \
++    --pipeline-model-parallel-size ${PP} \
++    --virtual-pipeline-model-parallel-size ${VP} \
++    --context-parallel-size ${CP} \
++    --context-parallel-algo ulysses_cp_algo \
++    --micro-batch-size ${MBS} \
++    --global-batch-size ${GBS} \
++    --num-workers 0 \
++    --lr 1e-5 \
++    --min-lr 1e-5 \
++    --adam-beta1 0.9 \
++    --adam-beta2 0.999 \
++    --adam-eps 1e-8 \
++    --lr-decay-style constant \
++    --weight-decay 0 \
++    --lr-warmup-init 0 \
++    --lr-warmup-iters 0 \
++    --clip-grad 0.0 \
++    --train-iters 2000 \
++    --exit-interval 2000 \
++    --no-gradient-accumulation-fusion \
++    --no-load-optim \
++    --no-load-rng \
++    --no-save-optim \
++    --no-save-rng \
++    --distributed-timeout-minutes 20 \
++    --use-torch-fsdp2 \
++    --untie-embeddings-and-output-weights \
++    --ckpt-format torch_dcp \
++    --fsdp2-config-path examples/wan2.1/fsdp2_config.yaml \
++    --optimizer-selection fused_torch_adamw \
++    --use-cpu-initialization \
++    --attention-mask-type general \
++    --seed 42 \
++    --transformer-impl transformer_engine \
++    --fp8-format hif8 \
++    --fp8-recipe delayed \
++    --dual-delayed-scaling \
++    --use-deter-comp \
++"
++# --fp8-format hif8 \
++# --fp8-recipe delayed \
++# --dual-delayed-scaling \
++# --use-deter-comp \
++MM_ARGS="
++    --mm-data $MM_DATA \
++    --mm-model $MM_MODEL \
++    --mm-tool $MM_TOOL
++"
++
++OUTPUT_ARGS="
++    --log-interval 1 \
++    --save-interval 1000 \
++    --eval-interval 10000 \
++    --eval-iters 10 \
++    --load $LOAD_PATH \
++    --save $SAVE_PATH \
++"
++
++logfile=$(date +%Y%m%d)_$(date +%H%M%S)
++LOG_FILE="logs/train_${logfile}.log"
++mkdir -p logs
++
++# 管道中 tee 的退出码会掩盖 torchrun 的退出码，这里用 PIPESTATUS 取训练进程的真实退出码
++set +e
++torchrun $DISTRIBUTED_ARGS pretrain_sora.py \
++    $GPT_ARGS \
++    $MM_ARGS \
++    $OUTPUT_ARGS \
++    --distributed-backend nccl \
++    2>&1 | tee "${LOG_FILE}"
++TRAIN_RC=${PIPESTATUS[0]}
++set -e
++
++chmod 440 "${LOG_FILE}"
++if [ -d "${SAVE_PATH}" ]; then
++    find "${SAVE_PATH}" -type d -exec chmod 750 {} \;
++    find "${SAVE_PATH}" -type f -exec chmod 640 {} \;
++fi
++
++if [ "${TRAIN_RC}" -ne 0 ]; then
++    echo "[ERROR] 训练进程异常退出(exit=${TRAIN_RC})，日志见 ${LOG_FILE}，跳过性能统计。" >&2
++    exit "${TRAIN_RC}"
++fi
++
++# 性能统计：日志中无匹配行时 STEP_TIME 为空，直接跳过，避免 awk 语法错误与除零
++STEP_TIME=$(grep "elapsed time per iteration" "${LOG_FILE}" | awk -F ':' '{print$5}' | awk -F '|' '{print$1}' | head -n 200 | tail -n 100 | awk '{sum+=$1} END {if (NR != 0) printf("%.1f",sum/NR)}' || true)
++if [ -z "${STEP_TIME}" ] || [ "$(awk -v t="${STEP_TIME}" 'BEGIN{print (t + 0 > 0) ? 1 : 0}')" != "1" ]; then
++    echo "[WARN] 未从 ${LOG_FILE} 中解析到有效的 'elapsed time per iteration'，跳过性能统计。" >&2
++else
++    SPS=$(awk -v gbs="${GBS}" -v st="${STEP_TIME}" 'BEGIN{printf "%.3f\n", gbs * 1000 / st}')
++    echo "Elapsed Time Per iteration: ${STEP_TIME}, Average Samples per Second: ${SPS}"
++fi
+diff --git a/examples/wan2.1/14b/t2v_fp8/pretrain_model_fsdp2.json b/examples/wan2.1/14b/t2v_fp8/pretrain_model_fsdp2.json
+new file mode 100644
+index 00000000..69fdd804
+--- /dev/null
++++ b/examples/wan2.1/14b/t2v_fp8/pretrain_model_fsdp2.json
+@@ -0,0 +1,41 @@
++{
++    "load_video_features": true,
++    "load_text_features": true,
++    "task": "t2v",
++    "diffusion": {
++        "model_id": "wan_flow_match_scheduler",
++        "num_train_timesteps": 1000,
++        "shift": 5,
++        "sigma_min": 0.0,
++        "extra_one_step": true
++    },
++    "predictor": {
++        "model_id": "wandit",
++        "dtype": "bf16",
++        "model_type": "t2v",
++        "patch_size": [1, 2, 2],
++        "text_len": 512,
++        "in_dim": 16,
++        "hidden_size": 5120,
++        "ffn_dim": 13824,
++        "freq_dim": 256,
++        "text_dim": 4096,
++        "img_dim": 1280,
++        "out_dim": 16,
++        "num_heads": 40,
++        "num_layers": 40,
++        "pipeline_num_layers": [10,10,10,10],
++        "qk_norm": true,
++        "qk_norm_type": "rmsnorm",
++        "cross_attn_norm": true,
++        "eps": 1e-6,
++        "max_seq_len": 1024,
++        "attention_async_offload": false,
++        "use_fused_rmsnorm":true,
++        "use_te": true
++    },
++    "patch": {
++        "clip_grad_async": true,
++        "bridge_patch": true
++    }
++}
+diff --git a/examples/wan2.1/fsdp2_config.yaml b/examples/wan2.1/fsdp2_config.yaml
+index 0f6b17ed..fc1f2150 100644
+--- a/examples/wan2.1/fsdp2_config.yaml
++++ b/examples/wan2.1/fsdp2_config.yaml
+@@ -6,8 +6,8 @@ reshard_after_forward: True
+ param_dtype: "bf16"
+ reduce_dtype: "fp32"
+ cast_forward_inputs: True
+-recompute_modules:
+-  - predictor.blocks.{*}
++# recompute_modules:
++#   - predictor.blocks.{*}
+ num_to_forward_prefetch: 0
+ num_to_backward_prefetch: 0
+-offload_to_cpu: False
+\ No newline at end of file
++offload_to_cpu: False
+diff --git a/mindspeed_mm/models/common/attention.py b/mindspeed_mm/models/common/attention.py
+index e6848f21..83bdc3ad 100644
+--- a/mindspeed_mm/models/common/attention.py
++++ b/mindspeed_mm/models/common/attention.py
+@@ -29,6 +29,17 @@ from mindspeed.core.context_parallel.model_parallel_utils import (
+     get_ring_group_for_intra_window_send_recv_overlap
+ )
+ from mindspeed.core.context_parallel.ulysses_context_parallel.unaligned_cp import mapping
++try:
++    from megatron.core.extensions.transformer_engine import (
++        TEColumnParallelLinear,
++        TERowParallelLinear
++    )
++except ImportError:
++    pass
++
++from mindspeed.te.pytorch.fp8.recipes import DelayedScalingRecipe, TEDelayedScaling, DelayedScalingRecipeFA 
++from mindspeed.te.pytorch.fp8.constants import Format
++
+ 
+ from mindspeed_mm.utils.utils import video_to_image, change_tensor_layout
+ from mindspeed_mm.models.common.normalize import normalize, FP32LayerNorm
+@@ -36,6 +47,10 @@ from mindspeed_mm.models.common.embeddings.rope import RoPE3D, PositionGetter3D
+ from mindspeed_mm.models.common.conv import CausalConv3d, WfCausalConv3d
+ from mindspeed_mm.models.common.linear import MatmulAddLinear
+ from mindspeed_mm.utils.async_offload import async_save_on_cpu
++from mindspeed_mm.models.common.attention_fp8 import CustomQuantFlashAttentionFunc
++from mindspeed.te.pytorch.module.dual_recipe_column_linear import DualRecipeColumnParallelLinear
++from mindspeed.te.pytorch.module.dual_recipe_row_linear import DualRecipeRowParallelLinear
++import os
+ 
+ # Replace with Megatron communication interface
+ from .communications import (
+@@ -94,8 +109,13 @@ def do_npu_fusion_attention(
+         block_idx=0,
+         depth=0,
+         h2d_stream=None,
+-        d2h_stream=None
++        d2h_stream=None,
++        qkv_scaler=None,
+     ):
++    if os.getenv("FP8_FA", "false") == 'true':  
++        use_fp8_fa = True
++    else:
++        use_fp8_fa = False
+     if async_offload:
+         with async_save_on_cpu(
+             h2d_stream=h2d_stream,
+@@ -117,18 +137,33 @@ def do_npu_fusion_attention(
+                 sparse_mode=sparse_mode
+             )[0]
+     else:
+-        output = torch_npu.npu_fusion_attention(
+-            q, k, v, head_num, layout,
+-            pse=pse,
+-            padding_mask=None,
+-            atten_mask=attn_mask,
+-            actual_seq_qlen=actual_seq_qlen,
+-            actual_seq_kvlen=actual_seq_kvlen,
+-            scale=softmax_scale,
+-            keep_prob=1 - dropout_p,
+-            inner_precise=0,
+-            sparse_mode=sparse_mode
+-        )[0]
++        if not use_fp8_fa:
++            output = torch_npu.npu_fusion_attention(
++                q, k, v, head_num, layout,
++                pse=pse,
++                padding_mask=None,
++                atten_mask=attn_mask,
++                actual_seq_qlen=actual_seq_qlen,
++                actual_seq_kvlen=actual_seq_kvlen,
++                scale=softmax_scale,
++                keep_prob=1 - dropout_p,
++                inner_precise=0,
++                sparse_mode=sparse_mode
++            )[0]
++        else:
++            FA = CustomQuantFlashAttentionFunc
++            output = FA.apply(
++                q, k, v, head_num, layout,
++                pse,
++                None,
++                attn_mask,
++                actual_seq_qlen,
++                actual_seq_kvlen,
++                softmax_scale,
++                1 - dropout_p,
++                0,
++                sparse_mode,
++                qkv_scaler)
+     return output
+ 
+ 
+@@ -147,7 +182,8 @@ class FlashAttention(nn.Module):
+         self,
+         softmax_scale=None,
+         attention_dropout=0.0,
+-        fa_layout="sbh"
++        fa_layout="sbh",
++        is_cross_attn=False
+     ):
+         super().__init__()
+         args = get_args()
+@@ -160,6 +196,34 @@ class FlashAttention(nn.Module):
+         self.context_parallel_algo = args.context_parallel_algo
+         self.context_parallel_size = args.context_parallel_size
+ 
++        self.use_delayed_hif8 = False
++        if os.getenv("FP8_ALL2ALL", "false").lower() == "true" and not is_cross_attn:
++            pass
++        else:
++            if os.getenv("FP8_FA", "false") == 'true':
++                if args.fp8 == 'hif8' and args.fp8_recipe == 'delayed':
++                    self.use_delayed_hif8 = True
++                    # forward/backward recipes must hold separate config objects, otherwise the
++                    # backward settings below would overwrite the forward ones on the shared config
++                    fw_config = core_transformer_config_from_args(args)
++                    fw_delayed_recipe = TEDelayedScaling(config=fw_config, fp8_format=Format.HIF8)
++                    fw_delayed_recipe.config.fp8_amax_compute_algo = 'most_recent'
++                    fw_delayed_recipe.config.fp8_amax_history_len = 1
++                    fw_delayed_recipe.config.fp8_interval = 10
++
++                    bw_config = core_transformer_config_from_args(args)
++                    bw_delayed_recipe = TEDelayedScaling(config=bw_config, fp8_format=Format.HIF8)
++                    bw_delayed_recipe.config.fp8_amax_compute_algo = 'mean'
++                    bw_delayed_recipe.config.fp8_amax_history_len = 128
++                    bw_delayed_recipe.config.fp8_interval = 1
++
++                    self.q_delayedscaler_128 = DelayedScalingRecipeFA(key='inputs', recipe_config=fw_delayed_recipe, tensor_shape= None)  
++                    self.k_delayedscaler_256 = DelayedScalingRecipeFA(key='inputs', recipe_config=fw_delayed_recipe, tensor_shape= None)
++                    self.v_delayedscaler_512 = DelayedScalingRecipeFA(key='inputs', recipe_config=fw_delayed_recipe, tensor_shape= None)
++                    self.dy_delayedscaler_512 = DelayedScalingRecipeFA(key='grads', recipe_config=bw_delayed_recipe, tensor_shape= None)
++            else:
++                self.use_delayed_hif8 = False
++
+     def forward(self, query, key, value, attention_mask=None, **kwargs):
+         """Implements the multihead softmax attention.
+         Arguments
+@@ -214,6 +278,8 @@ class FlashAttention(nn.Module):
+                 actual_seq_kvlen=actual_seq_kvlen,
+                 dropout_p=self.attention_dropout,
+                 sparse_mode=self.sparse_mode,
++                qkv_scaler=(self.q_delayedscaler_128, self.k_delayedscaler_256, \
++                    self.v_delayedscaler_512, self.dy_delayedscaler_512) if self.use_delayed_hif8 else None,
+                 **kwargs,
+             )
+ 
+@@ -285,6 +351,7 @@ class ParallelAttention(nn.Module):
+         self.fa_layout = fa_layout
+         self.rope = rope
+ 
++        self.use_te = args.mm.model.predictor.get('use_te', False)  
+         # Per attention head and per partition values.
+         self.cp_size = mpu.get_context_parallel_world_size()
+         self.tp_size = mpu.get_tensor_model_parallel_world_size()
+@@ -292,55 +359,74 @@ class ParallelAttention(nn.Module):
+         self.num_attention_heads_per_partition = core.utils.divide(num_attention_heads, self.tp_size)
+         self.attention_mask_type = args.attention_mask_type
+ 
++        if config.fp8 and config.dual_delayed_scaling:
++            self.ColumnParallelLinear = DualRecipeColumnParallelLinear
++            self.RowParallelLinear = DualRecipeRowParallelLinear
++        else:
++            self.ColumnParallelLinear = tensor_parallel.ColumnParallelLinear if not self.use_te else TEColumnParallelLinear
++            self.RowParallelLinear = tensor_parallel.RowParallelLinear if not self.use_te else TERowParallelLinear
++
+         # Strided linear layer.
+         if self.attention_type == AttnType.self_attn and self.is_qkv_concat:
+-            self.proj_qkv = tensor_parallel.ColumnParallelLinear(
++            self.proj_qkv = self.ColumnParallelLinear(
+                 query_dim,
+                 hidden_size * 3,
+                 config=config,
+                 init_method=config.init_method,
+                 bias=proj_q_bias,
+-                gather_output=False)
++                gather_output=False,
++                skip_bias_add=False,
++                is_expert=False)
+         elif self.attention_type == AttnType.cross_attn and self.is_kv_concat:
+-            self.proj_q = tensor_parallel.ColumnParallelLinear(
++            self.proj_q = self.ColumnParallelLinear(
+                 query_dim,
+                 hidden_size,
+                 config=config,
+                 init_method=config.init_method,
+                 bias=proj_q_bias,
+-                gather_output=False)
++                gather_output=False,
++                skip_bias_add=False,
++                is_expert=False)
+ 
+-            self.proj_kv = tensor_parallel.ColumnParallelLinear(
++            self.proj_kv = self.ColumnParallelLinear(
+                 key_dim,
+                 hidden_size * 2,
+                 config=config,
+                 init_method=config.init_method,
+                 bias=proj_k_bias,
+-                gather_output=False)
++                gather_output=False,
++                skip_bias_add=False,
++                is_expert=False)
+         else:
+-            self.proj_q = tensor_parallel.ColumnParallelLinear(
++            self.proj_q = self.ColumnParallelLinear(
+                 query_dim,
+                 hidden_size,
+                 config=config,
+                 init_method=config.init_method,
+                 bias=proj_q_bias,
+-                gather_output=False
++                gather_output=False,
++                skip_bias_add=False,
++                is_expert=False
+             )
+-            self.proj_k = tensor_parallel.ColumnParallelLinear(
++            self.proj_k = self.ColumnParallelLinear(
+                 key_dim,
+                 hidden_size,
+                 config=config,
+                 init_method=config.init_method,
+                 bias=proj_k_bias,
+-                gather_output=False
++                gather_output=False,
++                skip_bias_add=False,
++                is_expert=False
+             )
+-            self.proj_v = tensor_parallel.ColumnParallelLinear(
++            self.proj_v = self.ColumnParallelLinear(
+                 key_dim,
+                 hidden_size,
+                 config=config,
+                 init_method=config.init_method,
+                 bias=proj_v_bias,
+-                gather_output=False
++                gather_output=False,
++                skip_bias_add=False,
++                is_expert=False
+             )
+ 
+         # Normalize
+@@ -380,14 +466,15 @@ class ParallelAttention(nn.Module):
+                 self.core_attention_flash = UlyssesContextAttention(self.core_attention_flash, ulysses_group)
+ 
+         # Output
+-        self.proj_out = tensor_parallel.RowParallelLinear(
++        self.proj_out = self.RowParallelLinear(
+             hidden_size,
+             query_dim,
+             config=config,
+             init_method=config.init_method,
+             bias=proj_out_bias,
+             input_is_parallel=True,
+-            skip_bias_add=False
++            skip_bias_add=False,
++            is_expert=False
+         )
+ 
+         # Dropout
+@@ -697,14 +784,14 @@ class MultiHeadSparseAttentionSBH(ParallelAttention):
+             if args.context_parallel_algo == 'ulysses_cp_algo':
+                 cp_group = mpu.get_context_parallel_group()
+                 total_frames = frames * mpu.get_context_parallel_world_size()
+-                
++
+             if args.context_parallel_algo == 'hybrid_cp_algo':
+                 cp_group = get_context_parallel_group_for_hybrid_ulysses()
+                 total_frames = frames * args.ulysses_degree_in_cp
+ 
+         if self.sparse1d:
+             out = self._reverse_sparse_1d(out, total_frames, height, width)
+-            
++
+         if mpu.get_context_parallel_world_size() > 1:
+             if args.context_parallel_algo == 'ulysses_cp_algo':
+                 cp_group = mpu.get_context_parallel_group()
+@@ -1919,4 +2006,3 @@ class WhisperAttention(nn.Module):
+         if input_ndim == 4:
+             out = out.transpose(-1, -2).reshape(b, c, h, w)
+         return out
+-
+diff --git a/mindspeed_mm/models/common/attention_fp8.py b/mindspeed_mm/models/common/attention_fp8.py
+new file mode 100644
+index 00000000..dc6abe86
+--- /dev/null
++++ b/mindspeed_mm/models/common/attention_fp8.py
+@@ -0,0 +1,162 @@
++from typing import Tuple
++import math
++
++import torch
++import torch.nn.functional as F
++import torch_npu
++
++from megatron.training import get_args
++from mindspeed_mm.utils.async_offload import async_save_on_cpu
++import numpy as np
++
++
++PER_BLOCK_Q_SIZE = 128
++PER_BLOCK_KV_SIZE = 256
++FP8_MAX = 448.0
++
++
++def calc_scale_size(tensor, block_size):
++    if tensor.dim() != 4:
++        raise ValueError(f"Input must be 4D tensor [B, N, S, D], got shape {tensor.shape}")
++    if block_size <= 0:
++        raise ValueError(f"block_size must be positive, got {block_size}")
++
++    B, N, S, D = tensor.shape
++    pad_len = (block_size - S % block_size) % block_size
++    S_padded = S + pad_len if pad_len > 0 else S
++
++    return torch.Size([B, N, S_padded // block_size, block_size * D])
++
++class CustomQuantFlashAttentionFunc(torch.autograd.Function):
++    @staticmethod
++    def forward(
++        ctx,
++        query, key, value,
++        head_num,
++        layout,
++        pse,
++        padding_mask,
++        atten_mask,
++        actual_seq_qlen,
++        actual_seq_kvlen,
++        scale,
++        keep_prob,
++        inner_precise,
++        sparse_mode,
++        qkv_scaler
++    ):
++
++        query_scale_size_128 = calc_scale_size(query, block_size=128)
++        key_scale_size_256 = calc_scale_size(key, block_size=256)
++        value_scale_size_512 = calc_scale_size(value, block_size=512)
++
++        q_scaler_128, k_scaler_256, v_scaler_512, dy_scaler = qkv_scaler
++
++        query_fp8_128 = q_scaler_128.quantization(query, None, None, None)
++        key_fp8_256 = k_scaler_256.quantization(key, None, None, None)
++        value_fp8_512 = v_scaler_512.quantization(value, None, None, None)
++
++        query_scale_128 = query_fp8_128.fp8_scale.broadcast_to((*query_scale_size_128[:-1], 1))
++        key_scale_256 = key_fp8_256.fp8_scale.broadcast_to((*key_scale_size_256[:-1], 1))
++        value_scale_512 = value_fp8_512.fp8_scale.broadcast_to((*value_scale_size_512[:-1], 1))
++
++        query_scale_size_512 = calc_scale_size(query, block_size=512)
++        key_scale_size_512 = calc_scale_size(key, block_size=512)
++        value_scale_size_512 = calc_scale_size(value, block_size=512)
++
++        query_scale_512_bw = query_fp8_128.fp8_scale.broadcast_to((*query_scale_size_512[:-1], 1))
++        key_scale_512_bw = key_fp8_256.fp8_scale.broadcast_to((*key_scale_size_512[:-1], 1))
++        value_scale_512_bw = value_fp8_512.fp8_scale.broadcast_to((*value_scale_size_512[:-1], 1))
++
++        q_fw = query_fp8_128.data.permute(0, 2, 1, 3).contiguous()
++        k_fw = key_fp8_256.data.permute(0, 2, 1, 3).contiguous()
++        v_fw = value_fp8_512.data.permute(0, 2, 1, 3).contiguous()
++
++        p_scale_tensor_cpu = torch.ones(1,  dtype=torch.float, device=torch.device('cpu')) * 15
++        p_scale_tensor = p_scale_tensor_cpu.npu()
++
++        layout_fw = 'BSND'
++        res = torch_npu.npu_quant_fusion_attention(
++            q_fw, k_fw, v_fw, head_num, layout_fw,
++            scale=scale,
++            d_scale_q=query_scale_128,
++            d_scale_k=key_scale_256,
++            d_scale_v=value_scale_512,
++            query_dtype=torch_npu.hifloat8,
++            p_scale=p_scale_tensor
++        )
++
++        attn = res[0]
++        softmax_max = res[1]
++        softmax_sum = res[2]
++
++        ctx.save_for_backward(
++            q_fw, k_fw, v_fw,
++            attn, softmax_max, softmax_sum,
++            query_scale_512_bw, key_scale_512_bw, value_scale_512_bw
++        )
++
++        ctx.head_num = head_num
++        ctx.layout = layout
++        ctx.pse = pse
++        ctx.padding_mask = padding_mask
++        ctx.atten_mask = atten_mask
++        ctx.actual_seq_qlen = actual_seq_qlen
++        ctx.actual_seq_kvlen = actual_seq_kvlen
++        ctx.scale_value = scale
++        ctx.keep_prob = keep_prob
++        ctx.inner_precise = inner_precise
++        ctx.sparse_mode = sparse_mode
++        ctx.out_dtype = 1
++        ctx.query_dtype = torch_npu.hifloat8
++        ctx.dy_scaler = dy_scaler
++
++        attn_return = attn.permute(0, 2, 1, 3).contiguous()
++
++        return attn_return
++
++    @staticmethod
++    def backward(ctx, dy):
++        q, k, v, attn_in, softmax_max, softmax_sum, d_scale_q, d_scale_k, d_scale_v = ctx.saved_tensors
++
++        dy_scale_size = calc_scale_size(dy, block_size=512)
++
++        dy_fp8_512 = ctx.dy_scaler.quantization(dy, None, None, None)
++        dy_scale_512 = dy_fp8_512.fp8_scale.broadcast_to((*dy_scale_size[:-1], 1))
++
++        head_num_bw = q.shape[2]
++        dy_bw = dy_fp8_512.data.permute(0, 2, 1, 3).contiguous()
++
++        layout_bw = 'BSND'
++
++        p_scale_tensor_cpu = torch.ones(1,  dtype=torch.float, device=torch.device('cpu')) * 15
++        p_scale_tensor = p_scale_tensor_cpu.npu()
++
++        ds_scale_tensor_cpu = torch.ones(1,  dtype=torch.float, device=torch.device('cpu')) * (2 ** 15)
++        ds_scale_tensor = ds_scale_tensor_cpu.npu()
++
++        res = torch_npu.npu_quant_fusion_attention_grad(
++            q,
++            k,
++            v,
++            dy_bw,
++            head_num=head_num_bw,
++            input_layout=layout_bw,
++            softmax_max=softmax_max,
++            softmax_sum=softmax_sum,
++            attention_in=attn_in,
++            scale_value=ctx.scale_value,
++            d_scale_q=d_scale_q,
++            d_scale_k=d_scale_k,
++            d_scale_v=d_scale_v,
++            d_scale_dy=dy_scale_512,
++            query_dtype=ctx.query_dtype,
++            p_scale=p_scale_tensor,
++            ds_scale=ds_scale_tensor
++        )
++
++        dq = res[0].permute(0, 2, 1, 3).contiguous()
++        dk = res[1].permute(0, 2, 1, 3).contiguous()
++        dv = res[2].permute(0, 2, 1, 3).contiguous()
++
++        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None
+diff --git a/mindspeed_mm/models/common/ffn.py b/mindspeed_mm/models/common/ffn.py
+index 89bcdca9..df8e49fe 100644
+--- a/mindspeed_mm/models/common/ffn.py
++++ b/mindspeed_mm/models/common/ffn.py
+@@ -8,6 +8,67 @@ from megatron.core import mpu, tensor_parallel
+ from megatron.training import get_args
+ from megatron.training.arguments import core_transformer_config_from_args
+ 
++class MYFFN(nn.Module):
++    """
++    兼容旧权重格式的FFN模块。
++    将层名称修改为 '0', '1', '2' 以匹配 nn.Sequential 的权重命名。
++    """
++    def __init__(self, hidden_size, ffn_dim, config=None):
++        super().__init__()
++        self.hidden_size = hidden_size
++        self.ffn_dim = ffn_dim
++
++        # === 关键修改开始 ===
++        # 创建层对象,但不直接赋值给 self.linear1,而是先用变量保存
++        _linear1 = tensor_parallel.ColumnParallelLinear(
++            input_size=hidden_size,
++            output_size=ffn_dim,
++            config=config,
++            init_method=config.init_method,
++            gather_output=False,
++            bias=True,
++            skip_bias_add=False,
++            is_expert=False,
++            skip_weight_param_allocation=False
++        )
++
++        _activation = nn.GELU(approximate="tanh")
++
++        _linear2 = tensor_parallel.ColumnParallelLinear(
++            input_size=ffn_dim,
++            output_size=hidden_size,
++            config=config,
++            init_method=config.init_method,
++            gather_output=False,
++            bias=True,
++            skip_bias_add=False,
++            is_expert=False,
++            skip_weight_param_allocation=False
++        )
++
++        # 使用 add_module 将层注册为 '0', '1', '2'
++        # 这样在 state_dict 中就会出现 ffn.0.weight, ffn.2.weight 等
++        # 从而能够直接加载旧权重的 blocks.x.ffn.0.weight
++        self.add_module('0', _linear1)
++        self.add_module('1', _activation)
++        self.add_module('2', _linear2)
++        # === 关键修改结束 ===
++
++    def forward(self, x):
++        # 前向传播时,通过 _modules 字典或 getattr 获取层
++        # 因为 Python 不支持 self.0 这种写法
++
++        # 第一层线性变换 (对应 self._modules['0'])
++        hidden, _ = self._modules['0'](x)
++
++        # GELU激活 (对应 self._modules['1'])
++        hidden = self._modules['1'](hidden)
++
++        # 第二层线性变换 (对应 self._modules['2'])
++        output, _ = self._modules['2'](hidden)
++
++        return output
++
+ 
+ class FeedForward(nn.Module):
+     r"""
+@@ -110,4 +171,4 @@ class GELU(nn.Module):
+     def forward(self, hidden_states):
+         hidden_states, _ = self.proj(hidden_states)
+         hidden_states = self.gelu(hidden_states)
+-        return hidden_states
+\ No newline at end of file
++        return hidden_states
+diff --git a/mindspeed_mm/models/common/fp8_all2all.py b/mindspeed_mm/models/common/fp8_all2all.py
+new file mode 100644
+index 00000000..cca6b540
+--- /dev/null
++++ b/mindspeed_mm/models/common/fp8_all2all.py
+@@ -0,0 +1,597 @@
++import os
++from typing import Optional, Tuple, List
++
++import torch
++import torch.distributed as dist
++import torch_npu
++
++from megatron.training import get_args
++from megatron.training.arguments import core_transformer_config_from_args
++from mindspeed.te.pytorch.fp8.recipes import TEDelayedScaling
++from mindspeed.te.pytorch.fp8.constants import Format, FP8Format, FormatEnum
++from mindspeed.te.pytorch.fp8.tensor import Float8Tensor, is_fp8_tensor
++from mindspeed.te.pytorch.fp8.scale_data import ScaleDataFA
++
++from mindspeed_mm.utils.utils import change_tensor_layout
++
++PER_BLOCK_Q_SIZE = 128
++PER_BLOCK_KV_SIZE = 256
++FP8_MAX = 448.0
++
++def calc_scale_size(tensor, block_size):
++    if tensor.dim() != 4:
++        raise ValueError(f"Input must be 4D tensor [B, N, S, D], got shape {tensor.shape}")  
++    if block_size <= 0:
++        raise ValueError(f"block_size must be positive, got {block_size}")
++
++    B, N, S, D = tensor.shape
++    pad_len = (block_size - S % block_size) % block_size
++    S_padded = S + pad_len if pad_len > 0 else S
++
++    return torch.Size([B, N, S_padded // block_size, block_size * D])
++
++
++class FP8All2AllScaleData:
++    def __init__(self, recipe_config, fp8_format: FP8Format, scale_shape: List[int] = None):  
++        self.config = recipe_config
++        self.ori_dtype = None
++        self.scale_shape = scale_shape if scale_shape is not None else [1]
++        self.device = 'npu:{}'.format(torch.npu.current_device())
++
++        self.fp8_format: FP8Format = fp8_format
++        self.fp8_max = self.fp8_format.max
++        self.margin = self.config.config.fp8_margin if hasattr(self.config, 'config') else 0  
++        self.scale = torch.ones(self.scale_shape, device=self.device)
++
++        self.amax_history_len = self.config.config.fp8_amax_history_len if hasattr(self.config, 'config') else 1  
++        self.amax_history_current_len = 0
++        self.amax_history = torch.zeros([self.amax_history_len] + self.scale_shape, device=self.device)  
++        self.amax = torch.zeros(self.scale_shape, device=self.device)
++        self.current_interval = 1
++        self.fp8_interval = self.config.config.fp8_interval if hasattr(self.config, 'config') else 1  
++
++    def append_amax(self, amax):
++        if self.amax_history_current_len < self.amax_history_len:
++            self.amax_history[self.amax_history_current_len, :].copy_(amax, non_blocking=True) 
++            self.amax_history_current_len += 1
++        else:
++            self.amax_history = self.amax_history.roll(-1, 0)
++            self.amax_history[self.amax_history_len - 1, :].copy_(amax, non_blocking=True)  
++
++    def delayed_recipe_update_scale(self):
++        if self.amax_history_current_len < self.amax_history_len:
++            amax = self.amax_history[self.amax_history_current_len - 1, :]
++        else:
++            amax = self.amax_history[self.amax_history_len - 1, :]
++
++        if torch.any(amax == 0):
++            # 与 mindspeed 侧 ScaleDataFA 一致: 零值 amax 对应位置的 scale 复位为 1
++            one = torch.ones_like(self.scale)
++            self.scale = torch.where(amax == 0, one, self.scale)
++        else:
++            self.scale = ((amax * (2 ** self.margin)) / self.fp8_max)
++
++    def update_scale_from_amax(self, amax_value):
++        if amax_value == 0:
++            return self.scale
++        self.amax.fill_(amax_value)
++        self.append_amax(self.amax)
++        self.delayed_recipe_update_scale()
++        return self.scale
++
++    def delayed_recipe_update_amax(self, tensor, stream):
++        if self.amax_history_current_len < self.amax_history_len:
++            self.current_interval = 1
++            amax = torch.amax(torch.abs(tensor))
++            self.append_amax(amax)
++            self.delayed_recipe_update_scale()
++            scale = self.scale
++        else:
++            stream.wait_stream(torch.cuda.current_stream())
++            scale = self.scale
++
++            if self.current_interval >= self.fp8_interval:
++                self.current_interval = 1
++                with torch.cuda.stream(stream):
++                    amax = torch.amax(torch.abs(tensor))
++                    self.append_amax(amax)
++                    self.delayed_recipe_update_scale()
++            else:
++                self.current_interval += 1
++        return scale
++
++
++class FP8All2AllRecipe:
++    ALL_SCALING = []
++    MAX_STREAM = None
++
++    def __init__(self, key, recipe_config: 'TEDelayedScaling', fp8_format: FP8Format, tensor_shape=None) -> None:  
++        super().__init__()
++        if FP8All2AllRecipe.MAX_STREAM is None:
++            FP8All2AllRecipe.MAX_STREAM = torch.cuda.Stream()
++        self.scale = None
++        self.recipe_config = recipe_config
++        self.key = key
++        self.tensor_shape = tensor_shape
++        self.fp8_format = fp8_format
++        self.quant_dtype = fp8_format.quant_type
++
++        FP8All2AllRecipe.ALL_SCALING.append(self)
++        FP8All2AllRecipe.MAX_STREAM.wait_stream(torch.cuda.current_stream())
++
++    def finally_step(self):
++        torch.cuda.current_stream().wait_stream(FP8All2AllRecipe.MAX_STREAM)
++        if self.scale is not None:
++            self.scale.delayed_recipe_update_scale()
++
++    def init_scale(self):
++        if self.scale is None:
++            self.scale = FP8All2AllScaleData(self.recipe_config, self.fp8_format)  
++
++    def quantization(self, tensor, global_amax=None):
++        if tensor is None:
++            return tensor
++        if is_fp8_tensor(tensor):
++            return tensor
++
++        self.init_scale()
++
++        if global_amax is not None:
++            scale = self.scale.update_scale_from_amax(global_amax)
++        else:
++            scale = self.scale.delayed_recipe_update_amax(tensor, FP8All2AllRecipe.MAX_STREAM) 
++
++        quant_tensor = torch_npu.npu_quantize(tensor, scale, zero_points=None, dtype=self.quant_dtype, axis=-1)  
++        return Float8Tensor(quant_tensor, self.quant_dtype, scale, dtype=tensor.dtype)  
++
++
++class FP8All2AllPrequantFlashAttentionFunc(torch.autograd.Function):
++    @staticmethod
++    def forward(
++        ctx,
++        query_fp8, key_fp8, value_fp8,
++        query_scale, key_scale, value_scale,
++        head_num,
++        layout,
++        pse,
++        padding_mask,
++        atten_mask,
++        actual_seq_qlen,
++        actual_seq_kvlen,
++        scale,
++        keep_prob,
++        inner_precise,
++        sparse_mode,
++        dy_scaler
++    ):
++        query_scale_size_128 = calc_scale_size(query_fp8, block_size=128)
++        key_scale_size_256 = calc_scale_size(key_fp8, block_size=256)
++        value_scale_size_512 = calc_scale_size(value_fp8, block_size=512)
++
++        query_scale_128 = query_scale.broadcast_to((*query_scale_size_128[:-1], 1))
++        key_scale_256 = key_scale.broadcast_to((*key_scale_size_256[:-1], 1))
++        value_scale_512 = value_scale.broadcast_to((*value_scale_size_512[:-1], 1))
++
++        query_scale_size_512 = calc_scale_size(query_fp8, block_size=512)
++        key_scale_size_512 = calc_scale_size(key_fp8, block_size=512)
++        value_scale_size_512 = calc_scale_size(value_fp8, block_size=512)
++
++        query_scale_512_bw = query_scale.broadcast_to((*query_scale_size_512[:-1], 1))  
++        key_scale_512_bw = key_scale.broadcast_to((*key_scale_size_512[:-1], 1))
++        value_scale_512_bw = value_scale.broadcast_to((*value_scale_size_512[:-1], 1)) 
++
++        q_fw = query_fp8.permute(0, 2, 1, 3).contiguous()
++        k_fw = key_fp8.permute(0, 2, 1, 3).contiguous()
++        v_fw = value_fp8.permute(0, 2, 1, 3).contiguous()
++
++        p_scale_tensor_cpu = torch.ones(1, dtype=torch.float, device=torch.device('cpu')) * 15 
++        p_scale_tensor = p_scale_tensor_cpu.npu()
++
++        layout_fw = 'BSND'
++        res = torch_npu.npu_quant_fusion_attention(
++            q_fw, k_fw, v_fw, head_num, layout_fw,
++            scale=scale,
++            d_scale_q=query_scale_128,
++            d_scale_k=key_scale_256,
++            d_scale_v=value_scale_512,
++            query_dtype=torch_npu.hifloat8,
++            p_scale=p_scale_tensor
++        )
++
++        attn = res[0]
++        softmax_max = res[1]
++        softmax_sum = res[2]
++
++        ctx.save_for_backward(
++            q_fw, k_fw, v_fw,
++            attn, softmax_max, softmax_sum,
++            query_scale_512_bw, key_scale_512_bw, value_scale_512_bw
++        )
++
++        ctx.head_num = head_num
++        ctx.layout = layout
++        ctx.pse = pse
++        ctx.padding_mask = padding_mask
++        ctx.atten_mask = atten_mask
++        ctx.actual_seq_qlen = actual_seq_qlen
++        ctx.actual_seq_kvlen = actual_seq_kvlen
++        ctx.scale_value = scale
++        ctx.keep_prob = keep_prob
++        ctx.inner_precise = inner_precise
++        ctx.sparse_mode = sparse_mode
++        ctx.out_dtype = 1
++        ctx.query_dtype = torch_npu.hifloat8
++        ctx.dy_scaler = dy_scaler
++        attn_return = attn.permute(0, 2, 1, 3).contiguous()
++
++        return attn_return
++
++    @staticmethod
++    def backward(ctx, dy):
++        q, k, v, attn_in, softmax_max, softmax_sum, d_scale_q, d_scale_k, d_scale_v = ctx.saved_tensors
++
++        dy_scale_size = calc_scale_size(dy, block_size=512)
++
++        dy_fp8_512 = ctx.dy_scaler.quantization(dy, global_amax=None)
++        dy_scale_512 = dy_fp8_512.fp8_scale.broadcast_to((*dy_scale_size[:-1], 1))
++
++        head_num_bw = q.shape[2]
++        dy_bw = dy_fp8_512.data.permute(0, 2, 1, 3).contiguous()
++
++        layout_bw = 'BSND'
++
++        p_scale_tensor_cpu = torch.ones(1, dtype=torch.float, device=torch.device('cpu')) * 15
++        p_scale_tensor = p_scale_tensor_cpu.npu()
++
++        ds_scale_tensor_cpu = torch.ones(1, dtype=torch.float, device=torch.device('cpu')) * (2 ** 15)
++        ds_scale_tensor = ds_scale_tensor_cpu.npu()
++
++        res = torch_npu.npu_quant_fusion_attention_grad(
++            q,
++            k,
++            v,
++            dy_bw,
++            head_num=head_num_bw,
++            input_layout=layout_bw,
++            softmax_max=softmax_max,
++            softmax_sum=softmax_sum,
++            attention_in=attn_in,
++            scale_value=ctx.scale_value,
++            d_scale_q=d_scale_q,
++            d_scale_k=d_scale_k,
++            d_scale_v=d_scale_v,
++            d_scale_dy=dy_scale_512,
++            query_dtype=ctx.query_dtype,
++            p_scale=p_scale_tensor,
++            ds_scale=ds_scale_tensor
++        )
++
++        dq = res[0].permute(0, 2, 1, 3).contiguous()
++        dk = res[1].permute(0, 2, 1, 3).contiguous()
++        dv = res[2].permute(0, 2, 1, 3).contiguous()
++
++        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None, None, None
++
++
++class FP8All2AllCommunication:
++    def __init__(self, group, enable_fp8_all2all=False):
++        self.group = group
++        self.enable_fp8_all2all = enable_fp8_all2all
++        self.world_size = dist.get_world_size(group) if group is not None else 1 
++
++        if enable_fp8_all2all and self.world_size > 1:
++            args = get_args()
++            # forward/backward recipes must hold separate config objects, otherwise the
++            # backward settings below would overwrite the forward ones on the shared config
++            fw_config = core_transformer_config_from_args(args)
++            fw_delayed_recipe = TEDelayedScaling(config=fw_config, fp8_format=Format.HIF8)
++            fw_delayed_recipe.config.fp8_amax_compute_algo = 'most_recent'
++            fw_delayed_recipe.config.fp8_amax_history_len = 1
++            fw_delayed_recipe.config.fp8_interval = 10
++
++            bw_config = core_transformer_config_from_args(args)
++            bw_delayed_recipe = TEDelayedScaling(config=bw_config, fp8_format=Format.HIF8)
++            bw_delayed_recipe.config.fp8_amax_compute_algo = 'mean'
++            bw_delayed_recipe.config.fp8_amax_history_len = 128
++            bw_delayed_recipe.config.fp8_interval = 1
++
++            fw_fp8_format = FormatEnum.HIF8_15.value
++            bw_fp8_format = FormatEnum.HIF8_224.value
++
++            self.q_recipes = [
++                FP8All2AllRecipe(key=f'q_all2all_chunk_{i}', recipe_config=fw_delayed_recipe, fp8_format=fw_fp8_format)
++                for i in range(self.world_size)
++            ]
++            self.k_recipes = [
++                FP8All2AllRecipe(key=f'k_all2all_{i}', recipe_config=fw_delayed_recipe, fp8_format=fw_fp8_format)
++                for i in range(self.world_size)
++            ]
++            self.v_recipes = [
++                FP8All2AllRecipe(key=f'v_all2all_{i}', recipe_config=fw_delayed_recipe, fp8_format=fw_fp8_format)
++                for i in range(self.world_size)
++            ]
++
++            self.dy_recipe = FP8All2AllRecipe(key='dq_all2all', recipe_config=bw_delayed_recipe, fp8_format=bw_fp8_format)
++
++    def _compute_amax_per_chunk(self, tensor: torch.Tensor, scatter_dim: int) -> torch.Tensor:
++        chunk_size = tensor.size(scatter_dim) // self.world_size
++        remainder = tensor.size(scatter_dim) % self.world_size
++
++        amax_list = []
++        start_idx = 0
++
++        for i in range(self.world_size):
++            current_chunk_size = chunk_size + (1 if i < remainder else 0)
++            chunk = tensor.narrow(scatter_dim, start_idx, current_chunk_size)
++            amax = torch.amax(torch.abs(chunk))
++            amax_list.append(amax)
++            start_idx += current_chunk_size
++
++        return torch.stack(amax_list)
++
++    def _allreduce_amax(self, amax_vector: torch.Tensor) -> torch.Tensor:
++        global_amax = amax_vector.clone()
++        dist.all_reduce(global_amax, op=dist.ReduceOp.MAX, group=self.group)
++        return global_amax
++
++    def _quantize_chunks_with_global_amax(
++        self,
++        tensor: torch.Tensor,
++        global_amax_vec: torch.Tensor,
++        recipes: List[FP8All2AllRecipe],
++        scatter_dim: int
++    ) -> Tuple[torch.Tensor, torch.Tensor]:
++        N = tensor.size(scatter_dim)
++        chunk_size = N // self.world_size
++        remainder = N % self.world_size
++
++        if remainder == 0:
++            shape = list(tensor.shape)
++            new_shape = shape[:scatter_dim] + [self.world_size, chunk_size] + shape[scatter_dim + 1:]
++            reshaped = tensor.view(*new_shape)
++
++            scales = []
++            for i in range(self.world_size):
++                recipes[i].init_scale()
++                scale = recipes[i].scale.update_scale_from_amax(global_amax_vec[i].item())
++                scales.append(scale)
++            scales_tensor = torch.stack(scales)
++
++            quant_chunks = []
++            for i in range(self.world_size):
++                chunk = reshaped.select(scatter_dim, i)
++                quant_chunk = torch_npu.npu_quantize(
++                    chunk, scales_tensor[i],
++                    zero_points=None, dtype=recipes[i].quant_dtype, axis=-1
++                )
++                quant_chunks.append(quant_chunk)
++
++            quant_tensor = torch.stack(quant_chunks, dim=scatter_dim).view(*shape)
++            return quant_tensor, scales_tensor
++        else:
++            quant_chunks = []
++            scale_chunks = []
++            start_idx = 0
++
++            for i in range(self.world_size):
++                current_chunk_size = chunk_size + (1 if i < remainder else 0)
++                chunk = tensor.narrow(scatter_dim, start_idx, current_chunk_size)
++
++                quant_chunk = recipes[i].quantization(chunk, global_amax_vec[i].item())
++                quant_chunks.append(quant_chunk.data if isinstance(quant_chunk, Float8Tensor) else quant_chunk)
++                scale_chunks.append(quant_chunk.fp8_scale if isinstance(quant_chunk, Float8Tensor) else torch.ones(1, device=tensor.device)) 
++
++                start_idx += current_chunk_size
++
++            quant_tensor = torch.cat(quant_chunks, dim=scatter_dim)
++            scales = torch.stack(scale_chunks)
++
++            return quant_tensor, scales
++
++    def forward_all2all(
++        self,
++        query: torch.Tensor,
++        key: torch.Tensor,
++        value: torch.Tensor,
++        scatter_dim: int = 2,
++        gather_dim: int = 0,
++        gather_size: Optional[int] = None
++    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
++        if not self.enable_fp8_all2all or self.world_size == 1:
++            q_out, k_out, v_out = self._standard_all2all(query, key, value, scatter_dim, gather_dim, gather_size)
++            return q_out, k_out, v_out, None, None, None
++
++        # shape [b, n, s, d]
++        #       [0, 1, 2, 3]
++        chunk_dim = 1
++        q_amax_vec = self._compute_amax_per_chunk(query, chunk_dim)
++        k_amax_vec = self._compute_amax_per_chunk(key, chunk_dim)
++        v_amax_vec = self._compute_amax_per_chunk(value, chunk_dim)
++
++        combined_amax = torch.stack([q_amax_vec, k_amax_vec, v_amax_vec], dim=0)
++        global_combined_amax = self._allreduce_amax(combined_amax.flatten()).view(3, self.world_size)
++        global_q_amax = global_combined_amax[0]
++        global_k_amax = global_combined_amax[1]
++        global_v_amax = global_combined_amax[2]
++
++        quant_q, q_scales = self._quantize_chunks_with_global_amax(query, global_q_amax, self.q_recipes, chunk_dim)
++        quant_k, k_scales = self._quantize_chunks_with_global_amax(key, global_k_amax, self.k_recipes, chunk_dim)
++        quant_v, v_scales = self._quantize_chunks_with_global_amax(value, global_v_amax, self.v_recipes, chunk_dim)
++
++        output_q = self._fp8_all2all(quant_q, scatter_dim, gather_dim, gather_size)
++        output_k = self._fp8_all2all(quant_k, scatter_dim, gather_dim, gather_size)
++        output_v = self._fp8_all2all(quant_v, scatter_dim, gather_dim, gather_size)
++
++        q_scale = q_scales[0] if q_scales.numel() > 0 else torch.ones(1, device=query.device)
++        k_scale = k_scales[0] if k_scales.numel() > 0 else torch.ones(1, device=key.device)
++        v_scale = v_scales[0] if v_scales.numel() > 0 else torch.ones(1, device=value.device)
++
++        return output_q, output_k, output_v, q_scale, k_scale, v_scale
++
++    def _standard_all2all(
++        self,
++        query: torch.Tensor,
++        key: torch.Tensor,
++        value: torch.Tensor,
++        scatter_dim: int,
++        gather_dim: int,
++        gather_size: Optional[int]
++    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
++        from mindspeed.core.context_parallel.ulysses_context_parallel.unaligned_cp.mapping import all_to_all
++
++        query_out = all_to_all(query, self.group, scatter_dim, gather_dim, gather_size)
++        key_out = all_to_all(key, self.group, scatter_dim, gather_dim, gather_size)
++        value_out = all_to_all(value, self.group, scatter_dim, gather_dim, gather_size)
++
++        return query_out, key_out, value_out
++
++    def _fp8_all2all(
++        self,
++        tensor: torch.Tensor,
++        scatter_dim: int,
++        gather_dim: int,
++        gather_size: Optional[int] = None
++    ) -> torch.Tensor:
++        from mindspeed.core.context_parallel.ulysses_context_parallel.unaligned_cp.mapping import _all_to_all
++
++        return _all_to_all(tensor, self.group, scatter_dim, gather_dim, gather_size)
++
++
++class FP8All2AllFlashAttention(torch.nn.Module):
++    def __init__(self, softmax_scale=None, attention_dropout=0.0, fa_layout="bnsd", dy_scaler=None):
++        super().__init__()
++        self.softmax_scale = softmax_scale
++        self.attention_dropout = attention_dropout
++        self.fa_layout = fa_layout
++        self.dy_scaler = dy_scaler
++
++    def forward(
++        self,
++        query_fp8, key_fp8, value_fp8,
++        query_scale, key_scale, value_scale,
++        layout="BNSD",
++        attn_mask=None,
++        actual_seq_qlen=None,
++        actual_seq_kvlen=None,
++        dropout_p=0.,
++        pse=None,
++        sparse_mode=0,
++    ):
++        seq_length, batch_size, head_num, head_dim = query_fp8.shape[0], query_fp8.shape[1], query_fp8.shape[2], query_fp8.shape[3]  
++        query_fp8, key_fp8, value_fp8 = [change_tensor_layout(x, "sbnd", self.fa_layout, batch_size=batch_size) for x in [query_fp8, key_fp8, value_fp8]] 
++        output = FP8All2AllPrequantFlashAttentionFunc.apply(
++            query_fp8, key_fp8, value_fp8,
++            query_scale, key_scale, value_scale,
++            head_num,
++            layout,
++            pse,
++            None,
++            attn_mask,
++            actual_seq_qlen,
++            actual_seq_kvlen,
++            self.softmax_scale,
++            1 - dropout_p,
++            0,
++            sparse_mode,
++            self.dy_scaler
++        )
++        output = change_tensor_layout(output, self.fa_layout, "sbh", batch_size=batch_size)
++        return output
++
++
++class FP8UlyssesContextAttention(torch.nn.Module):
++    def __init__(
++        self,
++        local_attention: torch.nn.Module,
++        sequence_process_group: torch.distributed.ProcessGroup,
++        scatter_dim: int = 2,
++        gather_dim: int = 0,
++        enable_fp8_all2all: bool = False,
++    ):
++        super().__init__()
++        self.local_attn = local_attention
++        self.enable_fp8_all2all = enable_fp8_all2all
++
++        self.fp8_comm = FP8All2AllCommunication(
++            group=sequence_process_group,
++            enable_fp8_all2all=enable_fp8_all2all
++        )
++
++        self.local_attn.ulysses_comm_para = {
++            'spg': sequence_process_group,
++            'scatter_dim': scatter_dim,
++            'gather_dim': gather_dim,
++            'enable_fp8_all2all': enable_fp8_all2all,
++        }
++
++        if enable_fp8_all2all:
++            self.fp8_flash_attn = FP8All2AllFlashAttention(
++                softmax_scale=local_attention.softmax_scale if hasattr(local_attention, 'softmax_scale') else None,
++                attention_dropout=local_attention.attention_dropout if hasattr(local_attention, 'attention_dropout') else 0.0,
++                fa_layout=local_attention.fa_layout if hasattr(local_attention, 'fa_layout') else "bnsd",
++                dy_scaler=self.fp8_comm.dy_recipe
++            )
++
++    def forward(self, query, key, value, *args, **kwargs):
++        from mindspeed.core.context_parallel import get_args
++        from mindspeed.core.context_parallel.ulysses_context_parallel.unaligned_cp.mapping import all_to_all, cal_split_sizes
++
++        global_args = get_args()
++        use_custom_ulysses_backward = (
++            global_args.context_parallel_size > 1 and
++            global_args.context_parallel_algo == "ulysses_cp_algo" and
++            not global_args.use_legacy_models and
++            global_args.context_parallel_kv_cache_policy
++        )
++
++        if use_custom_ulysses_backward:
++            output = self.local_attn(query, key, value, *args, **kwargs)
++        else:
++            spg = self.local_attn.ulysses_comm_para.get('spg')
++            scatter_dim = self.local_attn.ulysses_comm_para.get('scatter_dim')
++            gather_dim = self.local_attn.ulysses_comm_para.get('gather_dim')
++            enable_fp8 = self.local_attn.ulysses_comm_para.get('enable_fp8_all2all', False)
++            seq_world_size = torch.distributed.get_world_size(spg)
++
++            if seq_world_size > key.shape[scatter_dim] and query.shape[scatter_dim] % key.shape[scatter_dim] == 0:
++                key = key.repeat_interleave(query.shape[scatter_dim] // key.shape[scatter_dim], dim=scatter_dim)
++                value = value.repeat_interleave(query.shape[scatter_dim] // value.shape[scatter_dim], dim=scatter_dim)
++
++            gather_size_calculator = self.local_attn.ulysses_comm_para.get('gather_size_calculator')
++            gather_size = gather_size_calculator.calculate(*args, **kwargs) if gather_size_calculator else None
++
++            if enable_fp8 and self.fp8_comm.enable_fp8_all2all:
++                query_layer, key_layer, value_layer, q_scale, k_scale, v_scale = self.fp8_comm.forward_all2all(
++                    query, key, value, scatter_dim, gather_dim, gather_size
++                )
++
++                context_layer = self.fp8_flash_attn(
++                    query_layer, key_layer, value_layer,
++                    q_scale, k_scale, v_scale,
++                    layout="BNSD",
++                    attn_mask=kwargs.get('mask', None),
++                    dropout_p=self.fp8_flash_attn.attention_dropout,
++                    sparse_mode=global_args.sparse_mode if hasattr(global_args, 'sparse_mode') else 0,
++                )
++            else:
++                query_layer = all_to_all(query, spg, scatter_dim, gather_dim, gather_size)
++                key_layer = all_to_all(key, spg, scatter_dim, gather_dim, gather_size)
++                value_layer = all_to_all(value, spg, scatter_dim, gather_dim, gather_size)
++                context_layer = self.local_attn(query_layer, key_layer, value_layer, *args, **kwargs)
++            gather_size = None
++            gather_dim = 0
++            scatter_dim = 2
++            if gather_size:
++                context_shape = context_layer.shape
++                scatter_sizes_query = cal_split_sizes(query.shape[scatter_dim], seq_world_size)
++                context_layer = context_layer.reshape(
++                    context_shape[0], context_shape[1],
++                    scatter_sizes_query[torch.distributed.get_rank(spg)], -1
++                ).contiguous()
++
++            output = all_to_all(context_layer, spg, gather_dim, scatter_dim, query.size(scatter_dim))
++
++            if gather_size:
++                output = output.reshape(output.shape[0], output.shape[1], -1).contiguous()
++
++            return output
+diff --git a/mindspeed_mm/models/predictor/dits/wan_dit.py b/mindspeed_mm/models/predictor/dits/wan_dit.py
+index 8b1fe168..8dbef256 100644
+--- a/mindspeed_mm/models/predictor/dits/wan_dit.py
++++ b/mindspeed_mm/models/predictor/dits/wan_dit.py
+@@ -1,7 +1,9 @@
+ import math
++import os
+ from contextlib import nullcontext
+ from functools import partial
+ from typing import List, Optional, Tuple, Union
++import inspect
+ 
+ import torch
+ import torch.nn as nn
+@@ -11,6 +13,8 @@ from megatron.core import mpu, tensor_parallel
+ from megatron.legacy.model.enums import AttnType
+ from megatron.training import get_args
+ from megatron.training.arguments import core_transformer_config_from_args
++from megatron.core.enums import Fp8Recipe
++from megatron.core.fp8_utils import get_fp8_context
+ from mindspeed.core.context_parallel.ulysses_context_parallel.unaligned_cp.mapping import (
+     all_to_all,
+     gather_forward_split_backward,
+@@ -18,16 +22,23 @@ from mindspeed.core.context_parallel.ulysses_context_parallel.unaligned_cp.mappi
+ )
+ from mindspeed.core.context_parallel.model_parallel_utils import get_context_parallel_group_for_hybrid_ulysses
+ from mindspeed.core.context_parallel.ulysses_context_parallel.ulysses_context_parallel import UlyssesContextAttention
++from mindspeed.te.pytorch.module.checkpoint import te_checkpoint
++from mindspeed.te.pytorch.fp8.recipes import TEDelayedScaling
++from mindspeed.te.pytorch.fp8.constants import Format
++from mindspeed.te.pytorch.module.ffn import TEFFN
+ 
+ from mindspeed_mm.models.common.module import MultiModalModule
+ from mindspeed_mm.models.common.attention import FlashAttention, ParallelAttention
++from mindspeed_mm.models.common.fp8_all2all import FP8UlyssesContextAttention
+ from mindspeed_mm.models.common.embeddings import TextProjection
+ from mindspeed_mm.models.common.normalize import normalize, FP32LayerNorm
+ from mindspeed_mm.models.common.fpdt_layer import (
+-    FPDTFlashAttention, 
+-    split_forward_gather_backward_FPDT_tensors, 
++    FPDTFlashAttention,
++    split_forward_gather_backward_FPDT_tensors,
+     gather_forward_split_backward_FPDT_tensors)
+ from mindspeed_mm.utils.utils import change_tensor_layout
++from mindspeed_mm.models.common.ffn import MYFFN
++from mindspeed.te.pytorch.fp8.recipes.dual_delayed_scaling_recipe import create_dual_delayed_scaling  
+ 
+ 
+ class WanDiT(MultiModalModule):
+@@ -96,7 +107,7 @@ class WanDiT(MultiModalModule):
+         self.head_dim = hidden_size // num_heads
+ 
+         args = get_args()
+-        config = core_transformer_config_from_args(args)
++        self.config = core_transformer_config_from_args(args)
+ 
+         self.recompute_granularity = args.recompute_granularity
+         self.distribute_saved_activations = args.distribute_saved_activations
+@@ -111,7 +122,7 @@ class WanDiT(MultiModalModule):
+         self.recompute_num_layers_skip_core_attention = args.recompute_num_layers_skip_core_attention
+         self.attention_async_offload = attention_async_offload
+         self.fp32_calculate = fp32_calculate
+-        
++
+         self.h2d_stream = torch_npu.npu.Stream() if attention_async_offload else None
+         self.d2h_stream = torch_npu.npu.Stream() if attention_async_offload else None
+ 
+@@ -141,7 +152,7 @@ class WanDiT(MultiModalModule):
+             raise NotImplementedError(
+                 f"Context_parallel_algo {self.context_parallel_algo} is not implemented"
+             )
+-        
++
+         self.FPDT = args.mm.model.to_dict().get('predictor', {}).get('FPDT', False)
+         self.FPDT_chunk_number = args.mm.model.to_dict().get('predictor', {}).get('FPDT_chunk_number', None)
+ 
+@@ -164,7 +175,7 @@ class WanDiT(MultiModalModule):
+             )
+             if model_type in ["i2v", "flf2v"]:
+                 self.img_emb = MLPProj(self.img_dim, self.hidden_size, model_type == 'flf2v', clip_token_len, self.fp32_calculate)
+-            
++
+             self.patch_embedding = nn.Conv3d(
+                 self.in_dim,
+                 self.hidden_size,
+@@ -260,17 +271,33 @@ class WanDiT(MultiModalModule):
+ 
+             return custom_forward
+ 
++        def checkpoint_handler(forward_func):
++            """Determines whether to use the `te_checkpoint` or `tensor_parallel.checkpoint`"""  
++            if self.config.fp8:
++                return te_checkpoint(
++                    forward_func,
++                    self.distribute_saved_activations,
++                    tensor_parallel.random.get_cuda_rng_tracker,
++                    mpu.get_tensor_model_parallel_group(),
++                    x,
++                    *args
++                )
++            else:
++                return tensor_parallel.checkpoint(
++                    forward_func,
++                    self.distribute_saved_activations,
++                    x,
++                    *args
++                )
++
+         if self.recompute_method == "uniform":
+             # Uniformly divide the total number of Transformer layers and
+             # checkpoint the input activation of each divided chunk.
+             # A method to further reduce memory usage reducing checkpoints.
+             _layer_num = 0
+             while _layer_num < num_layers:
+-                x = tensor_parallel.checkpoint(
+-                    custom(_layer_num, _layer_num + recompute_layers),
+-                    self.distribute_saved_activations,
+-                    x,
+-                    *args,
++                x = checkpoint_handler(
++                    custom(_layer_num, _layer_num + recompute_layers) 
+                 )
+                 _layer_num += recompute_layers
+ 
+@@ -280,11 +307,8 @@ class WanDiT(MultiModalModule):
+             # A method fully use the device memory removing redundant re-computation.
+             for _layer_num in range(num_layers):
+                 if _layer_num < recompute_layers:
+-                    x = tensor_parallel.checkpoint(
+-                        custom(_layer_num, _layer_num + 1),
+-                        self.distribute_saved_activations,
+-                        x,
+-                        *args,
++                    x = checkpoint_handler(
++                        custom(_layer_num, _layer_num + 1)
+                     )
+                 elif _layer_num < recompute_layers + recompute_num_layers_skip_core_attention:
+                     block = blocks[_layer_num]
+@@ -412,11 +436,11 @@ class WanDiT(MultiModalModule):
+         if self.context_parallel_algo is not None:
+             if self.pre_process:
+                 if self.FPDT:
+-                    embs = split_forward_gather_backward_FPDT_tensors(embs, seq_dim=1, chunk_number=self.FPDT_chunk_number, 
++                    embs = split_forward_gather_backward_FPDT_tensors(embs, seq_dim=1, chunk_number=self.FPDT_chunk_number,
+                                               group=mpu.get_context_parallel_group(), grad_scale="down")
+ 
+                     if time_emb.ndim == 4:
+-                        time_emb = split_forward_gather_backward_FPDT_tensors(time_emb, seq_dim=1, chunk_number=self.FPDT_chunk_number, 
++                        time_emb = split_forward_gather_backward_FPDT_tensors(time_emb, seq_dim=1, chunk_number=self.FPDT_chunk_number,
+                                                       group=mpu.get_context_parallel_group(), grad_scale="down")
+                 else:
+                     embs = split_forward_gather_backward(
+@@ -428,7 +452,7 @@ class WanDiT(MultiModalModule):
+                             time_emb, mpu.get_context_parallel_group(), dim=1, grad_scale="down"
+                         )
+             if self.FPDT:
+-                rotary_pos_emb = split_forward_gather_backward_FPDT_tensors(rotary_pos_emb, seq_dim=0, chunk_number=self.FPDT_chunk_number, 
++                rotary_pos_emb = split_forward_gather_backward_FPDT_tensors(rotary_pos_emb, seq_dim=0, chunk_number=self.FPDT_chunk_number,
+                                                     group=mpu.get_context_parallel_group(), grad_scale="down")
+             else:
+                 rotary_pos_emb = split_forward_gather_backward(
+@@ -438,7 +462,54 @@ class WanDiT(MultiModalModule):
+                     grad_scale="down",
+                 )
+ 
+-        with rng_context:
++        # If fp8_recipe is delayed, wrap the entire pass with get_fp8_context(),
++        # otherwise do nothing extra at the outer level
++        # if we are using other fp8 recipes, then the context manager enter&exit are free
++        # we can wrap fp8_context within the for loop over layers, so that we can fine-grained
++        # control which layer will be fp8 or bf16
++
++        if self.config.fp8 and self.config.fp8_recipe == Fp8Recipe.delayed and self.config.dual_delayed_scaling:  
++            dual_recipe = create_dual_delayed_scaling(
++                # Forward 阶段参数(用于前向传播)
++                forward_margin=0.0,                    # 前向边距
++                forward_history_len=1,                 # 前向历史长度
++                forward_compute_algo="most_recent",    # 前向 amax 计算算法
++                forward_interval=10,                   # 前向更新间隔
++
++                # Backward 阶段参数(用于反向传播)
++                backward_margin=0.0,                   # 反向边距
++                backward_history_len=128,              # 反向历史长度
++                backward_compute_algo="mean",          # 反向 amax 计算算法
++                backward_interval=1,                   # 反向更新间隔
++
++                # 通用参数
++                fp8_format=Format.HIF8,                # FP8 格式
++                amax_reduce_group=None,                # amax 归约组
++                config=self.config
++            )
++        else:
++            dual_recipe = None
++
++        use_outer_fp8_context = self.config.fp8 and self.config.fp8_recipe == Fp8Recipe.delayed 
++        use_inner_fp8_context = self.config.fp8 and self.config.fp8_recipe != Fp8Recipe.delayed  
++        # megatron原本逻辑: 开启fp8且是Fp8Recipe.delayed时, full recompute在fp8上下文进行。  
++        if use_outer_fp8_context:
++            outer_fp8_context = get_fp8_context(config=self.config,
++                                                layer_no=-1,
++                                                is_init=False,
++                                                dual_recipe_config=dual_recipe)
++        else:
++            outer_fp8_context = nullcontext()
++
++        if use_inner_fp8_context:
++            inner_fp8_context = get_fp8_context(config=self.config,
++                                                layer_no=-1,
++                                                is_init=False,
++                                                dual_recipe_config=None)
++        else:
++            inner_fp8_context = nullcontext()
++
++        with rng_context, outer_fp8_context:
+             if self.recompute_granularity == "full":
+                 embs = self._checkpointed_forward(
+                     self.blocks,
+@@ -449,16 +520,19 @@ class WanDiT(MultiModalModule):
+                 )
+             else:
+                 for block in self.blocks:
+-                    embs = block(embs, prompt_emb, time_emb, rotary_pos_emb)
++                    # 这里megatron原理逻辑是传入全局的layer_idx(PP情况下有全局idx, 还有当前PP stage内的idx， 这里不考虑PP， 直接使用block.layer_idx)
++                    # 如果不考虑细粒度控制哪些层进行FP8, 全局FP8生效, 直接写死成-1即可。
++                    with inner_fp8_context:
++                        embs = block(embs, prompt_emb, time_emb, rotary_pos_emb)
+ 
+         out = embs
+         if self.post_process:
+             if self.context_parallel_algo is not None:
+                 if self.FPDT:
+-                    embs = gather_forward_split_backward_FPDT_tensors(embs, seq_dim=1, chunk_number=self.FPDT_chunk_number, 
++                    embs = gather_forward_split_backward_FPDT_tensors(embs, seq_dim=1, chunk_number=self.FPDT_chunk_number,
+                                                    group=mpu.get_context_parallel_group(), grad_scale="up")
+                     if time_emb.ndim == 4:
+-                        time_emb = gather_forward_split_backward_FPDT_tensors(time_emb, seq_dim=1, chunk_number=self.FPDT_chunk_number, 
++                        time_emb = gather_forward_split_backward_FPDT_tensors(time_emb, seq_dim=1, chunk_number=self.FPDT_chunk_number,
+                                                            group=mpu.get_context_parallel_group(), grad_scale="up")
+                 else:
+                     embs = gather_forward_split_backward(
+@@ -566,7 +640,7 @@ class WanDiT(MultiModalModule):
+                 {'shape': (1,), 'dtype': torch.float64},  # score_lose
+             ]
+             pipeline_tensor_shapes = pipeline_tensor_shapes[:6] + score_shape + pipeline_tensor_shapes[6:]
+-        
++
+         return pipeline_tensor_shapes
+ 
+ 
+@@ -606,7 +680,11 @@ class WanDiTBlock(nn.Module):
+         self.clip_token_len = clip_token_len
+         self.fp32_calculate = fp32_calculate
+ 
++        self.layer_idx = layer_idx
++        self.num_layers = num_layers
++
+         args = get_args()
++        self.config = core_transformer_config_from_args(args)
+ 
+         self.FPDT = args.mm.model.to_dict().get('predictor', {}).get('FPDT', False)
+         self.FPDT_chunk_number = args.mm.model.to_dict().get('predictor', {}).get('FPDT_chunk_number', None)
+@@ -664,11 +742,12 @@ class WanDiTBlock(nn.Module):
+         )
+ 
+         self.norm2 = nn.LayerNorm(self.hidden_size, eps=eps, elementwise_affine=False)
+-        self.ffn = nn.Sequential(
+-            nn.Linear(self.hidden_size, self.ffn_dim),
+-            nn.GELU(approximate="tanh"),
+-            nn.Linear(self.ffn_dim, self.hidden_size),
+-        )
++        if self.config.fp8:
++            # fp8 场景使用双 recipe 量化 FFN(前向/反向分离的 delayed scaling)
++            self.ffn = TEFFN(hidden_size=self.hidden_size, ffn_dim=self.ffn_dim, config=self.config)
++        else:
++            # 非 fp8 场景使用与原 nn.Sequential 权重命名兼容的普通 FFN
++            self.ffn = MYFFN(hidden_size=self.hidden_size, ffn_dim=self.ffn_dim, config=self.config)
+ 
+     def modulate(self, x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor):
+         return x * (1 + scale) + shift
+@@ -681,44 +760,54 @@ class WanDiTBlock(nn.Module):
+         rotary_pos_emb,
+         recompute_skip_core_attention=False
+     ):
+-        # Fixes the memory reorganization problem triggered when fast host dispatch
+-        # and tensor multi-stream reuse occur simultaneously.
+-        torch.npu.synchronize()
+-
++        def checkpoint_handler(forward_func, *forward_args):
++            """Determines whether to use the `te_checkpoint` or `tensor_parallel.checkpoint`"""  
++            if self.config.fp8:
++                return te_checkpoint(
++                    forward_func,
++                    self.distribute_saved_activations,
++                    tensor_parallel.random.get_cuda_rng_tracker,
++                    mpu.get_tensor_model_parallel_group(),
++                    *forward_args
++                )
++            else:
++                return tensor_parallel.checkpoint(
++                    forward_func,
++                    self.distribute_saved_activations,
++                    *forward_args
++                )
+         # before self attention process
+         if recompute_skip_core_attention:
+-            query, key, value, gate_msa, shift_mlp, scale_mlp, gate_mlp = tensor_parallel.checkpoint(
++            query, key, value, gate_msa, shift_mlp, scale_mlp, gate_mlp = checkpoint_handler(
+                 self._before_self_attention,
+-                self.distribute_saved_activations,
+-                time_emb, 
++                time_emb,
+                 latents,
+                 rotary_pos_emb,
+             )
+         else:
+             query, key, value, gate_msa, shift_mlp, scale_mlp, gate_mlp = self._before_self_attention(
+-                time_emb, 
++                time_emb,
+                 latents,
+                 rotary_pos_emb
+             )
+ 
+         # self attention
+         attention_async_offload_param = (
+-            self.attention_async_offload_param 
++            self.attention_async_offload_param
+             if recompute_skip_core_attention
+             else {}
+         )
+         self_attn_out = self.self_attn.core_attention_flash(
+             query=query,
+-            key=key, 
+-            value=value, 
++            key=key,
++            value=value,
+             **attention_async_offload_param
+         )
+ 
+         # after self attention
+         if recompute_skip_core_attention:
+-            latents = tensor_parallel.checkpoint(
++            latents = checkpoint_handler(
+                 self._after_self_attention,
+-                self.distribute_saved_activations,
+                 self_attn_out,
+                 latents,
+                 prompt,
+@@ -729,12 +818,12 @@ class WanDiTBlock(nn.Module):
+             )
+         else:
+             latents = self._after_self_attention(
+-                self_attn_out, 
+-                latents, 
+-                prompt, 
+-                gate_msa, 
+-                shift_mlp, 
+-                scale_mlp, 
++                self_attn_out,
++                latents,
++                prompt,
++                gate_msa,
++                shift_mlp,
++                scale_mlp,
+                 gate_mlp
+             )
+ 
+@@ -776,7 +865,7 @@ class WanDiTBlock(nn.Module):
+             query, key, value,
+             gate_msa, shift_mlp, scale_mlp, gate_mlp
+         )
+-    
++
+     def _after_self_attention(
+         self,
+         self_attn_out,
+@@ -789,7 +878,7 @@ class WanDiTBlock(nn.Module):
+     ):
+         dtype = torch.float32 if self.fp32_calculate else latents.dtype
+         self_attn_out = self.self_attn.function_after_core_attention(self_attn_out, output_layout="bsh")
+-        
++
+         latents = (latents + gate_msa * self_attn_out).to(latents.dtype)
+ 
+         # cross attention
+@@ -824,7 +913,7 @@ class WanDiTBlock(nn.Module):
+             latents = ((latents.to(dtype)) + gate_mlp * self.ffn(modu_out).to(dtype)).to(latents.dtype)
+ 
+         return latents
+-    
++
+     def fpdt_ffn(self, x):
+         outs = []
+         inputs = torch.chunk(x, dim=1, chunks=self.FPDT_chunk_number)
+@@ -953,7 +1042,8 @@ class WanVideoParallelAttention(ParallelAttention):
+         self.FPDT = args.mm.model.to_dict().get('predictor', {}).get('FPDT', False)
+         self.FPDT_chunk_number = args.mm.model.to_dict().get('predictor', {}).get('FPDT_chunk_number', None)
+         self.FPDT_with_offload = args.mm.model.to_dict().get('predictor', {}).get('FPDT_with_offload', False)
+-            
++
++        self.enable_fp8_all2all = os.getenv("FP8_ALL2ALL", "false").lower() == "true"
+ 
+         if self.cp_size > 1 and attention_type == AttnType.self_attn \
+             and args.context_parallel_algo in ["megatron_cp_algo", "hybrid_cp_algo"]:
+@@ -972,8 +1062,8 @@ class WanVideoParallelAttention(ParallelAttention):
+             if args.context_parallel_algo == "hybrid_cp_algo":
+                 ulysses_group = get_context_parallel_group_for_hybrid_ulysses()
+             else:
+-                ulysses_group = mpu.get_context_parallel_group()            
+-            
++                ulysses_group = mpu.get_context_parallel_group()
++
+             if self.FPDT:
+                 self.core_attention_flash = FPDTFlashAttention(
+                     ulysess_context_parallel_group=ulysses_group,
+@@ -982,12 +1072,24 @@ class WanVideoParallelAttention(ParallelAttention):
+                     chunk_number=self.FPDT_chunk_number,
+                     with_offload=self.FPDT_with_offload
+                 )
++            elif self.enable_fp8_all2all:
++                self.core_attention_flash = FP8UlyssesContextAttention(
++                    self.core_attention_flash,
++                    ulysses_group,
++                    enable_fp8_all2all=True
++                )
+             else:
+                 self.core_attention_flash = UlyssesContextAttention(self.core_attention_flash, ulysses_group)
+-        
++
+         if self.cp_size > 1 and attention_type == AttnType.cross_attn:
+             # In the case of cross attention, it is equivalent to performing the raw npu_fusion_attention for the slicing q
+             self.core_attention_flash.context_parallel_algo = "ulysses_cp_algo"
++            self.core_attention_flash = FlashAttention(
++                attention_dropout=dropout,
++                fa_layout=fa_layout,
++                softmax_scale=1 / math.sqrt(self.head_dim),
++                is_cross_attn=True
++            )
+ 
+         # Normalize
+         if self.use_qk_norm:
+@@ -1045,7 +1147,7 @@ class WanVideoParallelAttention(ParallelAttention):
+         self,
+         core_attn_out,
+         output_layout: str = "sbh"
+-    ):  
++    ):
+         if self.FPDT:
+             chunk_number = self.FPDT_chunk_number
+             core_attn_out_chunks = torch.chunk(core_attn_out, chunks=chunk_number, dim=0)
+@@ -1061,7 +1163,7 @@ class WanVideoParallelAttention(ParallelAttention):
+         output = self.dropout(output)
+ 
+         return output
+-    
++
+     def get_query_key_value_tensors(self, hidden_states, key_value_states):
+         """
+         Derives `query` tensor from `hidden_states`, and `key`/`value` tensor
