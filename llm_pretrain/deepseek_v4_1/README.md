@@ -12,9 +12,9 @@
 | 项目 | 要求 |
 | --- | --- |
 | 产品型号 | Atlas A5 系列 |
-| 最小卡数要求 | Flash 8 机 64 卡 A3，16 机 128 卡 A5 |
+| 最小卡数要求 | 16 机 128 卡 A5 |
 | 操作系统 | Linux ARM |
-| 驱动版本 | Ascend HDK 25.5.6 |
+| 驱动版本 | Ascend HDK 25.1.RC2 |
 | CANN版本 | 9.3.0 |
 | 镜像版本 | [dsv4.1_train_torchtitan_a5_cann_master_newest_0916](https://cann-ai.obs.cn-north-4.myhuaweicloud.com/cann-quantization/deepseek_train/dsv4.1_train_torchtitan_a5_cann_master_newest_0916.tar.xz) |
 
@@ -22,7 +22,7 @@
 > **安装校验与版本选择建议：**
 >
 > 1. 请使用 `npu-smi info` 检查 Ascend NPU **固件**与**驱动**是否正确安装且版本匹配。
-> 2. 请将 NPU 固件/驱动更新至 `25.5.6`，并下载安装对应的[固件与驱动包（25.5.6）](https://support.huawei.com/enterprise/zh/atlas-computing/ascend-hdk-pid-252764743/software/269306426?idAbsPath=fixnode01|23710424|251366513|254884019|261408772|252764743)。
+> 2. 请将 NPU 固件/驱动更新至 `25.1.RC2`，并下载安装对应的[固件与驱动包（25.1.RC2）](https://support.huawei.com/enterprise/zh/atlas-computing/ascend-hdk-pid-252764743/software/269507568?idAbsPath=fixnode01|23710424|251366513|254884019|261408772|252764743)。
 > 3. 安装步骤请参考：[社区安装指导](https://hiascend.com/document/redirect/CannCommunityInstSoftware)。
 
 
@@ -149,7 +149,7 @@ python3 convert_bf16.py \
 ### DeepSeek-V4.1-Flash 训练配置
 
 - 本次训练多机使用配置文件 CONFIG=deepseek_v4_1_flash
-- 拉起训练前请重点确认以下路径配置与实际环境一致：
+- 拉起训练前请重点确认数据集、模型词表以及权重路径配置与实际环境一致。
 
 ## 启动 CPT 训练
 
