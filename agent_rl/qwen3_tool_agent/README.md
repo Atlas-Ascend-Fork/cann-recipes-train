@@ -21,6 +21,7 @@ Atlas A3系列产品。
 | [0001-Fix-reward-function-not-accessing-num_turns.patch](patches/0001-Fix-reward-function-not-accessing-num_turns.patch) | 修复奖励函数获取不到num_turns值的bug     |
 | [0002-Update-paths-in-retool_sft_preprocess.py.patch](patches/0002-Update-paths-in-retool_sft_preprocess.py.patch) | 修改retool_sft_preprocess.py中的路径配置 |
 | [0003-Modify-compute_score-to-encourage-tool-call.patch](patches/0003-Modify-compute_score-to-encourage-tool-call.patch) | 修改奖励函数，鼓励工具调用               |
+| [0004-Fix-local-parquet-loading-for-retool-datasets.patch](patches/0004-Fix-local-parquet-loading-for-retool-datasets.patch) | 修复本地parquet数据集加载兼容性问题 |
 
 ### 环境准备
 
@@ -87,21 +88,31 @@ Atlas A3系列产品。
 
 1. 准备数据集。
 
-    执行sft数据集处理脚本。
+    脚本会自动下载并处理`JoeYing/ReTool-SFT`，生成`ReTool-SFT/data/train-00000-of-00001.parquet`。国内网络环境执行前设置HF镜像：
 
     ```shell
+    # 可选：国内网络环境使用
+    export HF_ENDPOINT=https://hf-mirror.com
     python3 retool_sft_preprocess.py
     ```
     
-2. 准备模型权重。
+2. 准备模型权重，以下方式二选一。
 
     ```shell
+    # Hugging Face
     hf download Qwen/Qwen3-4B-Instruct-2507 --local-dir ReTool-SFT/model/Qwen3-4B-Instruct-2507
+
+    # 魔搭社区（国内网络环境）
+    modelscope download --model Qwen/Qwen3-4B-Instruct-2507 \
+        --local_dir ReTool-SFT/model/Qwen3-4B-Instruct-2507
     ```
 
-3. 将SFT训练脚本`run_qwen3_4b_sft_npu.sh`从`qwen3_tool_agent`移动到`qwen3_tool_agent/verl/recipe/retool`目录下，开始SFT训练。
+3. 在`qwen3_tool_agent/verl/recipe/retool`目录执行以下命令，将SFT脚本移动到当前目录并启动训练。
 
     ```shell
+    cd ../../../
+    mv run_qwen3_4b_sft_npu.sh verl/recipe/retool/
+    cd verl/recipe/retool
     mkdir -p log/sft_run_log
     bash run_qwen3_4b_sft_npu.sh
     ```
@@ -119,16 +130,17 @@ Atlas A3系列产品。
 
 1. 准备Sandbox环境。
 
-    参考[SandboxFusion/README.md](https://github.com/bytedance/SandboxFusion/blob/main/README.md)准备Sandbox服务，该README中提供了`Docker`和`Manual`两种安装方法，`Docker`安装方法需要获取服务器支持的镜像，如果无法获取，建议采用`Manual`安装方法，具体流程如下：
+    参考[SandboxFusion/README.md](https://github.com/bytedance/SandboxFusion/blob/feat/runtime/README.md)准备Sandbox服务，该分支README中提供了`Docker`和`Manual`两种安装方法，`Docker`安装方法需要获取服务器支持的镜像，如果无法获取，建议采用`Manual`安装方法，具体流程如下：
 
-    1）将SandboxFusion源码拉取到`cann-recipes-train/agent_rl/qwen3_tool_agent`目录下。
+    1）在`qwen3_tool_agent/verl/recipe/retool`目录执行以下命令。
 
     ```shell
-    git clone https://github.com/bytedance/SandboxFusion.git
+    cd ../../../
+    git clone --branch feat/runtime https://github.com/bytedance/SandboxFusion.git
     cd SandboxFusion
     ```
 
-    2）创建sandbox conda环境并安装依赖。
+    2）创建sandbox环境并安装依赖。
 
     ```shell
     conda create -n sandbox -y python=3.12
@@ -138,22 +150,9 @@ Atlas A3系列产品。
     mkdir -p docs/build
     ```
 
-    3）创建sandbox-runtime conda环境并安装依赖。
+    3）启动Sandbox服务。
 
     ```shell
-    # 返回到cann-recipes-train/agent_rl/qwen3_tool_agent目录。
-    conda create -n sandbox-runtime -y python=3.10
-    conda activate sandbox-runtime
-
-    # 样例中的requirements-runtime.txt修改自SandboxFusion/runtime/python/requirements.txt，移除了安装失败的依赖包。
-    pip install -r requirements-runtime.txt
-    ```
-
-    4）启动Sandbox服务。
-
-    ```shell
-    cd SandboxFusion
-    conda activate sandbox
     make run-online
     ```
 
@@ -164,20 +163,28 @@ Atlas A3系列产品。
     INFO:     Uvicorn running on http://0.0.0.0:8080 (Press CTRL+C to quit)
     ```
 
-    Sandbox服务启动后不要关闭，agent在训练时需要实时交互，重新打开一个终端进入容器和`qwen3_tool_agent/verl/recipe/retool`目录后再执行后续命令。
-
-2. 准备训练数据集和验证数据集。
+    Sandbox服务启动后不要关闭，重新打开一个终端并执行以下命令进入容器和`qwen3_tool_agent/verl/recipe/retool`目录，继续后续训练步骤。
 
     ```shell
-    # train
+    docker exec -it ${YOUR_CONTAINER_NAME} bash
+    cd ${HOST_WORKSPACE}/cann-recipes-train/agent_rl/qwen3_tool_agent/verl/recipe/retool
+    ```
+
+2. 准备训练数据集和验证数据集。国内网络环境先设置`HF_ENDPOINT`，然后执行下载命令。
+
+    ```shell
+    # 国内网络环境使用；其他网络环境可删除此行
+    export HF_ENDPOINT=https://hf-mirror.com
     hf download BytedTsinghua-SIA/DAPO-Math-17k --repo-type=dataset --local-dir dataset/BytedTsinghua-SIA/DAPO-Math-17k
-    # val
     hf download yentinglin/aime_2025 --repo-type=dataset --local-dir dataset/yentinglin/aime_2025
     ```
     
-3. 将RL训练脚本`run_qwen3_4b_dapo_npu.sh`从`qwen3_tool_agent`移动到`qwen3_tool_agent/verl/recipe/retool`目录下，开始RL训练。
+3. 在`qwen3_tool_agent/verl/recipe/retool`目录执行以下命令，将RL脚本移动到当前目录并启动训练。
 
     ```shell
+    cd ../../../
+    mv run_qwen3_4b_dapo_npu.sh verl/recipe/retool/
+    cd verl/recipe/retool
     mkdir -p log/rl_run_log
     bash run_qwen3_4b_dapo_npu.sh
     ```

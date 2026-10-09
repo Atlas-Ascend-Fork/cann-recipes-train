@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: qianbi1999 <zhoujian157@huawei.com>
+Date: Tue, 29 Sep 2026 19:00:00 +0800
+Subject: [PATCH 4/4] Fix local parquet loading for retool datasets
+
+Avoid datasets inferring a local dataset script when loading the downloaded
+DAPO-Math-17k and AIME parquet directories. Only the default config files
+under data/ are loaded, so parquet files of other configs (e.g. part1/,
+part2/ of aime_2025) with different schemas are excluded.
+
+---
+ recipe/retool/retool.py | 13 ++++++++++---
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/recipe/retool/retool.py b/recipe/retool/retool.py
+index 57d53c91..00000000 100644
+--- a/recipe/retool/retool.py
++++ b/recipe/retool/retool.py
+@@ -11,7 +11,9 @@
+ # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
++import glob
+ import logging
++import os
+ import re
+ from typing import Any
+ 
+@@ -67,8 +69,15 @@ class CustomRLHFDataset(RLHFDataset):
+     def _read_files_and_tokenize(self):
+         dataframes = []
+         for parquet_file in self.data_files:
+-            # read parquet files and cache
+-            dataframe = datasets.load_dataset(parquet_file)["train"]
++            # Load parquet files explicitly to avoid datasets inferring a local dataset script.
++            # Only the default config files under data/ are loaded; parquet files of other
++            # configs (e.g. part1/, part2/ of aime_2025) have different schemas and fail to cast.
++            data_files = parquet_file
++            if os.path.isdir(parquet_file):
++                data_files = sorted(glob.glob(os.path.join(parquet_file, "data", "*.parquet"))) or sorted(
++                    glob.glob(os.path.join(parquet_file, "*.parquet"))
++                )
++            dataframe = datasets.load_dataset("parquet", data_files={"train": data_files})["train"]
+             data_source = "/".join(parquet_file.split("/")[-2:])
+             if data_source in ["Maxwell-Jia/AIME_2024", "yentinglin/aime_2025"]:
+                 dataframe = dataframe.map(
+--
+2.50.1.windows.1
