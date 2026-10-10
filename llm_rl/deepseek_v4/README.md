@@ -284,7 +284,6 @@ P/D 分离需要镜像内可用的 Mooncake/HIXL 通信栈，以及目标机器�
 
 ```bash
 ENABLE_MXFP4=${ENABLE_MXFP4:-1}
-QUANTIZATION_RECIPE=${QUANTIZATION_RECIPE:-mix}
 ```
 
 模型权重请使用第 3 节转换得到的Hybrid MXFP8-MXFP4权重，并在 `run-dsv4-node-list.sh` 中将模型路径指向该目录。

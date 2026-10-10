@@ -68,7 +68,7 @@ ROLLOUT_ARGS=(
   --rollout-shuffle
   --balance-data
   --rm-type math
-  --num-rollout 30
+  --num-rollout 200
   --rollout-batch-size 32
   --n-samples-per-prompt 8
   --global-batch-size 256
