@@ -35,16 +35,7 @@ npu-smi info   # 检查设备、驱动及固件状态
 
 ## 2. 环境搭建
 
-### 2.1 源码下载
-HOME_PATH 由用户指定，下面以 /workspace 为例。请在宿主机和容器内保持该目录布局一致：
-
-```bash
-export HOME_PATH=/workspace
-cd ${HOME_PATH}
-git clone https://gitcode.com/cann/cann-recipes-train.git
-```
-
-### 2.2 获取镜像
+### 2.1 获取镜像
 
 使用预置 ARM 镜像，镜像中已包含本实践所需的 PyTorch、torch_npu、torchtitan、torchtitan-npu、vllm、vllm-ascend及所有python依赖 和 CANN 运行环境。从[950DT ARM 镜像地址](https://cann-ai.obs.cn-north-4.myhuaweicloud.com/cann-quantization/DeepSeek/ascend_rl_cann9.3.0_dsv4_aarch_950_image_v0.1.tar)
 下载 docker 镜像，上传到 950 服务器的每个节点，并在每个节点执行：
@@ -53,7 +44,7 @@ git clone https://gitcode.com/cann/cann-recipes-train.git
 docker load -i ascend_rl_cann9.3.0_dsv4_aarch_950_image_v0.1.tar
 ```
 
-### 2.3 启动容器
+### 2.2 启动容器
 
 在各个节点上通过如下脚本拉起容器，默认容器名为`ascend_rl`。请将权重路径和源码路径挂载到容器中。
 
@@ -92,7 +83,15 @@ docker run -u root -itd --ulimit nproc=65535:65535 --ipc=host \
 
 ```bash
 docker exec -it ascend_rl bash
-export HOME_PATH=/workspace
+```
+
+### 2.3 源码下载
+HOME_PATH 由用户指定，下面以 /data 为例：
+
+```bash
+export HOME_PATH=/data
+cd ${HOME_PATH}
+git clone https://gitcode.com/cann/cann-recipes-train.git
 cd ${HOME_PATH}/cann-recipes-train/vime-forge
 ```
 

@@ -207,10 +207,6 @@ sys.stdout.write(json.dumps({"env_vars": env}))
 # unrelated to the real cause, so relax it here.
 platform_activate() {
     set +u
-    # bishengir-compile hardcodes its scratch under /tmp and aborts with
-    # "unexpected temp folder created outside of /tmp" otherwise; a reboot
-    # wipes /tmp, so recreate TMPDIR every launch.
-    [[ -z "${TMPDIR:-}" ]] || mkdir -p "${TMPDIR}"
     [[ -z "${VIME_TRAIN_ENV:-}" ]] || source "${VIME_TRAIN_ENV}/bin/activate"
     source "${VIME_CANN_HOME}/set_env.sh"
     source "${VIME_NNAL_HOME}/set_env.sh"
@@ -372,7 +368,6 @@ start_run() {
                "VIME_VLLM_EXECUTABLE=${VIME_VLLM_EXECUTABLE}" \
                "VIME_VLLM_PYTHON=${VIME_VLLM_PYTHON}" \
                "VIME_LAUNCHER_RUN_ID=${VIME_LAUNCHER_RUN_ID}" \
-               "TMPDIR=${TMPDIR}"
     # ⚠ Must match the rollout side: vllm_ascend's batch-invariant path forces the
     # rollout worker to strict, and a training side left at "true" deadlocks the
     # HCCL collective used for cross-process weight transfer.
@@ -382,7 +377,7 @@ start_run() {
 
     export MASTER_ADDR ASCEND_RT_VISIBLE_DEVICES
     export HCCL_HOST_SOCKET_PORT_RANGE HCCL_NPU_SOCKET_PORT_RANGE
-    export TMPDIR TRITON_CACHE_DIR HF_HOME ASCEND_CACHE_PATH
+    export TRITON_CACHE_DIR HF_HOME ASCEND_CACHE_PATH
 
     # TRAIN_ARGS comes from the model script. The two overrides land after it, so
     # they win: argparse keeps the last value.
@@ -402,4 +397,3 @@ start_run() {
         --runtime-env-json="${RUNTIME_ENV_JSON}" \
         -- "${QUOTED_TRAIN_CMD[@]}" 2>&1 | tee "${ARCHIVE_DIR}/train.log"
 }
-

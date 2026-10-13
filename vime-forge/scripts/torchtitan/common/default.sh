@@ -61,7 +61,7 @@ RAY_MAX_WORKER_PORT="${RAY_MAX_WORKER_PORT:-20999}"
 HCCL_HOST_SOCKET_PORT_RANGE="${HCCL_HOST_SOCKET_PORT_RANGE:-$(( 60000 + VIME_SLOT * 100 ))-$(( 60050 + VIME_SLOT * 100 ))}"
 HCCL_NPU_SOCKET_PORT_RANGE="${HCCL_NPU_SOCKET_PORT_RANGE:-$(( 61000 + VIME_SLOT * 100 ))-$(( 61050 + VIME_SLOT * 100 ))}"
 # Kept short on purpose: ray's AF_UNIX socket paths cap at 107 bytes.
-VIME_RAY_TEMP_DIR="${VIME_RAY_TEMP_DIR:-${TMPDIR}/ray-s${VIME_SLOT}}"
+VIME_RAY_TEMP_DIR="${VIME_RAY_TEMP_DIR:-${VIME_WORKSPACE}/ray-s${VIME_SLOT}}"
 
 # ── Environment handed to ray workers ─────────────────────────────────
 # The launcher appends the computed ones (TENSORBOARD_DIR, PYTHONPATH,
