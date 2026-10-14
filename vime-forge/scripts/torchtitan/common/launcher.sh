@@ -127,8 +127,6 @@ preflight_env() {
         die "no ${VIME_NNAL_HOME}/set_env.sh. Point VIME_NNAL_HOME at the nnal/atb directory."
     [[ -z "$VIME_TRAIN_ENV" || -f "${VIME_TRAIN_ENV}/bin/activate" ]] || \
         die "VIME_TRAIN_ENV=${VIME_TRAIN_ENV} has no bin/activate, so it is not a venv."
-    [[ -f "${RAY_CLI}" ]] || \
-        die "RAY_CLI=${RAY_CLI:-<empty>} is not a Ray CLI script."
     [[ -z "$VIME_VLLM_ENV" || -x "${VIME_VLLM_ENV}/bin/vllm" ]] || \
         die "VIME_VLLM_ENV=${VIME_VLLM_ENV} has no executable bin/vllm."
 }
@@ -229,7 +227,7 @@ platform_resolve_interpreters() {
     fi
     if [[ -z "${RAY_CLI:-}" || ! -f "${RAY_CLI}" ]]; then
         if [[ -n "$train_env" && -f "${train_env}/bin/ray" ]]; then RAY_CLI="${train_env}/bin/ray"
-        else RAY_CLI="$(command -v ray || true)"; fi
+        else RAY_CLI="${TRAIN_PYTHON} $(command -v ray || true)"; fi
     fi
     if [[ -z "${VIME_VLLM_EXECUTABLE:-}" ]]; then
         if [[ -n "$rollout_env" ]]; then VIME_VLLM_EXECUTABLE="${rollout_env}/bin/vllm"
@@ -267,13 +265,20 @@ launch_archive() {
         echo 'set -euo pipefail'
         echo
         echo '# Drop the ray start line if a cluster is already up on these ports.'
-        printf '%q %q start' "${TRAIN_PYTHON}" "${RAY_CLI}"
+        # RAY_CLI may hold two words ("<python> <ray>"); %q each word separately so
+        # the generated script re-splits them into the same argv instead of trying
+        # to exec a single path containing a space.
+        # shellcheck disable=SC2086
+        printf '%q ' ${RAY_CLI}
+        printf 'start'
         printf ' %q' "${RAY_HEAD_ARGS[@]}"
         printf '
 
 '
-        printf '%q job submit --address=%q --runtime-env-json=%q --' \
-            "${RAY_CLI}" "http://127.0.0.1:${VIME_RAY_DASHBOARD_PORT}" "$RUNTIME_ENV_JSON"
+        # shellcheck disable=SC2086
+        printf '%q ' ${RAY_CLI}
+        printf 'job submit --address=%q --runtime-env-json=%q --' \
+            "http://127.0.0.1:${VIME_RAY_DASHBOARD_PORT}" "$RUNTIME_ENV_JSON"
         # One more %q layer: the shell running this line consumes it and hands ray the same words.
         printf ' %q' "${QUOTED_TRAIN_CMD[@]}"
         printf '
@@ -282,9 +287,7 @@ launch_archive() {
     chmod +x "${dir}/rerun.sh"
 }
 
-ray_cli() { "${TRAIN_PYTHON}" "${RAY_CLI}" "$@"; }
-
-launch_ray_head() { ray_cli start "${RAY_HEAD_ARGS[@]}"; }
+launch_ray_head() { ${RAY_CLI} start "${RAY_HEAD_ARGS[@]}"; }
 
 # ── The two halves the model script sits between ──────────────────────
 
@@ -392,7 +395,7 @@ start_run() {
     quoted_train_cmd
     launch_archive "${ARCHIVE_DIR}"
     launch_ray_head
-    ray_cli job submit \
+    ${RAY_CLI} job submit \
         --address="http://127.0.0.1:${VIME_RAY_DASHBOARD_PORT}" \
         --runtime-env-json="${RUNTIME_ENV_JSON}" \
         -- "${QUOTED_TRAIN_CMD[@]}" 2>&1 | tee "${ARCHIVE_DIR}/train.log"

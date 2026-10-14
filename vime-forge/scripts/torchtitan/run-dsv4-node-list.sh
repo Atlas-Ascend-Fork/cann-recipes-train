@@ -70,13 +70,9 @@ activate_runtime() {
   source "${VIME_CANN_HOME}/set_env.sh"
   source "${VIME_NNAL_HOME}/set_env.sh"
   set -u
-  if [[ ! -f "${RAY_CLI}" ]]; then RAY_CLI=$(command -v ray || true); fi
   [[ -x "${TRAIN_PYTHON}" ]] || die "Training Python not found: ${TRAIN_PYTHON}"
-  [[ -f "${RAY_CLI}" ]] || die "Ray CLI script not found: ${RAY_CLI:-<empty>}"
-  export RAY_CLI
+  if [[ ! -f "${RAY_CLI}" ]]; then RAY_CLI="${TRAIN_PYTHON} $(command -v ray || true)"; fi
 }
-
-ray_cli() { "${TRAIN_PYTHON}" "${RAY_CLI}" "$@"; }
 
 detect_local_node() {
   local addresses=" ${LOCAL_NODE_IP:-} $(hostname -I 2>/dev/null || true) "
@@ -94,7 +90,7 @@ start_worker() {
   local worker_temp_dir="${VIME_RAY_TEMP_DIR}/worker-${LOCAL_NODE_INDEX}"
   mkdir -p "${worker_temp_dir}"
   local deadline=$((SECONDS + ${WAIT_TIMEOUT:-180}))
-  until ray_cli start \
+  until ${RAY_CLI} start \
       --address="${HEAD_NODE_IP}:${VIME_RAY_PORT}" \
       --node-ip-address="${LOCAL_NODE_IP}" \
       --temp-dir="${worker_temp_dir}" \
@@ -105,7 +101,7 @@ start_worker() {
     sleep 2
   done
   echo "Worker ${LOCAL_NODE_IP} joined Ray; keeping the container process alive."
-  while ray_cli status --address="${HEAD_NODE_IP}:${VIME_RAY_PORT}" >/dev/null 2>&1; do sleep 10; done
+  while ${RAY_CLI} status --address="${HEAD_NODE_IP}:${VIME_RAY_PORT}" >/dev/null 2>&1; do sleep 10; done
   die "Lost connection to Ray head"
 }
 

@@ -56,8 +56,8 @@ ASCEND_CACHE_PATH="${ASCEND_CACHE_PATH:-${VIME_WORKSPACE}/.ascend_cache}"
 VIME_RAY_PORT="${VIME_RAY_PORT:-$(( 6379 + VIME_SLOT ))}"
 VIME_RAY_DASHBOARD_PORT="${VIME_RAY_DASHBOARD_PORT:-$(( 8265 + VIME_SLOT ))}"
 VIME_RAY_DASHBOARD_AGENT_PORT="${VIME_RAY_DASHBOARD_AGENT_PORT:-$(( 52365 + VIME_SLOT ))}"
-RAY_MIN_WORKER_PORT="${RAY_MIN_WORKER_PORT:-20000}"
-RAY_MAX_WORKER_PORT="${RAY_MAX_WORKER_PORT:-20999}"
+RAY_MIN_WORKER_PORT="${RAY_MIN_WORKER_PORT:-30000}"
+RAY_MAX_WORKER_PORT="${RAY_MAX_WORKER_PORT:-30999}"
 HCCL_HOST_SOCKET_PORT_RANGE="${HCCL_HOST_SOCKET_PORT_RANGE:-$(( 60000 + VIME_SLOT * 100 ))-$(( 60050 + VIME_SLOT * 100 ))}"
 HCCL_NPU_SOCKET_PORT_RANGE="${HCCL_NPU_SOCKET_PORT_RANGE:-$(( 61000 + VIME_SLOT * 100 ))-$(( 61050 + VIME_SLOT * 100 ))}"
 # Kept short on purpose: ray's AF_UNIX socket paths cap at 107 bytes.
@@ -84,4 +84,5 @@ RT_ENV=(
    DISABLE_L2_CACHE=1
    CUDA_DEVICE_MAX_CONNECTIONS=1                       # carried over from the original script;
                                                        #   no evidence torchtitan depends on it
+   RAY_memory_usage_threshold="${RAY_memory_usage_threshold:-0.95}"
 )

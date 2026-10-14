@@ -273,10 +273,10 @@ class TorchTitanTrainRayActor(TrainRayActor):
             ]
 
         if "rollout_routed_experts" in rollout_data:
-            # Convert to torch.Tensor (zero-copy), keep on CPU: fill_routing_replay's
-            # RoutingReplay.record stores to CPU pinned memory, no GPU transfer needed.
+            # Convert to torch.Tensor and clone (avoid aliasing the source buffer), keep on
+            # CPU: RoutingReplay.record stores to CPU pinned memory, no GPU transfer needed.
             rollout_data["rollout_routed_experts"] = [
-                torch.from_numpy(r) if isinstance(r, np.ndarray) else r
+                (torch.from_numpy(r) if isinstance(r, np.ndarray) else torch.as_tensor(r)).clone()
                 for r in rollout_data["rollout_routed_experts"]
             ]
 

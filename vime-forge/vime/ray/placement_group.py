@@ -206,7 +206,12 @@ def create_actor_model(args, pgs, rollout_manager, actor_cls=None):
 
 
 def create_training_models(args, pgs, rollout_manager, actor_cls=None):
-    actor_model, actor_start_rollout_ids = create_actor_model(args, pgs, rollout_manager, actor_cls=actor_cls)
+    actor_model, actor_start_rollout_ids = create_actor_model(
+        args,
+        pgs,
+        rollout_manager,
+        actor_cls=actor_cls,
+    )
 
     critic_model = None
     if args.use_critic and args.num_rollout != 0:
@@ -240,10 +245,72 @@ def create_training_models(args, pgs, rollout_manager, actor_cls=None):
     if args.start_rollout_id is None:
         args.start_rollout_id = start_rollout_ids[0]
 
+    if rollout_manager is not None:
+        restore_rollout_dataset(args, rollout_manager)
+
+    return actor_model, critic_model
+
+
+def attach_rollout_manager(args, actor_model, critic_model, rollout_manager) -> None:
+    """Attach the ready rollout manager after concurrent actor initialization."""
+    actor_model.set_rollout_manager(rollout_manager)
+    if critic_model is not None:
+        critic_model.set_rollout_manager(rollout_manager)
+    restore_rollout_dataset(args, rollout_manager)
+
+
+def restore_rollout_dataset(args, rollout_manager) -> None:
+    """Resume the global dataset cursor after training determines the start ID."""
     if args.rollout_global_dataset:
         ray.get(rollout_manager.load.remote(args.start_rollout_id - 1))
 
-    return actor_model, critic_model
+
+def initialize_rollout_and_training(args, pgs):
+    """Initialize rollout and training sides, overlapping startup when safe.
+
+    Inferring ``num_rollout`` from the rollout manager requires a blocking Ray
+    call, so that case cannot overlap training initialization. In parallel mode,
+    rollout failures may surface only after the blocking training init finishes;
+    this helper does not provide fail-fast monitoring or cross-side cleanup.
+    """
+    if getattr(args, "colocate", False):
+        serial_reason = "colocate"
+    elif getattr(args, "rollout_external", False):
+        serial_reason = "rollout_external"
+    elif getattr(args, "debug_train_only", False):
+        serial_reason = "debug_train_only"
+    elif getattr(args, "debug_rollout_only", False):
+        serial_reason = "debug_rollout_only"
+    elif args.num_rollout is None:
+        serial_reason = "num_rollout is unset; inferring it waits for rollout initialization"
+    else:
+        serial_reason = None
+    parallel_startup = serial_reason is None
+    logger.info(
+        "Starting rollout and training initialization in %s mode%s.",
+        "parallel" if parallel_startup else "serial",
+        "" if parallel_startup else f" ({serial_reason})",
+    )
+    rollout_manager, num_rollout_per_epoch = create_rollout_manager(
+        args,
+        pgs["rollout"],
+    )
+
+    if parallel_startup:
+        actor_model, critic_model = create_training_models(
+            args,
+            pgs,
+            None,
+        )
+        router_addr = ray.get(rollout_manager.get_metrics_router_addr.remote())
+        prepare_rollout_manager(args, rollout_manager)
+        attach_rollout_manager(args, actor_model, critic_model, rollout_manager)
+    else:
+        prepare_rollout_manager(args, rollout_manager)
+        router_addr = ray.get(rollout_manager.get_metrics_router_addr.remote())
+        actor_model, critic_model = create_training_models(args, pgs, rollout_manager)
+
+    return rollout_manager, num_rollout_per_epoch, actor_model, critic_model, router_addr
 
 
 def create_rollout_manager(args, pg):
@@ -267,11 +334,14 @@ def create_rollout_manager(args, pg):
         args.num_rollout = num_rollout_per_epoch * args.num_epoch
         assert args.num_rollout > 0
 
+    return rollout_manager, num_rollout_per_epoch
+
+
+def prepare_rollout_manager(args, rollout_manager) -> None:
+    """Run rollout setup that must happen after the manager is initialized."""
     if args.check_weight_update_equal:
         ray.get(rollout_manager.check_weights.remote(action="snapshot"))
         ray.get(rollout_manager.check_weights.remote(action="reset_tensors"))
 
     if args.offload_rollout:
         ray.get(rollout_manager.offload.remote())
-
-    return rollout_manager, num_rollout_per_epoch

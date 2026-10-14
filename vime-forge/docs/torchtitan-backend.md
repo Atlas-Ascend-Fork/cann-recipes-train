@@ -105,8 +105,7 @@ for rank in range(world_size):
 
 ```python
 pgs = create_placement_groups(args)
-rollout_manager, _ = create_rollout_manager(args, pgs["rollout"])
-actor, _ = create_training_models(args, pgs, rollout_manager)  # actor 为 RayTrainGroup；全部 rank 执行 init，随后 set_rollout_manager
+rollout_manager, _, actor, critic, router_addr = initialize_rollout_and_training(args, pgs)
 actor.update_weights()                                         # 首次推送：rollout 以训练侧权重为起点
 
 for rollout_id in range(args.start_rollout_id, args.num_rollout):
@@ -118,6 +117,8 @@ for rollout_id in range(args.start_rollout_id, args.num_rollout):
     if 到达评测周期:
         ray.get(rollout_manager.eval.remote(rollout_id))
 ```
+
+当 rollout 与训练使用互不重叠的设备、显式设置 `num_rollout`，且未启用external/debug-only 模式时，`initialize_rollout_and_training` 会重叠两侧的初始化；否则按串行顺序完成 rollout 就绪、检查权重和显存卸载，再初始化训练 actor。并行路径会在训练 actor 初始化完成后挂载 RolloutManager，因此 rollout 侧的启动异常可能稍晚暴露。`router_addr` 用于更新监控端点。
 
 `rollout_id` 是主循环的轮次编号，起始轮次由 `init` 返回：全新训练为 0，从 `step-N` ckpt 续训为 N+1（4.5 节）。异步入口 `train_async.py` 调用同一组 actor 方法，训练后端无需额外适配。
 

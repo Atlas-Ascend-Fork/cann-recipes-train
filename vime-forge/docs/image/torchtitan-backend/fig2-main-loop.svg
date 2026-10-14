@@ -18,15 +18,15 @@
 
   <!-- init phase -->
   <rect x="30" y="98" width="850" height="196" rx="6" fill="none" stroke="#d1d5db"/>
-  <text x="40" y="116" font-weight="bold" fill="#6b7280">初始化</text>
+  <text x="40" y="116" font-weight="bold" fill="#6b7280">initialize_rollout_and_training（示意并行路径）</text>
   <line x1="150" y1="130" x2="446" y2="130" stroke="#374151" marker-end="url(#ar)"/>
   <text x="298" y="124" text-anchor="middle">create_rollout_manager（启动 vLLM 引擎）</text>
   <line x1="150" y1="165" x2="756" y2="165" stroke="#374151" marker-end="url(#ar)"/>
-  <text x="455" y="159" text-anchor="middle">async_init → init：建进程组、TitanEngine.initialize、加载权重</text>
+  <text x="455" y="159" text-anchor="middle">initialize：训练 init 与 rollout 启动可并行</text>
   <line x1="756" y1="190" x2="154" y2="190" stroke="#374151" stroke-dasharray="5,3" marker-end="url(#ar)"/>
-  <text x="455" y="205" text-anchor="middle" fill="#374151">返回 start_rollout_id（各 rank 必须一致）</text>
+  <text x="455" y="205" text-anchor="middle" fill="#374151">返回 start_rollout_id；等待 rollout 就绪</text>
   <line x1="150" y1="232" x2="756" y2="232" stroke="#374151" marker-end="url(#ar)"/>
-  <text x="455" y="226" text-anchor="middle">set_rollout_manager</text>
+  <text x="455" y="226" text-anchor="middle">prepare（检查权重、offload）→ set_rollout_manager</text>
   <line x1="150" y1="270" x2="756" y2="270" stroke="#374151" marker-end="url(#ar)"/>
   <text x="455" y="264" text-anchor="middle">update_weights（首次推送：rollout 以训练侧权重开始）</text>
 

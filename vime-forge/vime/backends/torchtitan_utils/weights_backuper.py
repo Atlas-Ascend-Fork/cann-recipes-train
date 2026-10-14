@@ -46,9 +46,22 @@ class TitanWeightsBackuper:
     @torch.no_grad()
     def backup(self, tag: str) -> None:
         """Snapshot the current weights. Call between steps, never between a forward and its
-        backward: the reshard would throw away an all-gather that backward still needs."""
+        backward: the reshard would throw away an all-gather that backward still needs.
+        
+        Refreshing an existing tag copies in place into the stored CPU tensor. Rebuilding the
+        snapshot and only then replacing the dict entry briefly holds two full per-rank copies,
+        and the freed copy's pages are nerver returned by the host allocator, so resident memory
+        crept up on every training step.
+        """
         for m in self._model_parts:
             _reshard(m)
+        if self._can_fresh_inplace(tag):
+            for m, snapshot in zip(self._model_parts, self._backups[tag], strict=True):
+                live = _live_tensors(m)
+                for name, saved in snapshot.items():
+                    saved.copy_(_local(live[name]))
+            return
+        self._backups.pop(tag, None)
         self._backups[tag] = [
             {name: _local(t).detach().to("cpu", copy=True) for name, t in _live_tensors(m).items()}
             for m in self._model_parts
@@ -79,3 +92,17 @@ class TitanWeightsBackuper:
         self._backups[dst_tag] = [
             {name: t.clone() for name, t in snapshot.items()} for snapshot in self._backups[src_tag]
         ]
+
+    def _can_fresh_inplace(self, tag: str) -> bool:
+        parts = self._backups.get(tag)
+        if parts is None or len(parts) != len(self._model_parts):
+            return False
+        for m, snapshot in zip(self._model_parts, parts, strict=True):
+            live = _live_tensors(m)
+            if snapshot.keys() != live.keys():
+                return False
+            for name, saved in snapshot.items():
+                t = _local(live[name])
+                if not isinstance(saved, torch.Tensor) or saved.shape != t.shape or saved.dtype != t.dtype:
+                    return False
+        return True

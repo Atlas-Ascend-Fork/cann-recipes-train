@@ -1,6 +1,6 @@
 import ray
 
-from vime.ray.placement_group import create_placement_groups, create_rollout_manager, create_training_models
+from vime.ray.placement_group import create_placement_groups, initialize_rollout_and_training
 from vime.utils import perf_timeline as ptl
 from vime.utils.arguments import parse_args
 from vime.observability.logging_utils import configure_logger, finish_tracking, init_tracking, update_tracking_open_metrics
@@ -15,16 +15,14 @@ def train(args):
     pgs = create_placement_groups(args)
     init_tracking(args)
 
-    # create the rollout manager, with vLLM engines inside.
-    # need to initialize rollout manager first to calculate num_rollout
-    rollout_manager, num_rollout_per_epoch = create_rollout_manager(args, pgs["rollout"])
-
-    # Update primary W&B with vLLM metrics endpoint now that servers are up.
-    router_addr = ray.get(rollout_manager.get_metrics_router_addr.remote())
+    (
+        rollout_manager,
+        num_rollout_per_epoch,
+        actor_model,
+        critic_model,
+        router_addr,
+    ) = initialize_rollout_and_training(args, pgs)
     update_tracking_open_metrics(args, router_addr)
-
-    # create the actor and critic models
-    actor_model, critic_model = create_training_models(args, pgs, rollout_manager)
 
     if args.offload_rollout and not release_train:
         ray.get(rollout_manager.onload_weights.remote())
