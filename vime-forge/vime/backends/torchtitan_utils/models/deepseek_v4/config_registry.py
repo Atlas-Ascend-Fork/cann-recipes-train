@@ -24,7 +24,7 @@ _VIME_OVERRIDES = [
     "torchtitan_npu.override.deepseek_v4.sparse_attn.asc_li",
     "torchtitan_npu.override.deepseek_v4.mhc.asc_hc_pre",
     "torchtitan_npu.override.deepseek_v4.mhc.asc_hc_post",
-    "torchtitan_npu.override.common.token_dispatcher.asc",
+    "torchtitan_npu.override.common.token_dispatcher.asc_deepep",
     "torchtitan_npu.override.common.optimizer.swap_optimizer",
 ]
 
@@ -74,8 +74,8 @@ def _derived_spec(*, n_layers: int, num_experts: int, compress_ratios: tuple[int
     """
     if len(compress_ratios) != n_layers:
         raise ValueError("compress_ratios must contain one entry per DSV4 layer")
-    spec = model_registry("deepseek_v4_flash", num_mtp_layers=0)
-    model = _deepseek_v4_flash(num_experts=num_experts, num_mtp_layers=0)
+    spec = model_registry("deepseek_v4_flash", num_mtp_layers=0, moe_comm_backend="deepep")
+    model = _deepseek_v4_flash(num_experts=num_experts, num_mtp_layers=0, moe_comm_backend="deepep")
     model = replace(
         model,
         n_layers=n_layers,
