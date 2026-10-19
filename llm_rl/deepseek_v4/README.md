@@ -37,11 +37,11 @@ npu-smi info   # 检查设备、驱动及固件状态
 
 ### 2.1 获取镜像
 
-使用预置 ARM 镜像，镜像中已包含本实践所需的 PyTorch、torch_npu、torchtitan、torchtitan-npu、vllm、vllm-ascend及所有python依赖 和 CANN 运行环境。从[950DT ARM 镜像地址](https://cann-ai.obs.cn-north-4.myhuaweicloud.com/cann-quantization/DeepSeek/ascend_rl_cann9.3.0_dsv4_aarch_950_image_v0.1.tar)
+使用预置 ARM 镜像，镜像中已包含本实践所需的 PyTorch、torch_npu、torchtitan、torchtitan-npu、vllm、vllm-ascend及所有python依赖 和 CANN 运行环境。从[950DT ARM 镜像地址](https://cann-ai.obs.cn-north-4.myhuaweicloud.com/cann-quantization/DeepSeek/ascend_rl_cann9.3.0_dsv4_aarch_950_image_v0.2.tar)
 下载 docker 镜像，上传到 950 服务器的每个节点，并在每个节点执行：
 
 ```bash
-docker load -i ascend_rl_cann9.3.0_dsv4_aarch_950_image_v0.1.tar
+docker load -i ascend_rl_cann9.3.0_dsv4_aarch_950_image_v0.2.tar
 ```
 
 ### 2.2 启动容器
@@ -74,7 +74,7 @@ docker run -u root -itd --ulimit nproc=65535:65535 --ipc=host \
     --net=host \
     --shm-size=128g \
     --privileged \
-    --name ascend_rl ascend_rl_cann9.3.0_dsv4_aarch_950_image:v0.1 /bin/bash
+    --name ascend_rl ascend_rl_cann9.3.0_dsv4_aarch_950_image:v0.2 /bin/bash
 ```
 
 容器示例保留 Ascend 950 的 `/dev/ummu`、`/dev/uburma`、URMA 工具及通信配置挂载；按实际宿主机安装路径调整。多机场景的存储与 PD 通信资源要求见第 4.2、4.5 节。
