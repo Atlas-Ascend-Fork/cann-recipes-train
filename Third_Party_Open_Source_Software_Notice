@@ -1508,6 +1508,13 @@ Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved
 License: Apache License V2.0
 Please see above
 
+Software: vime
+Official Repository: https://github.com/vllm-project/vime
+Copyright notice:
+Copyright 2025 Zhipu AI
+License: Apache License V2.0
+Please see above
+
 
 This project includes code snippets from the following open source projects:
 
@@ -1777,5 +1784,24 @@ Copyright (c) 2024, Tri Dao, Albert Gu. Adapted from https://github.com/state-sp
 Copyright 2025 The vLLM team
 Copyright (c) 2024 Roberto Lopez Castro (roberto.lopez.castro@udc.es). All Rights Reserved
 Copyright 2021 The EleutherAI and HuggingFace Teams. All rights reserved
+License: Apache License V2.0
+Please see above
+
+Software: torchtitan-npu
+Official Repository: https://gitcode.com/cann/torchtitan-npu
+Usage:"
+vime-forge/vime/backends/torchtitan_utils/torchao_converter.py"
+Copyright Notice(s):
+Copyright (c) 2026 Huawei Technologies Co., Ltd. All rights reserved.
+(c) Meta Platforms, Inc. and affiliates.
+License: BSD 3-Clause License
+Please see above
+
+Software: verl (main, commit 5b550b0c)
+Official Repository: https://github.com/volcengine/verl
+Usage:"
+vime-forge/vime/backends/torchtitan_utils/_titan_compat.py"
+Copyright Notice(s):
+Copyright 2024 Bytedance Ltd. and/or its affiliates
 License: Apache License V2.0
 Please see above
