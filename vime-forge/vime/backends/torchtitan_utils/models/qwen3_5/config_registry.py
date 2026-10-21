@@ -66,7 +66,10 @@ def _qwen35_config(
     config = _vime_rl_config(
         spec,
         lr=1e-6 if context_parallel else 3e-6,
-        spmd_backend="partial_dtensor" if context_parallel else "default",
+        # TorchTitan supports exactly three values here:
+        # "partial_dtensor", "full_dtensor", and "spmd_types".  This recipe
+        # uses partial-DTensor for both CP=1 and context-parallel training.
+        spmd_backend="partial_dtensor",
     )
     if context_parallel:
         # Preserve the incoming CP recipe's optimizer and checkpoint behavior.
@@ -83,10 +86,8 @@ def _qwen35_config(
         config.override.imports.extend(
             [
                 "torchtitan_npu.override.qwen3_5.gated_delta.triton",
-                # Keep Adam moments in host memory addressable by the NPU and allow
-                # the checkpointer to save those virtual-memory optimizer tensors.
-                "torchtitan_npu.override.common.optimizer.virtual",
-                "torchtitan_npu.override.common.optimizer.checkpoint_virtual",
+                # NovaSwap optimizer-state swapping with checkpoint support.
+                "torchtitan_npu.override.common.optimizer.swap_optimizer",
             ]
         )
     return config

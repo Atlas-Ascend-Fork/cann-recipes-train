@@ -163,8 +163,8 @@ TRAIN_ARGS=(
 dual-venv，训练与 rollout 各用一套 torch：
 
 ```bash
-export VIME_TRAIN_ENV=/mnt/workspace/phl/tt-venv
-export VIME_VLLM_ENV=/mnt/workspace/phl/infer-venv
+export VIME_TRAIN_ENV=/path/to/train/env
+export VIME_VLLM_ENV=/path/to/vllm/env
 ```
 
 按机器覆盖某个训练参数：
