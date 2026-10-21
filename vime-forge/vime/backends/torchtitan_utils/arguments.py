@@ -57,6 +57,13 @@ def _add_vime_operational_args(parser):
     _safe_add(parser, "--use-pytorch-profiler", action="store_true", default=False)
     _safe_add(
         parser,
+        "--enable-profile-with-stack",
+        action="store_true",
+        default=False,
+        help="Capture Python/C++ call stacks in profiler traces.",
+    )
+    _safe_add(
+        parser,
         "--packed-seq-alignment",
         type=int,
         default=1,

@@ -62,6 +62,9 @@ def _profile_simple_loop(iterator, args, name):
 
 
 def _create_torch_profiler(args, name):
+    # Stack capture is expensive on large RL rollouts. It is disabled by
+    # default and can be enabled with ``--enable-profile-with-stack``.
+    profile_with_stack = getattr(args, "enable_profile_with_stack", False)
     trace_dir = os.path.join(
         os.environ.get("TENSORBOARD_DIR") or args.tensorboard_dir or ".",
         "profiling_traces",
@@ -90,7 +93,7 @@ def _create_torch_profiler(args, name):
             schedule=torch_npu.profiler.schedule(**schedule_kwargs),
             on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(trace_dir),
             record_shapes=True,
-            with_stack=True,
+            with_stack=profile_with_stack,
             profile_memory=True,
             experimental_config=experimental_config,
         )
@@ -109,7 +112,7 @@ def _create_torch_profiler(args, name):
             use_gzip=True,
         ),
         record_shapes=True,
-        with_stack=True,
+        with_stack=profile_with_stack,
         profile_memory=True,
         with_flops=True,
     )
