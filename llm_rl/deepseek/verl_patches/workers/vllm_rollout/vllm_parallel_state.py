@@ -4,6 +4,7 @@
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 
 import os
+import re
 import logging
 import socket
 import subprocess
