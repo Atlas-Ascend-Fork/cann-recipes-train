@@ -235,7 +235,7 @@ flowchart TB
 | [Qwen3-30B-A3B 医学 SFT](llm_sft/qwen3_30b_a3b/README.md) | 基于 TorchTitan-NPU 的医学领域多卡全参微调与效果评测样例 |
 | [Qwen3.6-27B Ascend C 算子生成](llm_sft/qwen36_ascendc/torchtitan/README.md) | 基于 TorchTitan-NPU 的 8 卡 910C（16 die）、CP8 × FSDP2 全参数监督微调样例 |
 | [Qwen3.6-27B Ascend C 算子生成](llm_sft/qwen36_ascendc/mindspeed-mm/README.md) | 基于 MindSpeed-MM 的 8 卡 910C（16 die）、CP8 × FSDP2 全参数及 LoRA 监督微调样例 |
-| [DeepSeek-V4.1-Flash](llm_sft/deepseekv4/README.md) | 基于TorchTitan-NPU + TorchAO-NPU 的 mxFP8 低精度训练，使用多模态数据集，在64卡Ascend 950集群完成全参数监督微调 |
+| [DeepSeek-V4.1-Flash](llm_sft/deepseek_v4_1/README.md) | 基于TorchTitan-NPU + TorchAO-NPU 的 mxFP8 低精度训练，使用多模态数据集，在64卡Ascend 950集群完成全参数监督微调 |
 
 #### 强化学习训练
 
