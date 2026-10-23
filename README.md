@@ -26,6 +26,7 @@
 
 ## 🚀 最新动态
 
+- [2026/09] 新增 [Qwen2.5 HiF8 低精度 RL 样例](llm_rl/qwen2_5/verl_npu_demo_a5_hif8/README.md)，在 Atlas A5 上支持多卡 HiF8 低精度 RL 后训练
 - [2026/09] 新增 [DeepSpec DSpark草稿模型训练支持](llm_sft/DeepSpec/README.md)样例，在 Atlas A3上完成开源DSpark同结构草稿模型训练
 - [2026/09] 新增 [鲲鹏CPU、昇腾950与灵衢协同的 Agentic RL 训练实践](docs/llm_rl/kunpeng_ascend_agentic_rl_infrastructure.md)，支持 AgentENV 沙箱与多 Harness 训练，实现 DSV4 Flash 训推bitwise对齐 MXFP8/MXFP4 低精度训练与长序列等特性。
 - [2026/09] 新增 [基于昇腾950超节点的万亿MoE模型预训练系统参考实践](docs/llm_pretrain/ascend950_superpod_moe_pretrain_system_reference.md)，围绕**超大规模、超长序列、多模态、高可用训练及训练开发者效率提升**等复杂场景提供系统参考实践。
