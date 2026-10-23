@@ -107,7 +107,3 @@ def vime_dsv4_flash_4layers_256experts() -> Trainer.Config:
 
 def vime_dsv4_flash_43layers_256experts() -> Trainer.Config:
     return _vime_rl_config(_derived_spec(n_layers=43, num_experts=256, compress_ratios=(1, 1, 4) + 20 * (128, 4)))
-
-
-def vime_dsv4_flash() -> Trainer.Config:
-    return _vime_rl_config(model_registry("deepseek_v4_flash", num_mtp_layers=0))
