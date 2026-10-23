@@ -55,14 +55,12 @@
 
 ## 快速开始
 
-有关环境配置、数据准备、训练启动和关键参数的完整快速开始指南，请参考：
+有关训练启动、配置覆盖与日志排障，请参考 [torchtitan 启动器](scripts/torchtitan/README.md)。训练后端的运行模式、配置和数据处理流程请参考 [torchtitan 训练后端](docs/torchtitan-backend.md)。
 
 ### Agentic RL 示例
 
 Agent 工作负载通过 Vime 的定制接口接入标准 rollout / Data Buffer 循环，并不是独立框架：
 
-- [`examples/multi_agent`](examples/multi_agent/README.md)：通过 `--custom-generate-function-path` 实现多 agent 生成；
-- [`examples/fully_async`](examples/fully_async/README.md)：面向长尾 agent 生成的全异步 rollout；
 - [`examples/coding_agent_rl`](examples/coding_agent_rl/README.md)：使用 Claude Code 或 Codex、沙盒工具、测试奖励和 token 精确轨迹片段的端到端 coding-agent RL；
 
 
