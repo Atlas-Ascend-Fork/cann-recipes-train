@@ -40,7 +40,7 @@ configure_run "$@"
 ACTOR_GPUS=${ACTOR_GPUS:-4}
 ROLLOUT_GPUS=${ROLLOUT_GPUS:-4}
 SEQ_LEN=${SEQ_LEN:-4096}
-MAX_RESPONSE_LEN=${MAX_RESPONSE_LEN:-2048}
+MAX_RESPONSE_LEN=${MAX_RESPONSE_LEN:-3072}
 VLLM_RANKS_PER_ENGINE=${VLLM_RANKS_PER_ENGINE:-${ROLLOUT_GPUS}}
 DSV4_RECIPE=${DSV4_RECIPE:-vime_dsv4_flash_4layers_256experts}
 EP_DEGREE=${EP_DEGREE:-4}
@@ -83,16 +83,16 @@ ROLLOUT_ARGS=(
   --balance-data
   --rm-type math
   --num-rollout 200
-  --rollout-batch-size 32
+  --rollout-batch-size 128
   --n-samples-per-prompt 8
-  --global-batch-size 256
+  --global-batch-size 1024
   --rollout-temperature 1
   --rollout-max-response-len "${MAX_RESPONSE_LEN}"
   --rollout-max-context-len "${SEQ_LEN}"
 )
 VLLM_ARGS=(
   --vllm-compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-  --vllm-server-concurrency 64
+  --vllm-server-concurrency 1024
   --vllm-max-model-len "${SEQ_LEN}"
   --vllm-gpu-memory-utilization 0.7
   --vllm-kv-cache-dtype bfloat16

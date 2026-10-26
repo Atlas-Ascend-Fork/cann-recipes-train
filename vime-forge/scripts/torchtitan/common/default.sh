@@ -77,6 +77,12 @@ HCCL_NPU_SOCKET_PORT_RANGE="${HCCL_NPU_SOCKET_PORT_RANGE:-$(( 61000 + VIME_SLOT 
 # Kept short on purpose: ray's AF_UNIX socket paths cap at 107 bytes.
 VIME_RAY_TEMP_DIR="${VIME_RAY_TEMP_DIR:-${VIME_WORKSPACE}/ray-s${VIME_SLOT}}"
 
+# set CANN env
+export HCCL_CONNECT_TIMEOUT="${HCCL_CONNECT_TIMEOUT:-1800}"
+export HCCL_EXEC_TIMEOUT="${HCCL_EXEC_TIMEOUT:-3600}"
+# Disable the HCCL watchdog for long checkpoint loading on the A5 setup.
+export HCCL_ASYNC_ERROR_HANDLING="${HCCL_ASYNC_ERROR_HANDLING:-0}"
+
 # ── Environment handed to ray workers ─────────────────────────────────
 # The launcher appends the computed ones (TENSORBOARD_DIR, PYTHONPATH,
 # VIME_VLLM_EXECUTABLE, VIME_VLLM_PYTHON) plus the DET-dependent ones.

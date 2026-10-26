@@ -211,6 +211,16 @@ MXFP4 训练主要应用于 MoE 模型的 GroupedMatmul，其整体数据流与 
 
 在训推权重传输阶段，采用 MXFP4 格式传输权重，相较于 MXFP8 可进一步降低权重传输带宽需求和存储开销。推理阶段，推理引擎直接调用 W4A8 GroupedMatmul Kernel 完成计算，在保持计算效率的同时进一步优化 MoE 模型权重访存效率。
 
+### DSV4 Flash MXFP8 训练效果
+
+本次实践基于 GRPO、DSV4 Flash MXFP8，在 dapo-math-17k 数据集完成 60 步训练，实现了 logprob MAE 为 0.0 的训推对齐效果。实验采用 `--rollout-batch-size=128`、`n-samples-per-prompt=8`、`rollout-max-response-len=3072`的参数配置，reward 逐步收敛，gradient norm 整体稳定，效果如下图所示。
+
+> DSV4 Flash MXFP8 发布的权重在dapo-math-17k 数据集上效果很好，初始 `reward=0.7`，每个 prompt 生成 8 个样本下大量样本全 0 或 1，训练信号太弱。为了方便观测训练收敛效果，本次实验先离线收集该数据集的 `reward` 评分（每个 prompt 生成 8 个样本），将 `reward` 之和在区间 [1, 6] 的样本过滤出来用于训练。
+
+<p align="center">
+  <img src="./figures/dsv4_figures/vime_ds4_rl_training_curves_row.png" width="100%" alt="rl-framework">
+</p>
+
 ## 长序列训练优化
 
 Agentic RL 场景多轮工具调用通常会导致序列长度显著增加，除 Prefix Cache、Partial Rollout 等常见优化外，针对 1M 超长序列的 RL 训练，我们重点优化了以下两个方面：一是降低训练过程中的局部内存峰值；二是采用上下文并行（Context Parallelism，CP）将长序列计算分散到多个设备上，并完成 RL 训练中 CP 场景下数据准备、loss 处理及权重同步等相关环节的适配。

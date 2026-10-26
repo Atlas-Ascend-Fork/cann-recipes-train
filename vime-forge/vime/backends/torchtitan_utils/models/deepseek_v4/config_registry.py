@@ -43,7 +43,7 @@ _VIME_OVERRIDES = [
 ]
 
 
-def _vime_rl_config(model_spec, *, lr: float = 2e-7) -> Trainer.Config:
+def _vime_rl_config(model_spec, *, lr: float = 1e-6) -> Trainer.Config:
     return Trainer.Config(
         model_spec=model_spec,
         optimizer=_dsv4_optimizer_config(model_spec, lr=lr),
