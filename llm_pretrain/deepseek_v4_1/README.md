@@ -163,7 +163,7 @@ HF_ASSETS_PATH=/data/models/DeepSeek-V4.1-Flash/deepseek_v41_tokenizer \
 bash examples/deepseek_v4_1/deepseek_v4_1_flash_cpt_4k_a5.sh --training.steps 500
 ```
 DeepSeek-V4.1-Flash 加载完整权重进行 200 step 训练曲线如下：
-![deepseek_v4_1_cpt](./images/deepseek_v4_1_cpt.png)
+![deepseek_v4_1_cpt](../../llm_pretrain/deepseek_v4_1/images/deepseek_v4_1_cpt.png)
 
 ## 启动图文混合 SFT 训练
 
@@ -207,7 +207,7 @@ SFT 的数据适配与官方 encoding 解耦：Encoder 动态调用模型目录�
 
 | 图片 | 问题 | 训练答案 |
 | --- | --- | --- |
-| ![船](images/llava_129141.jpg) | What color is the boat in the image? | The boat in the image is blue and white. |
-| ![电脑桌](images/llava_390311.jpg) | What color is the table where the computer is? | The table where the computer is placed is white. |
+| ![船](../../llm_pretrain/deepseek_v4_1/images/llava_129141.jpg) | What color is the boat in the image? | The boat in the image is blue and white. |
+| ![电脑桌](../../llm_pretrain/deepseek_v4_1/images/llava_390311.jpg) | What color is the table where the computer is? | The table where the computer is placed is white. |
 
 对于上表第 2 行的问题 "What color is the table where the computer is?"，模型生成回答 "The table where the computer is placed is white."，可见图文混合 SFT 训练之后的结果符合预期。
