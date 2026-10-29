@@ -59,16 +59,26 @@ def compute_score(
     """
     answer = ground_truth.lower().strip()
     guesses = _extract_guesses(solution_str)
+    loop_info = extra_info or {}
 
-    is_correct = False
-    if guesses and guesses[-1] == answer:
-        is_correct = True
+    loop_is_correct = loop_info.get("is_correct")
+    if isinstance(loop_is_correct, bool):
+        is_correct = loop_is_correct
+    else:
+        is_correct = bool(guesses and guesses[-1] == answer)
 
     # 1. Correct answer reward
     correct_reward = 1.0 if is_correct else 0.0
 
     # 2. Partial answer reward (best match among guesses)
-    partial = _partial_answer(guesses, answer) if not is_correct else 0.0
+    accepted_guesses = loop_info.get("guessed_words")
+    if not is_correct and isinstance(accepted_guesses, (list, tuple, set)):
+        partial_guesses = [
+            guess.lower() for guess in accepted_guesses if isinstance(guess, str)
+        ]
+    else:
+        partial_guesses = guesses
+    partial = _partial_answer(partial_guesses, answer) if not is_correct else 0.0
 
     # The agent loop records every consumed turn, including malformed replies.
     # Falling back to observed opening tags keeps this function usable in

@@ -5,8 +5,8 @@ Subject: [PATCH] wordle: add agent loop with robust token and format tracking
 
 ---
  verl/experimental/agent_loop/__init__.py      |   3 +-
- .../agent_loop/wordle_agent_loop.py           | 343 ++++++++++++++++++
- 2 files changed, 345 insertions(+), 1 deletion(-)
+ .../agent_loop/wordle_agent_loop.py           | 359 ++++++++++++++++++
+ 2 files changed, 361 insertions(+), 1 deletion(-)
  create mode 100644 verl/experimental/agent_loop/wordle_agent_loop.py
 
 diff --git a/verl/experimental/agent_loop/__init__.py b/verl/experimental/agent_loop/__init__.py
@@ -29,7 +29,7 @@ new file mode 100644
 index 00000000..5a7c138a
 --- /dev/null
 +++ b/verl/experimental/agent_loop/wordle_agent_loop.py
-@@ -0,0 +1,343 @@
+@@ -0,0 +1,359 @@
 +# Adapted from verl's ToolAgentLoop implementation at:
 +# https://github.com/volcengine/verl/blob/v0.8.0/verl/experimental/agent_loop/tool_agent_loop.py
 +# Copyright 2025 Bytedance Ltd. and/or its affiliates
@@ -124,7 +124,12 @@ index 00000000..5a7c138a
 +            num_turns=self.turn,
 +            metrics=self.metrics,
 +            routed_experts=self.routed_experts,
-+            extra_fields={"formatted_turns": self.formatted_turns},
++            extra_fields={
++                "num_turns": self.turn,
++                "formatted_turns": self.formatted_turns,
++                "is_correct": self.is_correct,
++                "guessed_words": list(self.guessed_words),
++            },
 +        )
 +
 +
@@ -201,7 +206,9 @@ index 00000000..5a7c138a
 +                    "Invalid Move: No valid 5-letter guess found. "
 +                    "Resubmit exactly as <guess>[word]</guess>."
 +                )
-+                await self._add_env_message(game, env_msg)
++                if not await self._add_env_message(game, env_msg):
++                    game.game_over = True
++                    break
 +                continue
 +
 +            game.turn += 1
@@ -238,7 +245,8 @@ index 00000000..5a7c138a
 +                remaining = game.max_turns - game.turn
 +                env_msg = f"\n{' '.join(list(guess.upper()))}\n{feedback}\nYou have {remaining} guesses left."
 +
-+            await self._add_env_message(game, env_msg)
++            if not await self._add_env_message(game, env_msg):
++                game.game_over = True
 +
 +        # Compute partial credit for non-winning games
 +        if not game.is_correct:
@@ -251,11 +259,15 @@ index 00000000..5a7c138a
 +
 +    async def _generate_response(self, game: WordleGameState, sampling_params: dict) -> Any:
 +        """Generate one LLM response, updating game state."""
++        remaining_tokens = self.response_length - len(game.response_mask)
++        if remaining_tokens <= 0:
++            return None
++
 +        try:
-+            # Cap per-turn at 512 tokens — enough for think+guess, prevents
-+            # the model from writing a novel in one turn and exhausting budget.
++            # Cap each turn by the remaining response budget as well as the
++            # per-turn limit, so game state cannot include truncated tokens.
 +            turn_params = dict(sampling_params)
-+            turn_params["max_tokens"] = 512
++            turn_params["max_tokens"] = min(512, remaining_tokens)
 +            output = await self.server_manager.generate(
 +                request_id=game.request_id,
 +                prompt_ids=game.prompt_ids,
@@ -282,9 +294,9 @@ index 00000000..5a7c138a
 +        text = self.tokenizer.decode(token_ids, skip_special_tokens=True)
 +        # Keep the contract consistent with the Prime Wordle SFT dataset.
 +        matches = CANONICAL_GUESS_RE.findall(text)
-+        if not matches:
++        if len(matches) != 1 or len(OPEN_GUESS_RE.findall(text)) != 1:
 +            return None
-+        return matches[-1].lower()
++        return matches[0].lower()
 +
 +    @staticmethod
 +    def _has_canonical_format(text: str) -> bool:
@@ -349,7 +361,7 @@ index 00000000..5a7c138a
 +                best = score
 +        return best
 +
-+    async def _add_env_message(self, game: WordleGameState, content: str):
++    async def _add_env_message(self, game: WordleGameState, content: str) -> bool:
 +        """Add environment feedback by appending raw tokens to prompt_ids.
 +
 +        Follows the ToolAgentLoop pattern: never re-tokenize the full
@@ -367,11 +379,15 @@ index 00000000..5a7c138a
 +
 +        transition_ids = self.tokenizer.encode(transition_text, add_special_tokens=False)
 +
++        if len(game.response_mask) + len(transition_ids) >= self.response_length:
++            return False
++
 +        game.prompt_ids += transition_ids
 +        game.response_mask += [0] * len(transition_ids)
 +        if game.response_logprobs:
 +            game.response_logprobs += [0.0] * len(transition_ids)
 +
 +        game.messages.append({"role": "user", "content": content})
++        return True
 -- 
 2.43.0

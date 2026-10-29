@@ -209,6 +209,10 @@ class WordleAgentLoop(AgentLoopBase):
                 game.game_over = True
             return
 
+        is_repeat = guess in game.guessed_words
+        if not is_repeat:
+            game.guessed_words.add(guess)
+
         if guess == game.answer:
             game.is_correct = True
             game.game_over = True
@@ -218,15 +222,17 @@ class WordleAgentLoop(AgentLoopBase):
             game.game_over = True
             return
 
-        environment_message = self._build_environment_message(game, guess)
+        environment_message = self._build_environment_message(
+            game, guess, is_repeat
+        )
         game.messages.append({"role": "assistant", "content": response_text})
         if not await self._add_env_message(game, environment_message):
             game.game_over = True
 
     def _build_environment_message(
-        self, game: WordleGameState, guess: str
+        self, game: WordleGameState, guess: str, is_repeat: bool
     ) -> str:
-        if guess in game.guessed_words:
+        if is_repeat:
             return (
                 "You attempted an invalid move. Reason: You have already "
                 f"guessed '{guess}' before. Please try a different word. "
@@ -234,7 +240,6 @@ class WordleAgentLoop(AgentLoopBase):
                 "game rules."
             )
 
-        game.guessed_words.add(guess)
         feedback = self._compute_feedback(guess, game.answer)
         remaining_turns = game.max_turns - game.turn
         return (
@@ -279,10 +284,10 @@ class WordleAgentLoop(AgentLoopBase):
     def _parse_guess(self, token_ids: list[int]) -> str | None:
         text = self.tokenizer.decode(token_ids, skip_special_tokens=True)
         matches = CANONICAL_GUESS_RE.findall(text)
-        if not matches:
+        if len(matches) != 1 or len(OPEN_GUESS_RE.findall(text)) != 1:
             return None
 
-        return matches[-1].lower()
+        return matches[0].lower()
 
     async def _add_env_message(
         self, game: WordleGameState, content: str

@@ -80,6 +80,38 @@ class TestWordleReward(unittest.TestCase):
 
         self.assertEqual(result["format"], 0.0)
 
+    def test_invalid_multi_guess_turn_does_not_receive_win_reward(self):
+        result = compute_score(
+            solution_str="<guess>[apple]</guess><guess>[crane]</guess>",
+            ground_truth="crane",
+            extra_info={
+                "num_turns": 1,
+                "formatted_turns": 0,
+                "is_correct": False,
+                "guessed_words": [],
+            },
+        )
+
+        self.assertEqual(result["correct"], 0.0)
+        self.assertEqual(result["partial"], 0.0)
+        self.assertEqual(result["length_bonus"], 0.0)
+        self.assertEqual(result["score"], 0.0)
+
+    def test_invalid_multi_guess_turn_does_not_receive_partial_reward(self):
+        result = compute_score(
+            solution_str="<guess>[apple]</guess><guess>[crane]</guess>",
+            ground_truth="apple",
+            extra_info={
+                "num_turns": 1,
+                "formatted_turns": 0,
+                "is_correct": False,
+                "guessed_words": [],
+            },
+        )
+
+        self.assertEqual(result["partial"], 0.0)
+        self.assertEqual(result["score"], 0.0)
+
     def test_empty_rollout_has_zero_reward(self):
         result = compute_score(solution_str="", ground_truth="crane")
 
