@@ -334,15 +334,9 @@ def emit_sample_traces(args: Any, samples: list[Any]) -> None:
         exported_count = int(trace.get("_perf_exported_event_count", 0))
         if exported_count >= len(events):
             continue
-        response_length = getattr(sample, "effective_response_length", None)
-        if response_length is None:
-            response_length = getattr(sample, "response_length", None)
-        tokens = getattr(sample, "tokens", None)
-        prompt_length = None
-        if tokens is not None and response_length is not None:
-            prompt_length = len(tokens) - int(response_length)
+        response_length, prompt_length = _sample_token_lengths(sample)
         starts = {}
-        for item in events[exported_count:]:
+        for event_index, item in enumerate(events):
             span_id = item.get("span_id")
             if not span_id:
                 continue
@@ -352,6 +346,8 @@ def emit_sample_traces(args: Any, samples: list[Any]) -> None:
             if item.get("type") != "span_end" or str(span_id) not in starts:
                 continue
             start = starts.pop(str(span_id))
+            if event_index < exported_count:
+                continue
             start_ns = int(float(start.get("ts", 0)) * 1_000_000_000)
             end_ns = int(float(item.get("ts", 0)) * 1_000_000_000)
             event = _base_event(args, "span", start.get("name", "trace_span"))
@@ -374,6 +370,18 @@ def emit_sample_traces(args: Any, samples: list[Any]) -> None:
             })
             _writer_for(args).emit(event)
         trace["_perf_exported_event_count"] = len(events)
+
+
+def _sample_token_lengths(sample: Any) -> tuple[Any, int | None]:
+    """Return the response and prompt token counts for span metadata."""
+    response_length = getattr(sample, "effective_response_length", None)
+    if response_length is None:
+        response_length = getattr(sample, "response_length", None)
+    tokens = getattr(sample, "tokens", None)
+    prompt_length = None
+    if tokens is not None and response_length is not None:
+        prompt_length = len(tokens) - int(response_length)
+    return response_length, prompt_length
 
 
 def emit_perf_counter(
