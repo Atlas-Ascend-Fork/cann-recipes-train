@@ -26,6 +26,7 @@
 
 ## 🚀 最新动态
 
+- [2026/10] 新增 [speculators DSpark 草稿模型训练样例](llm_spec/speculators/README.md)，在 Atlas A2 上完成 Qwen3.8-27B（BF16）与 GLM5.2（W4A8C8）DSpark 草稿模型训练，接受长度在同一评测框架下与 DeepSeek 官方模型并列参考
 - [2026/09] 新增 [Qwen2.5 HiF8 低精度 RL 样例](llm_rl/qwen2_5/verl_npu_demo_a5_hif8/README.md)，在 Atlas A5 上支持多卡 HiF8 低精度 RL 后训练
 - [2026/09] 新增 [DeepSpec DSpark草稿模型训练支持](llm_sft/DeepSpec/README.md)样例，在 Atlas A3上完成开源DSpark同结构草稿模型训练
 - [2026/09] 新增 [鲲鹏CPU、昇腾950与灵衢协同的 Agentic RL 训练实践](docs/llm_rl/kunpeng_ascend_agentic_rl_infrastructure.md)，支持 AgentENV 沙箱与多 Harness 训练，实现 DSV4 Flash 训推bitwise对齐 MXFP8/MXFP4 低精度训练与长序列等特性。
@@ -61,6 +62,7 @@ cann-recipes-train 为热门大模型和多模态模型提供**可复现、可�
 |------|------|------|
 | 🔧 预训练 / 续训练 | 基于 TorchTitan-NPU、MindSpeed 等训练框架，覆盖长序列、低精度、AutoFuse、训练入图等优化 | `llm_pretrain/` |
 | 🧪 监督微调 | 提供轻量 SFT 路径，适合快速验证模型、数据与训练流程 | `llm_sft/` |
+| 🪶 草稿模型训练 | 基于 speculators 等框架训练投机解码草稿模型（DSpark 等），覆盖在线 hidden-states 提取、mooncake 传输等链路 | `llm_spec/` |
 | 🚀 强化学习训练 | 基于 veRL + MindSpeed + vLLM-Ascend，覆盖 GRPO / DAPO、长序列 rollout、投机推理等场景 | `llm_rl/` |
 | 🎨 多模态强化学习 | 基于 FLUX GRPO，覆盖文生图模型 GRPO 训练、HPSv2 奖励优化及 NPU 适配 | `multimodal_rl/` |
 | 🤖 Agent / Code RL | 面向工具调用、代码沙盒等 Agent 训练任务 | `agent_rl/` |

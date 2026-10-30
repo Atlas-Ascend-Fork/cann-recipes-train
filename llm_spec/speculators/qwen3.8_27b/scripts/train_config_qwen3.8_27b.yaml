@@ -1,0 +1,57 @@
+# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Qwen3.8-27B 在线训练配置；详见 README；同名环境变量优先。
+VERIFIER: /data/models/Qwen3.8-27B
+DATA_PATH: ./output/dspark_qwen3_8_27b_mix80w
+OUTPUT_DIR: ./output/dspark_qwen3_8_27b_online
+
+NPROC: 4                      # train ranks (1 card per rank)
+TRAIN_DEVICES: "4,5,6,7"      # training cards (kept off the vLLM extraction cards)
+
+# rank r uses entry r % len(ENGINES); A,B,A,B spreads the load
+ENGINES: "127.0.0.1:8010 127.0.0.1:8011"
+
+NUM_WORKERS: 24               # dataloader workers (each rank consumes its own endpoint)
+
+# hidden-states backend (mooncake | file); must match serve_vllm_hs_qwen3.8_27b.sh
+HS_BACKEND: mooncake
+# MOONCAKE_MASTER must match --mooncake-master on the vLLM side
+MOONCAKE_MASTER: "127.0.0.1:50051"
+MOONCAKE_METADATA_SERVER: P2PHANDSHAKE
+MOONCAKE_PROTOCOL: tcp
+# one store per worker (global segment + local buffer); reserve NPROC x NUM_WORKERS x (global + local) GiB of host memory
+MOONCAKE_GLOBAL_SEGMENT_GIB: 1
+MOONCAKE_LOCAL_BUFFER_GIB: 1
+
+# required with mooncake: routable local IP the master uses to dial back the dataloader workers; prefer TRAIN_IP env override
+TRAIN_IP: ""
+
+# DSpark layout (Qwen3.8-27B, 64 layers; the last layer 64 is appended by launch_vllm)
+TARGET_LAYER_IDS: "1 16 31 46 61"   # must match serve_vllm_hs_qwen3.8_27b.sh
+NUM_LAYERS: 5
+BLOCK_SIZE: 8
+MAX_ANCHORS: 512
+LOSS_FN: '{"ce": 0.1, "tv": 0.9}'
+
+OPTIMIZER: adamw
+EPOCHS: 5
+LR: 6e-4
+SEQ_LEN: 8192                 # serving max-model-len 9216 = 8192 + 1024 margin
+CHECKPOINT_FREQ: 0.1          # save at every 10% of an epoch
+
+# qwen3.8-27B flags: mask token (id 248100, inside vocab V=248320), warmup, weight decay;
+# generated hidden-states are deleted upstream by default (--on-generate is deprecated and
+# passing it only raises a FutureWarning, hence omitted)
+TRAIN_EXTRA_ARGS: "--mask-token-id 248100 --scheduler-warmup-ratio 0.04 --weight-decay 0.0"

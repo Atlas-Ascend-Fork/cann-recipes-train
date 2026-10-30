@@ -1,0 +1,16 @@
+# 训练侧依赖（锁定版本；torch 使用 CPU wheel，NPU 后端由 torch_npu 提供）
+torch==2.10.0
+torch-npu==2.10.0.post2
+transformers==5.14.1
+safetensors==0.8.0
+datasets==5.0.0
+numpy==2.4.6
+pyyaml==6.0.3
+openai==2.46.0
+pyarrow==25.0.1
+tensorboard==2.21.0
+# mooncake hidden-states backend 传输引擎（Ascend 构建）；vLLM 提取服务侧环境同装同版本，file backend 无需
+mooncake-transfer-engine-npu==0.3.11.post1
+
+# vLLM / vllm-ascend 为提取服务侧依赖，按样例 README §5 版本表配对安装，不在本训练侧清单内
+# speculators 本体与官方 hs_connectors 按 README「源码准备」以 git checkout e8f8879 + pip install -e 方式安装

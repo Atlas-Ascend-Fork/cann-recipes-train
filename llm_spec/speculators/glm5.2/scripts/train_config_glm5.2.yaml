@@ -1,0 +1,57 @@
+# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# GLM-5.2-W4A8C8 在线训练配置；详见 README；同名环境变量优先。
+VERIFIER: /data/GLM-5.2-w4a8c8
+DATA_PATH: ./output/arrow-opb60w-zh20w
+OUTPUT_DIR: ./output/dspark_glm52_800k
+
+NPROC: 8
+TRAIN_DEVICES: "0,1,2,3,4,5,6,7"
+
+# order fixed: 4 endpoints of the master node first; rank r uses entry r
+ENGINES: "10.0.0.1:6700 10.0.0.1:6701 10.0.0.1:6702 10.0.0.1:6703 10.0.0.2:6700 10.0.0.2:6701 10.0.0.2:6702 10.0.0.2:6703"
+
+# too many workers raise mooncake queuing/timeout risk (README §10)
+NUM_WORKERS: 12
+
+# GLM5.2 uses mooncake: engines write hidden-states to the store, the trainer fetches by master address
+HS_BACKEND: mooncake
+MOONCAKE_MASTER: "127.0.0.1:50051"
+MOONCAKE_METADATA_SERVER: P2PHANDSHAKE
+MOONCAKE_PROTOCOL: tcp
+# trainer is read-only: 0 registers no worker segment, so workers are never a write target
+MOONCAKE_GLOBAL_SEGMENT_GIB: 0
+MOONCAKE_LOCAL_BUFFER_GIB: 1
+
+# required: routable local IP the master uses to dial back the dataloader workers; prefer TRAIN_IP env override
+TRAIN_IP: ""
+
+# dual-master topology (README §7.1): space-separated <engineIP>=<master> pairs; empty = single master
+HOST_MASTERS: ""
+
+TARGET_LAYER_IDS: "5 23 42 60 78"   # must match the engine side
+NUM_LAYERS: 5
+BLOCK_SIZE: 8
+MAX_ANCHORS: 512
+LOSS_FN: '{"ce": 0.1, "tv": 0.9}'
+
+OPTIMIZER: adamw
+EPOCHS: 5
+LR: 3e-4
+SEQ_LEN: 8192                 # must match --seq-length used in data prepare
+CHECKPOINT_FREQ: 0.1
+
+# glm5.2-specific flags (scheduler / activation / markov head / FSDP / stability), see README §8.2
+TRAIN_EXTRA_ARGS: "--scheduler-type cosine --draft-hidden-act silu --markov-rank 256 --markov-head-type vanilla --dflash-decay-gamma 6 --train-data-ratio 0.90 --fsdp-shard --prefetch-factor 4 --request-timeout 1800 --max-retries 8 --seed 42 --trust-remote-code"
