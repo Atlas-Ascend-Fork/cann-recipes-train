@@ -22,7 +22,7 @@ from collections.abc import Iterable, Iterator
 import torch
 
 # HF names emitted by DeepSeekV4StateDictAdapter.to_hf(). Keep this list in
-# lockstep with interfaces/torchao_converter.py in torchtitan-npu. The mix
+# lockstep with torchtitan_npu.extensions.adaptor.torchao.converter. The mix
 # recipe applies MXFP8 to attention/shared experts and Block FP8 to routed
 # experts (MXFP4 when routed-expert QAT is enabled). MTP e_proj/h_proj remain
 # absent from the TorchTitan quantization suffix allowlist; MTP attention/MoE projections are
@@ -93,10 +93,10 @@ def get_mxfp4_export_config(quantization_config):
 
 def validate_dsv4_export_config(quantization_config) -> None:
     """Reject modes not implemented by the temporary whitelist exporter."""
-    if getattr(quantization_config, "fsdp_prequantize", False):
+    if getattr(quantization_config, "enable_fsdp_prequantize", False):
         raise ValueError(
             "The temporary DSV4 whitelist weight exporter does not support "
-            "extension.quantization.fsdp_prequantize=True; set it to False."
+            "extension.quantization.enable_fsdp_prequantize=True; set it to False."
         )
 
 

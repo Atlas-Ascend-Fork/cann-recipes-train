@@ -60,13 +60,13 @@
 
 - **Data Buffer：** 作为训练与 Rollout 的数据桥梁，负责管理 Prompt 初始化、自定义数据以及 Rollout 生成数据。
 
-本实践实际部署中采用**“训推分离 + PD 共卡”**的组合部署形态。
+当前支持训推共卡/分离和推理侧 PD 共卡/分离等多种部署模式，用户可以结合集群资源规模、模型特点及训推负载特征灵活选择，进一步优化 Agentic RL 系统的资源利用效率。本实践实际部署中采用“训推分离 + PD 共卡”的组合部署形态。
 
 - **训推分离：** 训练侧与 Rollout 侧部署在独立 NPU 资源域中。训练侧保留模型参数、activation、gradient 和 optimizer state；Rollout 侧独立管理推理权重、请求调度和 KV Cache，两侧通过权重同步衔接每一轮 RL 更新，保障训练稳定性与训推资源边界清晰。
 
 - **PD 共卡：** Rollout 内部将 Prefill 和 Decode 共卡部署，按阶段复用 NPU 资源与显存，降低部署复杂度。
 
-> Note：当前实践未启用 PD 分离模式，主要原因是 PD 分离场景下的 Routing Replay 能力尚在完善阶段。后续该特性支持后，用户可结合集群资源规模、模型特点及训推负载特征，在训推共卡/分离和 PD 共卡/分离等多种部署模式之间灵活选择，进一步优化 Agentic RL 系统的资源利用效率。
+- **PD 分离：** Rollout 内部将 Prefill 和 Decode 分别部署在独立的推理资源域，Prefill 负责处理输入上下文，Decode 负责生成输出 token；两侧通过 KV connector 传输 KV Cache。
 
 ## 训推一致性保障
 
@@ -353,10 +353,6 @@ Agentic RL 与 AgentENV 协同管理两类独立沙箱：执行沙箱承载 Agen
 
    建设性能问题维测能力，针对异步 RL 训练流程开展端到端效率分析，快速识别 Rollout、通信、训练等环节瓶颈，持续优化系统性能。
 
-5. 完善 PD 分离场景下的 Routing Replay 实现
-
-   针对 PD 分离部署场景，完善 Routing Replay 机制，保障 PD 分离模式下训推路由一致性，提升长上下文 Agentic RL 场景的稳定性与训练效率。
-
-6. 提升 Agentic RL 任务的规模化和丰富度
+5. 提升 Agentic RL 任务的规模化和丰富度
 
    当前版本主要展示了 SWE-Gym 的训练效果，之后本项目将聚焦“多任务 + 多 Harness”的 Agentic RL 训练场景。基于已有的稳定训推精度和轻量解耦的环境，本工作将继续演进并提升模型后训练能力的泛化性。

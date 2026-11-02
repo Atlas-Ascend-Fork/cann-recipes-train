@@ -33,7 +33,7 @@ def apply_training_quantization(config):
     if quantization is None or not getattr(quantization, "enable_quantized_training", False):
         return config.model_spec
 
-    from .torchao_converter import apply_quantization_converter
+    from torchtitan_npu.extensions.adaptor.torchao.converter import apply_quantization_converter
 
     compile_config = getattr(config, "compile", None)
     model_compile_enabled = bool(

@@ -37,11 +37,11 @@ npu-smi info   # 检查设备、驱动及固件状态
 
 ### 2.1 获取镜像
 
-使用预置 ARM 镜像，镜像中已包含本实践所需的 PyTorch、torch_npu、torchtitan、torchtitan-npu、vllm、vllm-ascend及所有python依赖 和 CANN 运行环境。从[950DT ARM 镜像地址](https://cann-ai.obs.cn-north-4.myhuaweicloud.com/cann-quantization/DeepSeek/ascend_rl_cann9.3.0_dsv4_aarch_950_image_v0.2.tar)
+使用预置 ARM 镜像，镜像中已包含本实践所需的 PyTorch、torch_npu、torchtitan、torchtitan-npu、vllm、vllm-ascend及所有python依赖 和 CANN 运行环境。从[950DT ARM 镜像地址](https://cann-ai.obs.cn-north-4.myhuaweicloud.com/cann-quantization/DeepSeek/ascend_rl_cann9.3.0_dsv4_aarch_950_image_v0.3.tar)
 下载 docker 镜像，上传到 950 服务器的每个节点，并在每个节点执行：
 
 ```bash
-docker load -i ascend_rl_cann9.3.0_dsv4_aarch_950_image_v0.2.tar
+docker load -i ascend_rl_cann9.3.0_dsv4_aarch_950_image_v0.3.tar
 ```
 
 ### 2.2 启动容器
@@ -74,7 +74,7 @@ docker run -u root -itd --ulimit nproc=65535:65535 --ipc=host \
     --net=host \
     --shm-size=128g \
     --privileged \
-    --name ascend_rl ascend_rl_cann9.3.0_dsv4_aarch_950_image:v0.2 /bin/bash
+    --name ascend_rl ascend_rl_cann9.3.0_dsv4_aarch_950_image:v0.3 /bin/bash
 ```
 
 容器示例保留 Ascend 950 的 `/dev/ummu`、`/dev/uburma`、URMA 工具及通信配置挂载；按实际宿主机安装路径调整。多机场景的存储与 PD 通信资源要求见第 4.2、4.5 节。
@@ -260,8 +260,6 @@ export VLLM_CONFIG="${HOME_PATH}/cann-recipes-train/vime-forge/scripts/configs/p
 
 P/D 分离需要镜像内可用的 Mooncake/HIXL 通信栈，以及目标机器对应的 `/etc/hixlep`、URMA 设备和通信配置；挂载见第 2 节。资源文件须有效，P/D 之间的 KV 传输网络需可达。
 
-**注意：当前推理侧 PD 分离场景不支持 routing replay。开启 PD 分离时，需要删除 `scripts/torchtitan/run-dsv4.sh` 中的 `--use-rollout-routing-replay` 入参。**
-
 ### 4.6 量化参数配置
 
 量化参数需要与模型权重和推理侧配置保持一致。DSV4 当前不通过 `local.sh` 统一拉起；请在实际使用的 DSV4 启动配置中设置下面的变量，并将修改同步到所有相关节点。
@@ -354,7 +352,7 @@ bash scripts/torchtitan/run-dsv4-node-list.sh
 | `--vllm-kv-cache-dtype` | `bfloat16` |
 | `--vllm-compilation-config` | `{"cudagraph_mode":"FULL_DECODE_ONLY"}` |
 | `--use-dynamic-batch-size` / `--max-tokens-per-gpu` | 开启；token 上限默认等于 `SEQ_LEN` |
-| `--use-rollout-routing-replay` | 混部默认开启；PD 分离时需删除该入参 |
+| `--use-rollout-routing-replay` | 开启；支持 rollout 侧 PD 共卡和 PD 分离两种部署方式 |
 | `--fine-grained-memory-cleanup` | 开启，在训练阶段间释放缓存；可用 `--no-fine-grained-memory-cleanup` 关闭 |
 
 `SEQ_LEN` 同时用于训练序列长度、rollout 上下文上限和 vLLM `max-model-len`。修改长度时优先修改本地配置，并保证 `MAX_RESPONSE_LEN < SEQ_LEN`。改变 batch 时需保持采样量与训练 batch 配套，例如默认 `32 × 8 = 256`。

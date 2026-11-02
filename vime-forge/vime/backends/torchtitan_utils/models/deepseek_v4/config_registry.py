@@ -16,11 +16,17 @@
 
 from dataclasses import replace
 
-from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.optimizer import LRSchedulersContainer
-from torchtitan.config import OverrideConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import OverrideConfig, ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import FullAC
-from torchtitan.trainer import Trainer
+from torchtitan_npu.config.configs import (
+    ExtensionConfig,
+    KVNormQuantizationConfig,
+    QuantizationExtensionConfig,
+    TrainingConfig,
+)
+from torchtitan_npu.extensions.torchtitan.components.checkpoint import CheckpointManager
+from torchtitan_npu.extensions.torchtitan.trainer import TrainerEx
 from torchtitan_npu.models.deepseek_v4 import model_registry
 from torchtitan_npu.models.deepseek_v4 import _deepseek_v4_flash
 from torchtitan_npu.models.deepseek_v4.config_registry import _dsv4_optimizer_config
@@ -43,9 +49,24 @@ _VIME_OVERRIDES = [
 ]
 
 
-def _vime_rl_config(model_spec, *, lr: float = 1e-6) -> Trainer.Config:
-    return Trainer.Config(
+def _vime_rl_config(model_spec, *, lr: float = 1e-6, fa_mxfp8: bool = False) -> TrainerEx.Config:
+    quantization = QuantizationExtensionConfig()
+    if fa_mxfp8:
+        quantization = QuantizationExtensionConfig(
+            enable_quantized_training=True,
+            recipe="all_block_fp8",
+            # VIME's rollout weight exporter does not support FSDP prequantization.
+            enable_fsdp_prequantize=False,
+            li_quantization="fp8",
+            kv_norm_quantization=KVNormQuantizationConfig(
+                format="mxfp8",
+                block_size=64,
+                fqns=[".attention.kv_norm", ".attention.compressor.norm"],
+            ),
+        )
+    return TrainerEx.Config(
         model_spec=model_spec,
+        extension=ExtensionConfig(quantization=quantization),
         optimizer=_dsv4_optimizer_config(model_spec, lr=lr),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=0,
@@ -101,9 +122,25 @@ def _derived_spec(*, n_layers: int, num_experts: int, compress_ratios: tuple[int
     return replace(spec, model=model, flavor=f"vime_dsv4_flash_{n_layers}layers_{num_experts}experts")
 
 
-def vime_dsv4_flash_4layers_256experts() -> Trainer.Config:
+def vime_dsv4_flash_4layers_256experts() -> TrainerEx.Config:
     return _vime_rl_config(_derived_spec(n_layers=4, num_experts=256, compress_ratios=(1, 1, 4, 128)))
 
 
-def vime_dsv4_flash_43layers_256experts() -> Trainer.Config:
+def vime_dsv4_flash_43layers_256experts() -> TrainerEx.Config:
     return _vime_rl_config(_derived_spec(n_layers=43, num_experts=256, compress_ratios=(1, 1, 4) + 20 * (128, 4)))
+
+
+def vime_dsv4_flash_4layers_256experts_fa_mxfp8() -> TrainerEx.Config:
+    """Four-layer RL recipe with block-FP8 weights, MXFP8 KV fake quantization and FP8 LI."""
+    return _vime_rl_config(
+        _derived_spec(n_layers=4, num_experts=256, compress_ratios=(1, 1, 4, 128)),
+        fa_mxfp8=True,
+    )
+
+
+def vime_dsv4_flash_43layers_256experts_fa_mxfp8() -> TrainerEx.Config:
+    """43-layer RL recipe with block-FP8 weights, MXFP8 KV fake quantization and FP8 LI."""
+    return _vime_rl_config(
+        _derived_spec(n_layers=43, num_experts=256, compress_ratios=(1, 1, 4) + 20 * (128, 4)),
+        fa_mxfp8=True,
+    )
