@@ -96,7 +96,7 @@ docker run -u root -itd --ulimit nproc=65535:65535 --ipc=host \
 进入容器：
 
 ```shell
-docker exec -it dsv4_train_torchtitan_v3.0 /bin/bash
+docker exec -it dsv4.1_train_torchtitan_a5 /bin/bash
 ```
 
 在容器内执行环境变量初始化：
