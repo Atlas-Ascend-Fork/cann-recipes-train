@@ -110,18 +110,18 @@ NPU 侧的适配包括设备与通信恢复、训练现场清理和状态承接�
 
 本节围绕 DeepSeek-V4 训练，分别考察 TorchFT 开关的精度差异、故障恢复后的精度，以及启用 TorchFT 对训练性能的影响。
 
-1. TorchFT 开关精度对照。 以关闭 TorchFT 的训练为基线，与开启 TorchFT 的双副本训练进行比较。
+1. TorchFT 开关精度对照。以关闭 TorchFT 的训练为基线，与开启 TorchFT 的双副本训练进行比较。
 
 ![elastic training loss](../figures/ascend950/high_availability/elastic-training-loss.jpg)
 
 *图 10：TorchFT 开启与关闭的训练精度对照*
 
-2. TorchFT 故障恢复精度对照。 使用 128die 进行 DeepSeek-V4 Flash 训练，划分为两个副本（replica1 和 replica2）。replica2 在训练中途退出后，replica1 继续训练，两个副本的 loss 变化如下图所示：
+2. TorchFT 故障恢复精度对照。使用 128die 进行 DeepSeek-V4 Flash 训练，划分为两个副本（replica1 和 replica2）。replica2 在训练中途退出后，replica1 继续训练，两个副本的 loss 变化如下图所示：
 ![replica rejoin loss](../figures/ascend950/high_availability/replica-rejoin-loss.png)
 
 *图 11：TorchFT 历史重放策略的恢复精度对照*
 
-3. TorchFT 开关性能对照。 以 DeepSeek-V4 Flash 128die 训练为例，对比开启与关闭 TorchFT 时的吞吐量（TPS）。从图中可见，训练后期吞吐量趋于稳定时，开启 TorchFT 后的吞吐量较基线下降幅度在 5% 以内。
+3. TorchFT 开关性能对照。以 DeepSeek-V4 Flash 128die 训练为例，对比开启与关闭 TorchFT 时的吞吐量（TPS）。从图中可见，训练后期吞吐量趋于稳定时，开启 TorchFT 后的吞吐量较基线下降幅度在 5% 以内。
 
 ![torchft throughput comparison](../figures/ascend950/high_availability/torchft-throughput-comparison.png)
 

@@ -31,7 +31,7 @@ SAM（suffix automaton，后缀自动机）是一个能够高效解决许多字�
 
 在本文的实践中，为了实现零迁移成本以及不引入额外系统维护复杂度，我们使用了纯动态 SAM。
 
-**基于 SAM\-Decoding 的草稿（draft）生成**：从当前序列的最后一个 token 开始，通过 SAM 的 link 边回溯，直至找到能通过 next 边转移到下一个 token 的节点。 根据节点的 min\_endpos，在当前文本序列中定位匹配后缀的起始位置，提取后续连续 token 作为候选序列。单次查询的复杂度为最坏 O(|S|) 、平均 O(1)。以下是一个具体的例子。
+**基于 SAM\-Decoding 的草稿（draft）生成**：从当前序列的最后一个 token 开始，通过 SAM 的 link 边回溯，直至找到能通过 next 边转移到下一个 token 的节点。根据节点的 min\_endpos，在当前文本序列中定位匹配后缀的起始位置，提取后续连续 token 作为候选序列。单次查询的复杂度为最坏 O(|S|) 、平均 O(1)。以下是一个具体的例子。
 
 还是以字符串 ABCBC 为例（下图对应上文的 link 状态图），为了简洁起见，我们使用每个等价类中最长的子串来表示这个节点。当前的最后一个 token 是 C，我们将 SAM 的最后一个节点沿着 link 边回溯，到达节点 BC。
 
@@ -150,7 +150,7 @@ SAM（suffix automaton，后缀自动机）是一个能够高效解决许多字�
 
 ### 2.2 下游评测
 
-我们基于 Qwen3\-32B 模型在数学数据集 GSM8k 以及 AIME2024 进行了纯推理的测评（pass@1）， 采样参数为 temperature=0.6，repetition penalty=1，不设置 top\-k 和 top\-p。 测试结果如下：
+我们基于 Qwen3\-32B 模型在数学数据集 GSM8k 以及 AIME2024 进行了纯推理的测评（pass@1），采样参数为 temperature=0.6，repetition penalty=1，不设置 top\-k 和 top\-p。测试结果如下：
 
 | 数据集|不开启SAM|开启SAM|
 |---|---|---|

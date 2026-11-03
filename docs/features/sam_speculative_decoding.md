@@ -86,7 +86,7 @@ SAM 无损投机推理能力的核心组件，实现了上文提到的动态 SAM
 - 运行模式：eager
 
 1. 精度验证：
-基于 Qwen3\-32B 模型在数学数据集 GSM8k 以及 AIME2024 进行了纯推理的测评（pass@1）， 采样参数为 temperature=0.6，repetition penalty=1，不设置 top\-k 和 top\-p。 测试结果如下：
+基于 Qwen3\-32B 模型在数学数据集 GSM8k 以及 AIME2024 进行了纯推理的测评（pass@1），采样参数为 temperature=0.6，repetition penalty=1，不设置 top\-k 和 top\-p。测试结果如下：
 
 | 数据集   | 不开启 SAM | 开启 SAM |
 | -------- | --------- | ------- |

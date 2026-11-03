@@ -220,9 +220,9 @@ torch.compile 为此提供了基础能力：通过捕获 FX 计算图将模型�
 
 核心优化路径：将原本离散间隔执行的小算子，优化为融合算子的连续执行，降低了硬件空泡，保障 NPU 计算流水线连续性，大幅提升硬件利用率
 
-* 调度优化： 静态化分析 + Codegen Wrapper \-> 预编译执行流（取代动态 Dispatcher），降低 Host 延迟
+* 调度优化：静态化分析 + Codegen Wrapper \-> 预编译执行流（取代动态 Dispatcher），降低 Host 延迟
 
-* 算子级优化： 算子融合 \-> 减少 Launch 次数 \-> 缓解 Host 侧指令下发压力
+* 算子级优化：算子融合 \-> 减少 Launch 次数 \-> 缓解 Host 侧指令下发压力
 
 ![AutoFuse-hostbound](./figures/deepseek_v4/AutoFuse-hostbound.png)
 

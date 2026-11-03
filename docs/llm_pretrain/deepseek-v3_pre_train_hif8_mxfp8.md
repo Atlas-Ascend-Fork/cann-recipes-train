@@ -121,8 +121,8 @@ $$
 
 在介绍基于低比特（如 HiF8）的量化训练方案前，有必要先回顾目前业界最广泛使用的基线方案——基于 BF16 的混合精度训练。
 
-* ​**BFloat16（BF16）格式**​：BF16 是 2017 年提出的一种专为 Deep Learning 设计的 16-bit 浮点数格式。在内存布局上，它由 1-bit 的 Sign、8-bit 的 Exponent 和 7-bit 的 Mantissa 组成。 与传统的 FP16（5-bit Exponent，10-bit Mantissa）相比，BF16 牺牲了 Mantissa 的精度，但保留了与高精度数据类型 FP32 完全相同的 Exponent 位宽。这意味着 BF16 拥有与 FP32 相同的动态范围（约 $10^{38}$ 到 $10^{-38}$ ）。在神经网络的训练中，模型参数和梯度的分布通常跨越极大的数值范围，使用 BF16 可以有效避免由于表达范围不足而导致的上溢或下溢，同时其较小的位宽又能显著降低显存占用与内存带宽开销。
-* ​**基于 BF16 的混合精度训练**​：主流深度学习框架在支持 BF16 训练时通常采用自动混合精度（Automatic Mixed Precision, AMP）机制。 该范式在图层或算子层级选择合适的数据类型：在前向计算（Forward Pass）和反向传播（Backward Pass）中，框架会将计算密集型算子（如 MatMul、Convolution）的输入自动下采样转换为 BF16，以充分发挥底层硬件的加速优势；而对于对数值精度高度敏感的算子（如 Softmax、LayerNorm、Loss 计算等），则保持 FP32 以确保数值稳定性。此外，在 Optimizer 的参数更新步骤中，系统往往在内存中维护一份 FP32 高精度主权重（Master Weights），从而避免因 BF16 Mantissa 精度不足而导致的权重更新停滞。
+* ​**BFloat16（BF16）格式**​：BF16 是 2017 年提出的一种专为 Deep Learning 设计的 16-bit 浮点数格式。在内存布局上，它由 1-bit 的 Sign、8-bit 的 Exponent 和 7-bit 的 Mantissa 组成。与传统的 FP16（5-bit Exponent，10-bit Mantissa）相比，BF16 牺牲了 Mantissa 的精度，但保留了与高精度数据类型 FP32 完全相同的 Exponent 位宽。这意味着 BF16 拥有与 FP32 相同的动态范围（约 $10^{38}$ 到 $10^{-38}$ ）。在神经网络的训练中，模型参数和梯度的分布通常跨越极大的数值范围，使用 BF16 可以有效避免由于表达范围不足而导致的上溢或下溢，同时其较小的位宽又能显著降低显存占用与内存带宽开销。
+* ​**基于 BF16 的混合精度训练**​：主流深度学习框架在支持 BF16 训练时通常采用自动混合精度（Automatic Mixed Precision, AMP）机制。该范式在图层或算子层级选择合适的数据类型：在前向计算（Forward Pass）和反向传播（Backward Pass）中，框架会将计算密集型算子（如 MatMul、Convolution）的输入自动下采样转换为 BF16，以充分发挥底层硬件的加速优势；而对于对数值精度高度敏感的算子（如 Softmax、LayerNorm、Loss 计算等），则保持 FP32 以确保数值稳定性。此外，在 Optimizer 的参数更新步骤中，系统往往在内存中维护一份 FP32 高精度主权重（Master Weights），从而避免因 BF16 Mantissa 精度不足而导致的权重更新停滞。
 
 在上述混合精度方案基础上，基于缩放（Scaling）技术的 8-bit 混合精度训练可以进一步提升训练效率。
 
@@ -151,7 +151,7 @@ $$
 **图 7：MindSpeed 与 MindSpeed LLM 框架示意图**
 
 Transformer Engine（TE）是一个面向 Transformer 模型训练与推理的加速库，支持在 Hopper GPU 上使用 8-bit 浮点（FP8）精度，以降低内存占用并提升训练和推理性能。MindSpeed 的 TE 模块与官方 TE 在接口和能力上保持兼容，支持第三方框架无缝迁移，可在昇腾 NPU 上实现高效的大语言模型训练与推理。
-MindSpeed 低精度训练流程的核心在于，将前向传播（Fprop）、激活反向传播（Dgrad）和权重反向传播（Wgrad）过程中的通用矩阵乘法运算量化为 FP8 / HiF8 精度执行。 整体训练流程仍基于 BF16 / FP16 的 AMP 混合精度模式，但在特定计算算子中，尤其是 Linear 层中的矩阵乘法运算（涵盖 Fprop、Dgrad 和 Wgrad），采用 FP8 / HiF8 精度路径执行。
+MindSpeed 低精度训练流程的核心在于，将前向传播（Fprop）、激活反向传播（Dgrad）和权重反向传播（Wgrad）过程中的通用矩阵乘法运算量化为 FP8 / HiF8 精度执行。整体训练流程仍基于 BF16 / FP16 的 AMP 混合精度模式，但在特定计算算子中，尤其是 Linear 层中的矩阵乘法运算（涵盖 Fprop、Dgrad 和 Wgrad），采用 FP8 / HiF8 精度路径执行。
 ![](./figures/deepseek_v3/image9.png)
 
 **图 8：Transformer Engine 量化代码模块实现**
@@ -163,7 +163,7 @@ MindSpeed 低精度训练流程的核心在于，将前向传播（Fprop）、�
 * Delayed Scaling：根据历史 Amax 值计算缩放因子（Scaling Factor），再使用该缩放因子对 Tensor 进行量化；
 * Tensorwise Scaling：在线计算 Amax，并实时应用缩放因子对 Tensor 进行量化；
 * Blockwise Scaling：对 Tensor 进行分块，然后分别计算 Amax 并应用 Scaling factor 对 Tensor 进行量化；
-* MX Scaling： 通过块级共享 Scale 与低位宽元素组合，将浮点向量转化为 MX 块，实现动态量化。
+* MX Scaling：通过块级共享 Scale 与低位宽元素组合，将浮点向量转化为 MX 块，实现动态量化。
 
 当前支持的低精度数据格式包括 MXFP8（E4M3）、MXFP8（E5M2）以及 HiF8，对应的参数组合如表 5 所示。
 
