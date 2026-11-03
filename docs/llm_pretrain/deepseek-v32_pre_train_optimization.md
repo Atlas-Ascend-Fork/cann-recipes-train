@@ -65,7 +65,7 @@ TorchTitan 提供了 **ModelConverter** 机制，作用在模型定义后、并�
 
 **使用示例：**
 
-```yaml
+```toml
 [model]  # 在model配置下指定需要使能的融合算子即可
 converters = ["npu_dsa", "npu_rms_norm", "npu_permute", "npu_gmm"]
 ```
