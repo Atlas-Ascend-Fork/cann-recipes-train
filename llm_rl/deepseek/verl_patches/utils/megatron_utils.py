@@ -30,6 +30,7 @@ import os
 import re
 import torch
 from megatron.core.distributed import DistributedDataParallel as DDP
+from megatron.core.optimizer import ChainedOptimizer
 from megatron.core.transformer import TransformerConfig
 
 import verl.utils.megatron.tensor_parallel as tp_utils
@@ -38,6 +39,8 @@ from verl.utils.megatron_utils import (
     unwrap_model,
     broadcast_from_megatron_pp,
     broadcast_str_from_megatron_pp,
+    offload_megatron_copy_params,
+    load_megatron_copy_params,
 )
 from verl_patches.utils.reshard import ep_param_reshard_by_alltoallv, get_rollout_expert_after_resharding
 from verl_patches.tools import empty_cache
