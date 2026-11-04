@@ -227,7 +227,7 @@ oss{=}\sum_tD_{KL}(p_{t,:}||Softmax(I_{t,:}))
 $$
 
 - 其中，$p_{t,:}$作为target distribution，需要在之前的计算结果上进行所有的head的求和，然后把求和结果沿着上下文方向进行L1正则化得到。$D_{KL}$为KL散度，其表达式为：
-  
+
   $$
   D_{KL}(a||b){=}\sum_ia_i\mathrm{log}{\left(\frac{a_i}{b_i}\right)}
   $$
@@ -267,13 +267,13 @@ $$
 `SparseLightningIndexerGradKLLoss`一次计算的基本块大小为$(128,128)$。
 
 - L1空间划分如下部分：
-  
+
   - $Q$ 矩阵：$128\times 576\times2\text{ Bytes}=144\text{ KB}$，即$Q$ 矩阵矩阵常驻于L1；
   - $Qindex$ 矩阵 使能Double Buffer：$2\times64\times 128\times2\text{ Bytes}=32\text{ KB}$，即$Qindex$ 矩阵常驻于L1；
   - $Gather$ 矩阵 使能Double Buffer：$2\times128\times 128\times2\text{ Bytes}=64\text{ KB}$，其中$Gather$矩阵每次的搬运大小为$(128,128)$；
   - $reluGrad$ 矩阵：$64\times 2048\times2\text{ Bytes}=288\text{ KB}$，其中$reluGrad$矩阵每次的搬运大小为$(64,2048)$。
 - L0A，L0B，L0C使能DoubleBuffer，分别划分为$2\times32\text{ KB},2\times32\text{ KB},2\times64\text{ KB}$，
-  
+
   - 在 $C_1$ 阶段$MatmulP$一次搬入 L0A 和 L0B的矩阵块大小分别为 $(128,128) / (128,64),(128,128)$。
   - 在 $C_1$ 阶段$MatmulSy$一次搬入 L0A 和 L0B的矩阵块大小分别为 $(64,128),(128,128)$。
   - 在 $C_2$ 阶段$MatmulDk$一次搬入 L0A 和 L0B的矩阵块大小分别为 $(128,64),(64,128)$。
@@ -294,10 +294,10 @@ $$
 <img src="./figures/deepseek_v32/b97ed3e2-ca09-46f6-9f5d-2887c8bad304.png" width="50%" >
 </p>
 
-基于 A3 芯片 Cube 核和 Vector 核数比为1:2的特性,利用 Vector 核发射访存指令，
+基于 A3 芯片 Cube 核和 Vector 核数比为1:2的特性，利用 Vector 核发射访存指令，
 将指令的下发效率提高一倍。另一方面，单次访存的数据量本身也会影响实际达到的带宽，
 而离散访存单次的访存量较小，这会导致数据搬运本身的耗时高于预期。
-针对这一问题,可以将离散的数据点两两聚合,利用srcGap参数实现成对的数据访存,提升访存带宽,如图所示。
+针对这一问题，可以将离散的数据点两两聚合，利用srcGap参数实现成对的数据访存，提升访存带宽，如图所示。
 
 <p align="center">
 <img src="./figures/deepseek_v32/31a06a5c-c7aa-4767-8cc3-76afb6628db0.png" width="50%" >
@@ -546,5 +546,3 @@ TP 通过 AllGather 和 ReduceScatter 在层内完成跨卡同步，通信延迟
 </p>
 
 在 TorchTitan-npu 中，Inductor 编译器在 FX 计算图的阶段，可以识别这种**all_gather + matmul**或者 **matmul + reduce-scatter**这种pattern，并自动完成这一分解与重排序，无需修改模型代码。配合 A3 节点内的高带宽卡间互联，层内 TP 通信可被有效压缩并隐藏在计算窗口之中。
-
-
