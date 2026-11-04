@@ -215,7 +215,7 @@ flowchart TB
 
 ### 样例入口
 
-#### 预训练 / 续训练
+#### 预训练 / 续训练<a name="预训练--续训练"></a>
 
 > 面向大模型预训练、继续训练与低精度训练。适合关注 TorchTitan-NPU、MindSpeed、长序列、低精度和大规模并行训练的开发者。
 
@@ -258,7 +258,7 @@ flowchart TB
 |------|----------|
 | [FLUX GRPO](multimodal_rl/flux_grpo/README.md) | 基于 DanceGRPO 的文生图 GRPO 训练样例，默认使用 HPSv2 奖励模型，支持 Atlas A3 16 die |
 
-#### Agent / Code RL
+#### Agent / Code RL<a name="agent--code-rl"></a>
 
 > 面向工具调用、代码沙盒、长上下文代码生成和多轮交互式训练。适合探索 Agentic RL 与 Code RL 闭环。
 
