@@ -1,3 +1,4 @@
+#!/bin/bash
 # coding=utf-8
 # This program is free software, you can redistribute it and/or modify it.
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
@@ -7,7 +8,6 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 
-#!/bin/bash
 INPUT_FP8_HF_PATH=""
 OUTPUT_HF_PATH=""
 QUANT_MODE=""
@@ -43,20 +43,21 @@ if [[ -z "$INPUT_FP8_HF_PATH" ]] || [[ -z "$OUTPUT_HF_PATH" ]] || [[ -z "$QUANT_
     exit 1
 fi
 
+QUANT_MODE_LOWER=$(printf '%s' "$QUANT_MODE" | tr '[:upper:]' '[:lower:]')
 
-case "${QUANT_MODE,,}" in  
+case "$QUANT_MODE_LOWER" in
     bfloat16)
         echo "Convert to bfloat16 weights..."
         python utils/convert_model.py \
             --input_fp8_hf_path "$INPUT_FP8_HF_PATH" \
-            --output_hf_path "$OUTPUT_HF_PATH"
+            --output_hf_path "$OUTPUT_HF_PATH" || exit "$?"
         ;;
     w8a8c16)
         echo "Convert to w8a8c16 weights..."
         python utils/convert_model.py \
             --input_fp8_hf_path "$INPUT_FP8_HF_PATH" \
             --output_hf_path "$OUTPUT_HF_PATH" \
-            --quant_type "w8a8c16"
+            --quant_type "w8a8c16" || exit "$?"
         ;;
     w8a8c8)
         export QUANT_URL=https://cann-ai.obs.cn-north-4.myhuaweicloud.com/cann-quantization/DeepSeek-V3.2-Exp/w8a8c8.zip
@@ -81,7 +82,7 @@ case "${QUANT_MODE,,}" in
             --output_hf_path "$OUTPUT_HF_PATH" \
             --quant_type "w8a8c8" \
             --clip \
-            --quant_param_path "./quantization/w8a8c8"
+            --quant_param_path "./quantization/w8a8c8" || exit "$?"
         ;;
     w4a8c8)
         export QUANT_URL=https://cann-ai.obs.cn-north-4.myhuaweicloud.com/cann-quantization/DeepSeek-V3.2-Exp/w4a8c8.zip
@@ -106,7 +107,7 @@ case "${QUANT_MODE,,}" in
             --output_hf_path "$OUTPUT_HF_PATH" \
             --quant_type "w4a8c8" \
             --clip \
-            --quant_param_path "./quantization/w4a8c8"
+            --quant_param_path "./quantization/w4a8c8" || exit "$?"
         ;;
     *)
         echo "Error: Unsupport Quant_mode: $QUANT_MODE"
