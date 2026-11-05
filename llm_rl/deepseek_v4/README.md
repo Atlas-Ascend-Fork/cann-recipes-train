@@ -114,43 +114,73 @@ cd ${HOME_PATH}/cann-recipes-train/vime-forge
 
 ## 3. 准备模型与数据
 
-### 下载权重
+可以从 Hugging Face、ModelScope 等平台下载所需的模型和数据集。启动脚本默认从 `${VIME_MODEL_ROOT}` 读取模型、从 `${VIME_DATA_ROOT}` 读取数据集
+
+### 3.1 权重准备
 
   下载[DeepSeek-V4-Flash原始Hybrid FP8-MXFP4权重](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash)，并上传到各节点的某个固定的路径下，比如`/data/models/deepseek_v4_hybrid_fp8_mxfp4`。
 
-### 转换权重
 
-由于训练过程中我们希望使用Hybrid MXFP8-MXFP4或整网MXFP8权重进行训练正向的计算及推理，因此我们在原始权重的基础上需要做一步权重转换。
-需要使用[convert_model.py](https://gitcode.com/cann/cann-recipes-infer/blob/master/models/deepseek_v4/utils/convert_model.py) 脚本完成 Hybrid FP8-MXFP4 到 Hybrid MXFP8-MXFP4 / MXFP8 权重转换。
+  由于训练过程中我们希望使用Hybrid MXFP8-MXFP4或整网MXFP8权重进行训练正向的计算及推理，因此我们在原始权重的基础上需要做一步权重转换。
+  需要使用[convert_model.py](https://gitcode.com/cann/cann-recipes-infer/blob/master/models/deepseek_v4/utils/convert_model.py) 脚本完成 Hybrid FP8-MXFP4 到 Hybrid MXFP8-MXFP4 / MXFP8 权重转换。
 
-  >入参介绍：`input_fp8_hf_path`：原始权重路径；`output_hf_path`：转换后输出的权重路径；`quant_type`：量化模式；
+    >入参介绍：`input_fp8_hf_path`：原始权重路径；`output_hf_path`：转换后输出的权重路径；`quant_type`：量化模式；
 
-  如果权重转换的运行环境为NPU，需要先执行：
+    如果权重转换的运行环境为NPU，需要先执行：
 
-  ```shell
-  cann_path=/usr/local/Ascend/cann  # cann包安装路径
-  source ${cann_path}/bin/setenv.bash
-  ```
-  权重转换拉起示例：
+    ```shell
+    cann_path=/usr/local/Ascend/cann  # cann包安装路径
+    source ${cann_path}/bin/setenv.bash
+    ```
+    权重转换拉起示例：
 
-  ```shell
-  # 转换为Hybrid MXFP8-MXFP4权重，适用于Ascend 950系列
-  python convert_model.py --input_fp8_hf_path /data/models/deepseek_v4  --output_hf_path /data/models/deepseek_v4_hybrid_mxfp8_mxfp4 --quant_type w4a8-mx
+    ```shell
+    # 转换为Hybrid MXFP8-MXFP4权重，适用于Ascend 950系列
+    python convert_model.py --input_fp8_hf_path /data/models/deepseek_v4  --output_hf_path /data/models/deepseek_v4_hybrid_mxfp8_mxfp4 --quant_type w4a8-mx
 
-  # 转换为MXFP8权重，适用于Ascend 950系列
-  python convert_model.py --input_fp8_hf_path /data/models/deepseek_v4  --output_hf_path /data/models/deepseek_v4_mxfp8 --quant_type w8a8-mx
+    # 转换为MXFP8权重，适用于Ascend 950系列
+    python convert_model.py --input_fp8_hf_path /data/models/deepseek_v4  --output_hf_path /data/models/deepseek_v4_mxfp8 --quant_type w8a8-mx
+    ```
 
-  ```
+### 3.2 数据集准备
 
-### 3.2 训练数据
-
-默认使用 DAPO Math 17k，可在容器内下载：
+默认使用 DAPO Math 17k 作为训练数据，AIME-2024 或 math-500 作为评测数据：
 
 ```bash
-mkdir -p ${HOME_PATH}/dsv4-rl/data
+mkdir -p ${VIME_DATA_ROOT}
+
+# 下载训练数据集 (dapo-math-17k)
 hf download --repo-type dataset zhuzilin/dapo-math-17k \
-  --local-dir ${HOME_PATH}/dsv4-rl/data
+  --local-dir ${VIME_DATA_ROOT}/dapo-math-17k
+
+# 下载评估数据集 (aime-2024)
+hf download --repo-type dataset zhuzilin/aime-2024 \
+  --local-dir ${VIME_DATA_ROOT}/aime-2024
+
+# 下载评估数据集 (math-500)，原始文件为 test.jsonl
+hf download --repo-type dataset HuggingFaceH4/MATH-500 \
+  --local-dir ${VIME_DATA_ROOT}/math-500
+
+# 转换为 vime 评测格式，生成 ${VIME_DATA_ROOT}/math-500/math-500.jsonl
+python vime-forge/tools/build_math500_eval_data.py \
+  --input ${VIME_DATA_ROOT}/math-500/test.jsonl \
+  --output ${VIME_DATA_ROOT}/math-500/math-500.jsonl
 ```
+
+`build_math500_eval_data.py` 会把 MATH-500 的 `{"problem", "answer", "subject", "level", "unique_id"}`
+逐行改写为 vime 评测所需的 `{"prompt": [...], "label": ..., "metadata": {...}}`：
+
+- `prompt`：`[{"role": "user", "content": problem}]`，与 aime-2024 评测集的格式一致；
+- `label`：原始 `answer`，供 `rm_type: math` 的 `\boxed{}` 判分使用；
+- `metadata`：保留 `subject`、`level`、`unique_id`，便于按主题/难度细分。
+
+生成的 `math-500.jsonl` 必须放在 `${VIME_DATA_ROOT}/math-500/math-500.jsonl`，该路径由
+`vime-forge/scripts/configs/eval.yaml` 中的 math500 数据集项引用
+（`n_samples_per_eval_prompt: 1`、`max_response_len: 8192`）。
+
+> 如果下载节点访问 Hugging Face 受限，可先设置 `HF_ENDPOINT`（脚本通过 `hf_hub_url` 下载，会遵循该变量）；
+> 也可以省略 `--input`，由脚本自行下载 `test.jsonl`。`--output` 省略时默认同样是
+> `$VIME_DATA_ROOT/math-500/math-500.jsonl`。
 
 也可以把已有数据放到该目录。启动脚本使用 `prompt` 和 `label` 字段，并启用 chat template；自定义 JSONL 每行可以采用以下形式：
 
@@ -217,7 +247,7 @@ Ray、Gloo、HCCL 和推理通信所用网络必须互通。在各容器启动 R
 
 ```bash
 export DSV4_MODEL=/models/DeepSeek-V4-Flash-MXFP8
-export DATASET="${HOME_PATH}/dsv4-rl/data/dapo-math-17k.jsonl"
+export VIME_DATA_ROOT=${HOME_PATH}/dsv4-rl/data
 export VIME_WORKSPACE="${HOME_PATH}/dsv4-rl"
 export VIME_CKPT_ROOT="${VIME_WORKSPACE}/ckpt"
 export VIME_TB_ROOT="${VIME_WORKSPACE}/tb"

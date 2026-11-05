@@ -1,0 +1,39 @@
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Evaluation datasets for the torchtitan run scripts, passed with
+#   --eval-config scripts/configs/eval.yaml
+#
+# Why a config instead of --eval-prompt-data: the reward grader here is per
+# dataset, while --rm-type is global and is the one training uses. Keeping them
+# apart lets eval grade with `math` without shifting the training reward.
+#
+# Paths resolve VIME_DATA_ROOT from the job environment (the launcher forwards it
+# in the Ray runtime env; it defaults to ${VIME_WORKSPACE}/data).
+eval:
+  defaults:
+    apply_chat_template: true
+    input_key: prompt
+    label_key: label
+  datasets:
+    - name: aime
+      path: ${oc.env:VIME_DATA_ROOT}/aime-2024/aime-2024.jsonl
+      rm_type: math                       # \boxed{} exact match
+      n_samples_per_eval_prompt: 4
+      max_response_len: 16384
+    - name: math500
+      path: ${oc.env:VIME_DATA_ROOT}/math-500/math-500.jsonl
+      rm_type: math                       # \boxed{} exact match
+      n_samples_per_eval_prompt: 1        # 500 problems: pass@1 is stable enough
+      max_response_len: 8192              # short competition answers; CoT fits

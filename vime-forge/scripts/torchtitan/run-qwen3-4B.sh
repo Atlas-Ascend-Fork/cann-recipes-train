@@ -112,17 +112,15 @@ VLLM_ARGS=(
                                   #  vLLM asserts and exits. Memory only, no correctness impact.
    # --no-vllm-async-scheduling   megatron defaults async on, so this stays off. If rollout
    #                                misbehaves on NPU, this is the first line to restore.
-
-   # --vllm-enable-expert-parallel
    # --vllm-data-parallel-size ${VLLM_RANKS_PER_ENGINE}
 )
 add_when DET on VLLM_ARGS -- --vllm-enable-deterministic-inference --rollout-seed 1234
 
 EVAL_ARGS=(
    --eval-interval 20
-   --eval-prompt-data aime "${VIME_DATA_ROOT}/aime-2024/aime-2024.jsonl"
-   --n-samples-per-eval-prompt 4   # megatron uses 1; higher damps eval sampling noise
-   --eval-max-response-len 16384   # megatron uses 16384
+   # Datasets and their per-dataset graders live in the config, so eval can use
+   # `math` while training keeps its own --rm-type.
+   --eval-config "${REPO_ROOT}/scripts/configs/eval.yaml"
    --eval-top-p 1
 )
 # The fully-async rollout raises in eval mode, so MODE=fully-async drops the group.
@@ -135,7 +133,6 @@ PERF_ARGS=(
 
    # tp/pp/cp/ep all default to 1 in torchtitan, so they need no explicit flags.
    # compile stays off: NPU forbids torch.compile, and tyro's bool has no "False" form.
-   # --parallelism.expert_parallel_degree 4   # tp/pp/cp=1 默认可省
 )
 
 GRPO_ARGS=(

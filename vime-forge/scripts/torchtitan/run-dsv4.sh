@@ -100,6 +100,17 @@ VLLM_ARGS=(
   --no-vllm-async-scheduling
   --vllm-load-format dummy
 )
+
+EVAL_ARGS=(
+   --eval-interval 20
+   # Datasets and their per-dataset graders live in the config, so eval can use
+   # `math` while training keeps its own --rm-type.
+   --eval-config "${REPO_ROOT}/scripts/configs/eval.yaml"
+   --eval-top-p 1
+)
+# The fully-async rollout raises in eval mode, so MODE=fully-async drops the group.
+gate_when EVAL_ON on EVAL_ARGS
+
 if [[ -n "${VLLM_CONFIG}" ]]; then
   # Group-specific DP values are read and applied by Vime for each instance.
   VLLM_ARGS+=(--vllm-config "${VLLM_CONFIG}")
@@ -163,7 +174,7 @@ REPRODUCIBILITY_ARGS=(
 
 TRAIN_ARGS=(
   "${PLACEMENT_ARGS[@]}" "${MODEL_ARGS[@]}" "${CKPT_ARGS[@]}" "${ROLLOUT_ARGS[@]}" "${VLLM_ARGS[@]}"
-  "${PERF_ARGS[@]}" "${TRAINING_ARGS[@]}" "${RECIPE_ARGS[@]}" "${GRPO_ARGS[@]}"
+  "${EVAL_ARGS[@]}" "${PERF_ARGS[@]}" "${TRAINING_ARGS[@]}" "${RECIPE_ARGS[@]}" "${GRPO_ARGS[@]}"
   "${MISC_ARGS[@]}" "${REPRODUCIBILITY_ARGS[@]}"
 )
 start_run

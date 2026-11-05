@@ -99,6 +99,7 @@ RT_ENV=(
    VLLM_ASCEND_NPUGRAPH_CAPTURE_LIMIT=512              # keeps rollout off the eager fallback
    ATB_MATMUL_SHUFFLE_K_ENABLE=0                       # vllm-ascend's official determinism recipe;
    ATB_LLM_LCOC_ENABLE=0                               #   always on, not gated by DET
+   VIME_DATA_ROOT="${VIME_DATA_ROOT}"                  # --eval-config resolves it via ${oc.env:...}
    PYTHONUNBUFFERED=1
    HYDRA_FULL_ERROR=1
    DISABLE_L2_CACHE=1
