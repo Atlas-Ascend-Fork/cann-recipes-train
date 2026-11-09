@@ -203,7 +203,7 @@ python vime-forge/tools/build_math500_eval_data.py \
 
 本流程保持训练与 rollout 分开分配资源，使用 `COLOCATE=off`。该变量控制训练与推理是否共卡；PD 开关由 `VLLM_CONFIG` 及其 YAML 内容决定。
 
-多机入口为 [run-dsv4-node-list.sh](scripts/torchtitan/run-dsv4-node-list.sh)。每台机器都运行该入口，`NODE_IP_LIST` 的第一个 IP 对应节点启动 Ray head 并提交训练，其余节点加入 Ray。脚本不会通过 SSH 自动启动其他机器。
+多机入口为 [run-dsv4-node-list.sh](../../vime-forge/scripts/torchtitan/run-dsv4-node-list.sh)。每台机器都运行该入口，`NODE_IP_LIST` 的第一个 IP 对应节点启动 Ray head 并提交训练，其余节点加入 Ray。脚本不会通过 SSH 自动启动其他机器。
 
 ### 4.2 节点、镜像与存储准备
 
@@ -275,7 +275,7 @@ export VLLM_CONFIG=""
 export VLLM_CONFIG="${HOME_PATH}/cann-recipes-train/vime-forge/scripts/configs/pd_dsv4_a5.yaml"
 ```
 
-以 [pd_dsv4_a5.yaml](scripts/configs/pd_dsv4_a5.yaml) 为模板，根据用户选定的资源修改配置；模板内的数值是示例，不是固定的节点数量要求。
+以 [pd_dsv4_a5.yaml](../../vime-forge/scripts/configs/pd_dsv4_a5.yaml) 为模板，根据用户选定的资源修改配置；模板内的数值是示例，不是固定的节点数量要求。
 
 | 配置项 | 调整要求 |
 |---|---|
@@ -365,7 +365,7 @@ bash scripts/torchtitan/run-dsv4-node-list.sh
 
 默认执行同步 GRPO 训练，共 30 个 rollout；每次采样 32 个 prompt，每个生成 8 个回复，`global-batch-size=256`。vLLM 使用 `dummy` 加载，首次 rollout 前由训练侧推送真实权重。
 
-`--num-rollout` 是整个任务的目标 rollout 数，恢复训练时也按该总数计算。修改 GRPO、采样及脚本显式传入的参数时编辑 `scripts/torchtitan/run-dsv4.sh`；修改节点、资源或 PD 模式时编辑 `scripts/torchtitan/run-dsv4-node-list.sh`。精度、梯度裁剪和优化器配置由 [config_registry.py](vime/backends/torchtitan_utils/models/deepseek_v4/config_registry.py) 中的 `_vime_rl_config()` 提供。开始新实验时修改 node-list 脚本中的 `RUN_NAME` 或指定新的 `--save` 目录，避免从已有 checkpoint 自动续训。
+`--num-rollout` 是整个任务的目标 rollout 数，恢复训练时也按该总数计算。修改 GRPO、采样及脚本显式传入的参数时编辑 `scripts/torchtitan/run-dsv4.sh`；修改节点、资源或 PD 模式时编辑 `scripts/torchtitan/run-dsv4-node-list.sh`。精度、梯度裁剪和优化器配置由 [config_registry.py](../../vime-forge/vime/backends/torchtitan_utils/models/deepseek_v4/config_registry.py) 中的 `_vime_rl_config()` 提供。开始新实验时修改 node-list 脚本中的 `RUN_NAME` 或指定新的 `--save` 目录，避免从已有 checkpoint 自动续训。
 
 下表列出当前 shell 启动脚本显式传入的参数。
 
