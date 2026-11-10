@@ -773,19 +773,21 @@ class TitanEngine:
         try:
             extension = getattr(self.config, "extension", None)
             train_quantization = getattr(extension, "quantization", None)
-            tensors = {
-                name: t
-                for name, t in get_hf_per_tensor(
-                    self.model_parts, self.sd_adapter, self.device,
-                    param_dtype=self.compute_dtype, parallel_dims=self.parallel_dims,
-                    train_quantization=train_quantization,
-                    model_type=self.config.model_spec.name,
-                )()
-            }
+            tensors = {}
+            for name, tensor in get_hf_per_tensor(
+                self.model_parts, self.sd_adapter, self.device,
+                param_dtype=self.compute_dtype, parallel_dims=self.parallel_dims,
+                train_quantization=train_quantization,
+                model_type=self.config.model_spec.name,
+            )():
+                # Drain collectives on every rank, but retain full weights only on rank 0's CPU.
+                if is_rank0:
+                    tensors[name] = tensor.detach().cpu().contiguous()
+                del tensor
             if is_rank0:
                 os.makedirs(path, exist_ok=True)
                 save_file(
-                    {k: v.contiguous().cpu() for k, v in tensors.items()},
+                    tensors,
                     os.path.join(path, "model.safetensors"),
                 )
                 self.hf_config.save_pretrained(path)

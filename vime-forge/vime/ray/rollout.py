@@ -66,6 +66,8 @@ class RolloutManager:
             self.custom_convert_samples_to_train_data_func = load_function(
                 self.args.custom_convert_samples_to_train_data_path
             )
+        path = self.args.custom_train_data_postprocess_path
+        self.train_data_postprocess = load_function(path) if path else None
         logger.info(f"import {self.args.rollout_function_path} as generate_rollout function.")
         logger.info(f"import {self.args.eval_function_path} as eval_generate_rollout function.")
 
@@ -204,8 +206,12 @@ class RolloutManager:
         if self.args.debug_rollout_only:
             # if debug rollout only, we don't convert samples to train data and directly return
             return
-        data = self._convert_samples_to_train_data(data)
-        return self._split_train_data_by_dp(data)
+        train_data = self._convert_samples_to_train_data(data)
+        refs = self._split_train_data_by_dp(train_data)
+        if self.train_data_postprocess is not None:
+            # Hooks may return pending refs; training waits when resolving them.
+            refs = self.train_data_postprocess(self.args, rollout_id, data, refs)
+        return refs
 
     def eval(self, rollout_id):
         if self.args.debug_train_only:

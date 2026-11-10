@@ -1437,6 +1437,17 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                     "The function should have the signature `def convert_samples_to_train_data(args, samples) -> dict`."
                 ),
             )
+            parser.add_argument(
+                "--custom-train-data-postprocess-path",
+                type=str,
+                default=None,
+                help=(
+                    "Optional hook after training-data conversion and DP partitioning. "
+                    "Signature: fn(args, rollout_id, samples, data_refs) -> list[Box]. "
+                    "Return one Box(ObjectRef[dict]) per DP rank in the same order. "
+                    "The hook may return pending refs to defer data readiness without delaying generation."
+                ),
+            )
             return parser
 
         def add_rollout_buffer_arguments(parser):

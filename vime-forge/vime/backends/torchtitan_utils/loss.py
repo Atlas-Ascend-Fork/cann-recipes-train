@@ -51,10 +51,8 @@ from vime.utils.precision_guard import collect_torchtitan as pg_titan  # precisi
 
 
 def _scale_logits_by_temperature(logits, temperature):
-    """Scale logits by temperature when rollout_temperature != 1.0, so training reads the same
-    distribution sampling drew from. Callers cast to float32 first, so the division does not
-    round in the compute dtype."""
-    assert logits.dtype == torch.float32, f"{logits.dtype}"
+    """Prepare FP32 probability logits, then optionally apply rollout temperature."""
+    logits = logits.float()
     if temperature is not None and float(temperature) != 1.0:
         return logits.div(float(temperature))
     return logits
@@ -164,7 +162,7 @@ def _chunked_log_probs(logits, tokens, chunk_size, operation):
     if logits.size(0) != tokens.numel():
         raise ValueError("logits and labels must have identical token counts")
     if logits.size(0) == 0:
-        return logits.new_empty((0,))
+        return logits.new_empty((0,), dtype=torch.float32)
     if chunk_size is None or chunk_size <= 0 or chunk_size >= logits.size(0):
         return operation(logits, tokens)
     logits_chunks = logits.split(chunk_size, dim=0)
@@ -181,7 +179,7 @@ def _chunked_log_probs(logits, tokens, chunk_size, operation):
 def _chunked_entropy(logits, chunk_size, operation):
     """Apply a token-wise entropy operation without changing the vocab partition."""
     if logits.size(0) == 0:
-        return logits.new_empty((0,))
+        return logits.new_empty((0,), dtype=torch.float32)
     if chunk_size is None or chunk_size <= 0 or chunk_size >= logits.size(0):
         return operation(logits)
     return torch.cat([operation(chunk) for chunk in logits.split(chunk_size, dim=0)], dim=0)
@@ -192,7 +190,7 @@ def _chunked_log_probs_and_entropy(logits, tokens, chunk_size, operation):
     if logits.size(0) != tokens.numel():
         raise ValueError("logits and labels must have identical token counts")
     if logits.size(0) == 0:
-        empty = logits.new_empty((0,))
+        empty = logits.new_empty((0,), dtype=torch.float32)
         return empty, empty
     if chunk_size is None or chunk_size <= 0 or chunk_size >= logits.size(0):
         return operation(logits, tokens)
@@ -275,23 +273,28 @@ def extract_packed_response_logprobs(
     """
     cu = cu_seqlens.tolist()
     out = []
+    # Slice response rows and token chunks before allocating FP32 temporaries.
     if vocab_parallel:
-        local = _to_local_logits(logits)
-        local = _packed_logits_2d(_scale_logits_by_temperature(local.float(), temperature))
+        local = _packed_logits_2d(_to_local_logits(logits))
         for rows, tokens in _extract_response_rows(
             local, packed_ids, cu, total_lengths, response_lengths, cp_response_index_spans
         ):
             out.append(_chunked_log_probs(
                 rows, tokens, chunk_size,
-                lambda a, b: _vocab_parallel_log_probs(a, b, tp_group),
+                lambda a, b: _vocab_parallel_log_probs(
+                    _scale_logits_by_temperature(a, temperature), b, tp_group
+                ),
             ))
         return out
 
-    logits = _packed_logits_2d(_scale_logits_by_temperature(logits.float(), temperature))
+    logits = _packed_logits_2d(logits)
     for rows, tokens in _extract_response_rows(
         logits, packed_ids, cu, total_lengths, response_lengths, cp_response_index_spans
     ):
-        out.append(_chunked_log_probs(rows, tokens, chunk_size, _dense_log_probs))
+        out.append(_chunked_log_probs(
+            rows, tokens, chunk_size,
+            lambda a, b: _dense_log_probs(_scale_logits_by_temperature(a, temperature), b),
+        ))
     return out
 
 
@@ -312,21 +315,26 @@ def extract_packed_response_entropy(
     cu = cu_seqlens.tolist()
     out = []
     if vocab_parallel:
-        local = _packed_logits_2d(_scale_logits_by_temperature(_to_local_logits(logits).float(), temperature))
+        local = _packed_logits_2d(_to_local_logits(logits))
         for rows, _ in _extract_response_rows(
             local, None, cu, total_lengths, response_lengths, cp_response_index_spans
         ):
             out.append(_chunked_entropy(
                 rows, chunk_size,
-                lambda chunk: compute_entropy_from_logits(chunk, tp_group),
+                lambda chunk: compute_entropy_from_logits(
+                    _scale_logits_by_temperature(chunk, temperature), tp_group
+                ),
             ))
         return out
 
-    logits = _packed_logits_2d(_scale_logits_by_temperature(logits.float(), temperature))
+    logits = _packed_logits_2d(logits)
     for rows, _ in _extract_response_rows(
         logits, None, cu, total_lengths, response_lengths, cp_response_index_spans
     ):
-        out.append(_chunked_entropy(rows, chunk_size, _dense_entropy))
+        out.append(_chunked_entropy(
+            rows, chunk_size,
+            lambda chunk: _dense_entropy(_scale_logits_by_temperature(chunk, temperature)),
+        ))
     return out
 
 
@@ -344,19 +352,20 @@ def extract_packed_response_logprobs_and_entropy(
 ):
     """Both packed response outputs in one token-chunk traversal. Same layouts as
     extract_packed_response_logprobs: logits [T,V] or [1,T,V], packed_ids flat [T]."""
-    logits = (
-        _scale_logits_by_temperature(_to_local_logits(logits).float(), temperature)
-        if vocab_parallel
-        else _scale_logits_by_temperature(logits.float(), temperature)
-    )
-    logits = _packed_logits_2d(logits)
+    logits = _packed_logits_2d(_to_local_logits(logits) if vocab_parallel else logits)
     log_probs = []
     entropies = []
     if vocab_parallel:
         def op(a, b):
-            return _vocab_parallel_log_probs_and_entropy(a, b, tp_group)
+            return _vocab_parallel_log_probs_and_entropy(
+                _scale_logits_by_temperature(a, temperature), b, tp_group
+            )
+
     else:
-        op = _dense_log_probs_and_entropy
+
+        def op(a, b):
+            return _dense_log_probs_and_entropy(_scale_logits_by_temperature(a, temperature), b)
+
     for rows, tokens in _extract_response_rows(logits, packed_ids, cu_seqlens.tolist(), total_lengths, response_lengths, cp_response_index_spans):
         lp, ent = _chunked_log_probs_and_entropy(rows, tokens, chunk_size, op)
         log_probs.append(lp)

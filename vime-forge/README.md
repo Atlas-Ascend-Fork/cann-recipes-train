@@ -24,6 +24,7 @@
   - [支持的模型与硬件](#支持的模型与硬件)
   - [架构总览](#架构总览)
   - [快速开始](#快速开始)
+    - [单轮 AscendC 算子生成](#单轮-ascendc-算子生成)
     - [Agentic RL 示例](#agentic-rl-示例)
   - [参数说明](#参数说明)
   - [代码阅读路径](#代码阅读路径)
@@ -53,6 +54,10 @@
 ## 快速开始
 
 有关训练启动、配置覆盖与日志排障，请参考 [torchtitan 启动器](scripts/torchtitan/README.md)。训练后端的运行模式、配置和数据处理流程请参考 [torchtitan 训练后端](docs/torchtitan-backend.md)。
+
+### 单轮 AscendC 算子生成
+
+[`examples/cann_bench_single_turn`](examples/cann_bench_single_turn/README.md) 提供 Qwen3.5-4B/9B、Qwen3.6-27B 的 TorchTitan NPU 启动配置，使用原生单轮生成和 online reward 接入 CANN-Bench v1 评测。数据准备、运行步骤及各模型的验证边界见样例文档；不依赖 agent 沙箱。独立的 [评测客户端](examples/cann_bench_evaluator/README.md) 可供其他任务复用。
 
 ### Agentic RL 示例
 

@@ -15,7 +15,7 @@
 """Dense text-only Qwen3.5 recipes for the prepared NPU stack and Ascend CP.
 
 ``vime_qwen35_4b`` and ``vime_qwen35_9b`` retain the prepared CP=1 setup.
-``vime_qwen35_4b_cp`` selects the Ascend CP kernels, defaulting to CP=4.
+The 4B, 9B and 27B CP recipes select the Ascend CP kernels, defaulting to CP=4.
 """
 
 from dataclasses import replace
@@ -43,7 +43,7 @@ def _parallelize_text(model, **kwargs):
 def _parallelize_text_cp(model, **kwargs):
     parallel_dims = kwargs["parallel_dims"]
     if not parallel_dims.cp_enabled:
-        raise ValueError("The Qwen3.5 CP recipe requires CP>1; use vime_qwen35_4b for CP=1.")
+        raise ValueError("The Qwen3.5 CP recipe requires CP>1; use a non-CP recipe for CP=1.")
     if parallel_dims.tp != 1 or parallel_dims.dp_replicate != 1:
         raise ValueError(
             "Qwen3.5 Ascend CP requires tensor_parallel_degree=1 and "
@@ -122,3 +122,13 @@ def vime_qwen35_9b() -> Trainer.Config:
 def vime_qwen35_4b_cp() -> Trainer.Config:
     """Dense 4B with Ascend CP kernels, tied embeddings, and CP=4 by default."""
     return _qwen35_config("4B", tie_word_embeddings=True, context_parallel=True)
+
+
+def vime_qwen35_9b_cp() -> Trainer.Config:
+    """Dense 9B with Ascend CP kernels, separate embeddings, and CP=4 by default."""
+    return _qwen35_config("9B", tie_word_embeddings=False, context_parallel=True)
+
+
+def vime_qwen36_27b_cp() -> Trainer.Config:
+    """Dense Qwen3.6-27B text training with Ascend CP and separate embeddings."""
+    return _qwen35_config("27B", tie_word_embeddings=False, context_parallel=True)

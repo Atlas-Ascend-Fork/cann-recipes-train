@@ -219,6 +219,8 @@ def _build_inference_sampling_params(sampling_params: dict[str, Any]) -> dict[st
         "top_p": sampling_params["top_p"],
         "logprobs": 1,
     }
+    if sampling_params.get("thinking_token_budget") is not None:
+        sp["thinking_token_budget"] = int(sampling_params["thinking_token_budget"])
     tk = sampling_params.get("top_k")
     if tk is not None and (tk > 0 or tk == -1):
         sp["top_k"] = tk
