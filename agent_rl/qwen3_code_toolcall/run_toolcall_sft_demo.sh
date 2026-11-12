@@ -1,3 +1,4 @@
+#!/bin/bash
 # Adapted from
 # https://github.com/volcengine/verl/blob/v0.6.0/recipe/retool/run_qwen2_7b_sft_npu.sh
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
@@ -14,7 +15,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-#!/bin/bash
 
 export ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
