@@ -60,9 +60,10 @@ def _open_parquet(file: Path, idx: int, total: int):
 
 
 def _process_files(files, fout, batch_size, max_rows, pbar):
-    """Convert all parquet files into JSONL. Returns (total_rows, skipped)."""
+    """Convert all parquet files into JSONL. Returns (total_rows, skipped, processed)."""
     total_rows = 0
     skipped = 0
+    processed = 0
     for idx, file in enumerate(files, 1):
         pf = _open_parquet(file, idx, len(files))
         if pf is None:
@@ -71,9 +72,10 @@ def _process_files(files, fout, batch_size, max_rows, pbar):
         pbar.set_postfix_str(f"{idx}/{len(files)} {file.name}")
         remaining = None if max_rows is None else max_rows - total_rows
         total_rows += _convert_file(pf, fout, batch_size, remaining, pbar)
+        processed += 1
         if max_rows is not None and total_rows >= max_rows:
             break
-    return total_rows, skipped
+    return total_rows, skipped, processed
 
 
 def _report_summary(output_path: str, total_rows: int, files_done: int, skipped: int):
@@ -115,13 +117,13 @@ def parquet_to_json(
     pbar = tqdm(total=max_rows, unit="row", desc="Converting", dynamic_ncols=True)
     try:
         with open(output_path, "w", encoding="utf-8") as fout:
-            total_rows, skipped = _process_files(
+            total_rows, skipped, processed = _process_files(
                 files, fout, batch_size, max_rows, pbar
             )
     finally:
         pbar.close()
 
-    _report_summary(output_path, total_rows, len(files) - skipped, skipped)
+    _report_summary(output_path, total_rows, processed, skipped)
 
 
 if __name__ == "__main__":
