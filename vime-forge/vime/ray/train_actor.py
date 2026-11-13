@@ -59,10 +59,24 @@ class TrainRayActor(RayActor):
         torch.serialization.add_safe_globals([vime.utils.eval_config.EvalDatasetConfig])
 
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        if accelerator.device_type() == "npu":
-            accelerator.set_device(local_rank)
-        else:
-            accelerator.set_device(local_rank)
+        accelerator.set_device(local_rank)
+
+        if accelerator.device_type() == "npu" and getattr(args, "rl_batch_invariant", False):
+            import torch_npu
+
+            # HCCL caches its deterministic mode on first use. Configure
+            # every training rank before creating WORLD or mesh groups.
+            for name, value in (
+                ("HCCL_DETERMINISTIC", "strict"),
+                ("LCCL_DETERMINISTIC", "1"),
+                ("CLOSE_MATMUL_K_SHIFT", "1"),
+            ):
+                existing = os.environ.get(name)
+                if existing is None or existing.lower() != value:
+                    logger.warning("deterministic training: overriding %s=%r -> %r", name, existing, value)
+                os.environ[name] = value
+            torch_npu.npu.set_deterministic_level(3)
+
         if accelerator.device_type() != "npu" and accelerator.set_allocator_expandable_segments():
             logger.info(
                 f"[Rank {self._rank}] Enabled {accelerator.device_type().upper()} memory allocator "

@@ -214,21 +214,11 @@ class TitanEngine:
             # Activation-checkpoint backward needs the thread-local SPMD mesh.
             torch.autograd.set_multithreading_enabled(False)
         config.maybe_log()
-        # torchtitan's determinism setup may rewrite this value. Restore the launcher value
-        # because rollout workers use ``strict`` and a mismatch can deadlock weight sync.
-        hccl_deterministic = os.environ.get("HCCL_DETERMINISTIC")
+        # Communication determinism is configured before process-group init
+        # in TrainRayActor. Keep TorchTitan's mesh-aware seed setup here.
         dist_utils.set_determinism(
             pd, self.device, config.debug, distinct_seed_mesh_dims=["pp"]
         )
-        if hccl_deterministic is not None:
-            os.environ["HCCL_DETERMINISTIC"] = hccl_deterministic
-        if bool(getattr(args, "rl_batch_invariant", False)):
-            os.environ["HCCL_DETERMINISTIC"] = "strict"
-            os.environ["LCCL_DETERMINISTIC"] = "1"
-            if getattr(self.device, "type", None) == "npu":
-                import torch_npu
-
-                torch_npu.npu.set_deterministic_level(3)
 
         model_config = model_spec.model
         model_config.update_from_config(config=config)

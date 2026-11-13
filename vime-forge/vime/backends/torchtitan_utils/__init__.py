@@ -20,6 +20,13 @@ if accelerator.is_available() and accelerator.device_type() == "npu":
     # torchtitan_npu first: it loads torch_npu._inductor, which calls get_gpu_type.cache_clear(),
     # and transfer_to_npu replaces that function with an uncached one.
     import torchtitan_npu  # noqa: F401
+    import torch
+    from torchtitan_npu.patches.torch_npu.determinism import original_use_deterministic_algorithms
+
+    # VIME owns the deterministic environment. The TorchTitan-NPU wrapper
+    # replaces HCCL strict with true before HCCL may cache its configuration.
+    torch.use_deterministic_algorithms = original_use_deterministic_algorithms
+
     from torch._dynamo import trace_rules
     from torch_npu.contrib import transfer_to_npu  # noqa: F401
 
