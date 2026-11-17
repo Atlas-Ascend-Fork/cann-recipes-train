@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import sys
+from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
 
 from verl_patches.tools import insert_patch
 from megatron.core.transformer import TransformerConfig
