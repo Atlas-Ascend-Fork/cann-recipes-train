@@ -18,14 +18,45 @@
 
 import os
 import sys
+import random
 import logging
 import omegaconf
+import numpy as np
 import torch
+import torch_npu
 
 from verl_patches.train_engine.megatron_config import MegatronConfig
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def seed_all(seed=1234):
+    """Make an NPU run deterministic.
+
+    Adapted from ``mindspeed_rl.utils.seed_all`` (MindSpeed-RL 2.1.0,
+    ``mindspeed_rl/utils/utils.py``). The upstream ``cli/train_grpo.py`` this file is
+    adapted from imports it from that package, but this sample's environment ships
+    MindSpeed and MindSpeed-LLM rather than MindSpeed-RL (see the sample Dockerfile),
+    so the behaviour lives here instead of importing an absent package.
+
+    Seeding the three PRNGs is not enough for the ``use_deter_comp`` path: the ATB and
+    HCCL variables below are what make Ascend operator and collective ordering
+    reproducible, which is what the caller's log line announces.
+    """
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    os.environ['HCCL_DETERMINISTIC'] = str(True)
+    os.environ['LCCL_DETERMINISTIC'] = str(1)
+    os.environ['CLOSE_MATMUL_K_SHIFT'] = str(1)
+    os.environ['ATB_MATMUL_SHUFFLE_K_ENABLE'] = "0"
+    os.environ['ATB_LLM_LCOC_ENABLE'] = "0"
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.use_deterministic_algorithms(True)
+
+    torch_npu.npu.manual_seed_all(seed)
+    torch_npu.npu.manual_seed(seed)
 
 
 def parse_args_from_config(config):
