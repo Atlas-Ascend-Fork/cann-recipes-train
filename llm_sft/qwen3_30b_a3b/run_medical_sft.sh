@@ -18,7 +18,7 @@ set -e
 
 NGPU=${NGPU:-16}
 MODULE=${MODULE:-torchtitan_npu.models.qwen3}
-CONFIG=${CONFIG:-sft_qwen3_30ba3b_medical}
+CONFIG=${CONFIG:-sft_qwen3_30ba3b_medical_tnd}
 TRAIN_DATA=${TRAIN_DATA:-./assets/medical_r1/train.jsonl}
 MODEL_DIR=${MODEL_DIR:-./assets/hf/Qwen3-30B-A3B}
 LOG_RANK=${LOG_RANK:-0}
