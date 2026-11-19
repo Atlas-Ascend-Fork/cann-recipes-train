@@ -598,7 +598,7 @@ Dry-run 输出 JSON，其中 `command` 是完整的 Python 入口和训练参数
 | Reward / loss | GRPO 路径，reward normalization 关闭；使用有效 token 加权的 loss |
 | 推理 | prefix cache 开启，`FULL_DECODE_ONLY` 图模式；`--no-vllm-async-scheduling` 不会关闭训练侧的异步流水线 |
 | 保存 | 每 6 次更新保存，保留最近 2 个 TorchTitan checkpoint；`SWE_SAVE_INTERVAL=off` 关闭保存 |
-| Rollout dump / tracing | `SWE_DUMP_MODE=rollout`；详细 tracing 关闭。Dump 仍会占用磁盘，可设 `off` 关闭 |
+| Rollout dump | 本脚本默认通过 `--save-debug-rollout-data` 保存 Sample、trace 和 metadata；`SWE_DUMP_MODE=off` 关闭本脚本的 dump |
 
 若只有 12 个可用 dies，可保留训练 TP=4、DP=2，设置 `SWE_ROLLOUT_GPUS=4` 并列出 12 个空闲物理 IDs；这仍需满足实际模型的显存需求。仅改变可见设备列表不会自动缩小训练或 rollout 的分配。
 
@@ -641,6 +641,22 @@ bash examples/coding_agent_rl/run-qwen35-4B-swegym-torchtitan.sh
 | `tensorboard/` | TensorBoard 日志 |
 | `rollout_dumps/<rollout_id>.pt` | 开启 dump 时保存的 rollout 样本及 metadata |
 | `checkpoints/` | 开启保存时写入的 checkpoint |
+
+使用其他训练入口时，在训练命令中添加 `--save-debug-rollout-data '/path/to/debug/rollout_{rollout_id}.pt'`
+即可保存相同的数据。对本脚本默认保存的 dump，可以使用时间线查看器：
+
+```bash
+python tools/trace_timeline_viewer.py \
+  outputs/${RUN_NAME}/rollout_dumps/0.pt
+```
+
+命令会在 dump 所在目录生成 `*.trace_timeline_cache.json` 和
+`*.trace_timeline_viewer.html`，并默认启动本地 HTTP 服务。在浏览器访问终端打印的地址，
+可以按 Sample 查看 span 和瞬时事件；条形块表示阶段耗时，点表示瞬时事件。
+`--no-serve` 仅生成文件，查看时需通过 HTTP 服务加载页面及旁边的 JSON 缓存。
+
+观测开关和 Agent 阶段事件说明见
+[Agent rollout trace 使用说明](../../docs/agentic-observability.md)。
 
 依次确认 vLLM worker 注册、Agent sandbox 执行、verifier reward、`train metrics @ rollout_id=...` 和 `Timer update_weights end`。HTTP 200 或 rollout 完成不等于已经完成训练更新。Reward=0 本身不是运行错误；当前关闭 reward normalization，整批 reward=0 时可能出现 `loss=0`、`grad_norm=0`。非零 `agent_exit_code` 则应结合 Agent 结束原因和 verifier 结果另行检查。
 

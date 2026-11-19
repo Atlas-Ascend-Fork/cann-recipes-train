@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Build and serve an interactive timeline viewer for rollout trace dumps.
 
-The viewer consumes a rollout debug dump `.pt` file, extracts per-sample trace
-events, rebuilds spans and point events, and writes a lightweight JSON cache
+The viewer consumes a rollout debug dump `.pt` or trace-only `.jsonl` file, extracts one trace per trial,
+rebuilds spans and point events, and writes a lightweight JSON cache
 plus a self-contained HTML viewer next to the source file.
 """
 
@@ -23,8 +23,7 @@ from typing import Any
 
 import torch
 
-
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 
 
 class _MissingPickleObject:
@@ -127,6 +126,7 @@ def _to_sample_dict(sample: Any) -> dict[str, Any]:
     for key in (
         "group_index",
         "index",
+        "rollout_id",
         "prompt",
         "response",
         "response_length",
@@ -153,6 +153,16 @@ def _infer_source(sample: dict[str, Any], metadata: dict[str, Any]) -> Any:
         if "source" in str(key).lower() and value not in (None, ""):
             return value
     return None
+
+
+def _trial_key(sample: dict[str, Any], sample_idx: int) -> tuple[str, str | int]:
+    trace = sample.get("trace")
+    if isinstance(trace, dict) and trace.get("trace_id") is not None:
+        return ("trace", str(trace["trace_id"]))
+    rollout_id = sample.get("rollout_id")
+    if rollout_id is not None:
+        return ("rollout", rollout_id)
+    return ("row", sample_idx)
 
 
 def _event_timestamp(event: dict[str, Any]) -> float | None:
@@ -544,15 +554,22 @@ def _build_items_from_trace(sample: dict[str, Any], sample_idx: int) -> dict[str
     if isinstance(reward, dict):
         reward = _json_safe(reward)
 
+    rollout_id = _json_safe(sample.get("rollout_id"))
+    trace_id = _json_safe(trace.get("trace_id"))
+    trial_id = trace_id if trace_id is not None else rollout_id
+    if trial_id is None:
+        trial_id = sample_idx
+
     return {
         "row_id": sample_idx,
-        "sample_index": sample.get("index", sample_idx),
+        "trial_id": trial_id,
+        "rollout_id": rollout_id,
         "group_index": sample.get("group_index"),
         "source": _compact_text(_infer_source(sample, metadata), max_len=64),
         "status": _compact_text(sample.get("status"), max_len=64),
         "label": _compact_text(sample.get("label"), max_len=256),
         "reward": reward,
-        "trace_id": _json_safe(trace.get("trace_id")),
+        "trace_id": trace_id,
         "attempt": int(trace.get("attempt", 0) or 0),
         "start": row_start,
         "end": row_end,
@@ -571,12 +588,16 @@ def _build_items_from_trace(sample: dict[str, Any], sample_idx: int) -> dict[str
 
 def _build_cache_data(pt_path: Path) -> dict[str, Any]:
     before_missing = len(_MISSING_PICKLE_GLOBALS)
-    data = torch.load(
-        pt_path,
-        map_location="cpu",
-        weights_only=False,
-        pickle_module=_DUMMY_FALLBACK_PICKLE_MODULE,
-    )
+    if pt_path.suffix == ".jsonl":
+        with pt_path.open() as stream:
+            data = [json.loads(line) for line in stream if line.strip()]
+    else:
+        data = torch.load(
+            pt_path,
+            map_location="cpu",
+            weights_only=False,
+            pickle_module=_DUMMY_FALLBACK_PICKLE_MODULE,
+        )
     if len(_MISSING_PICKLE_GLOBALS) > before_missing:
         missing_names = ", ".join(f"{module}.{name}" for module, name in sorted(_MISSING_PICKLE_GLOBALS))
         print(
@@ -585,13 +606,23 @@ def _build_cache_data(pt_path: Path) -> dict[str, Any]:
         )
     samples = data["samples"] if isinstance(data, dict) and "samples" in data else data
 
+    representatives: dict[tuple[str, str | int], dict[str, Any]] = {}
+    for sample_idx, raw_sample in enumerate(samples):
+        sample = _to_sample_dict(raw_sample)
+        key = _trial_key(sample, sample_idx)
+        current = representatives.get(key)
+        if current is None or (
+            not (current.get("trace") or {}).get("events")
+            and (sample.get("trace") or {}).get("events")
+        ):
+            representatives[key] = sample
+
     rows: list[dict[str, Any]] = []
     global_start = None
     global_end = None
 
-    for sample_idx, raw_sample in enumerate(samples):
-        sample = _to_sample_dict(raw_sample)
-        row = _build_items_from_trace(sample, sample_idx)
+    for trial_idx, sample in enumerate(representatives.values()):
+        row = _build_items_from_trace(sample, trial_idx)
         if row is None:
             continue
         rows.append(row)
@@ -602,7 +633,7 @@ def _build_cache_data(pt_path: Path) -> dict[str, Any]:
         "cache_version": CACHE_VERSION,
         "pt_path": str(pt_path),
         "generated_at": time.time(),
-        "sample_count": len(rows),
+        "trial_count": len(rows),
         "global_start": _round_float(global_start),
         "global_end": _round_float(global_end),
         "rows": rows,
@@ -872,7 +903,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       </div>
       <div class="controls-extra" id="controlsExtra">
         <div class="row">
-          <label>Filter <input id="filterText" type="text" placeholder="sample id / source / status / trace"></label>
+          <label>Filter <input id="filterText" type="text" placeholder="trial id / source / status / trace"></label>
           <label>Attempt
             <select id="attemptValue">
               <option value="all">all attempt segments</option>
@@ -1044,16 +1075,18 @@ HTML_TEMPLATE = r"""<!doctype html>
     }
 
     function rowLabelParts(row) {
-      const sampleId = row.sample_index ?? row.row_id;
+      const traceId = row.trace_id ?? 'n/a';
+      const compactTraceId = `${traceId}`.slice(0, 8);
+      const rolloutId = row.rollout_id ?? 'n/a';
       const expandMark = rowExpanded(row) ? '▾' : '▸';
-      return `${expandMark} #${sampleId} | ${row.source ?? 'unknown'}`;
+      return `${expandMark} trace=${compactTraceId} r${rolloutId} | ${row.source ?? 'unknown'}`;
     }
 
     function rowSummaryItem(row) {
       const attempts = [...new Set((row.items || []).map(item => item.attempt).filter(v => v != null))].sort((a, b) => a - b);
       return {
         type: 'row_summary',
-        name: 'sample summary',
+        name: 'trial summary',
         attempt: attempts.length > 1 ? attempts.join(',') : (attempts[0] ?? 'n/a'),
         attrs: {
           duration: niceDuration(row.duration ?? 0),
@@ -1062,19 +1095,21 @@ HTML_TEMPLATE = r"""<!doctype html>
           status: row.status ?? 'unknown',
           label: row.label ?? 'n/a',
           trace_id: row.trace_id ?? 'n/a',
+          rollout_id: row.rollout_id ?? 'n/a',
         },
       };
     }
 
-    function sampleMatches(row, filterText) {
+    function trialMatches(row, filterText) {
       if (!filterText) return true;
       const haystack = [
-        row.sample_index,
+        row.trial_id,
         row.row_id,
         row.source,
         row.status,
         row.label,
         row.trace_id,
+        row.rollout_id,
       ].map(v => `${v ?? ''}`.toLowerCase()).join(' ');
       return haystack.includes(filterText.toLowerCase());
     }
@@ -1269,7 +1304,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       const filterText = document.getElementById('filterText').value.trim();
       const sortMode = document.getElementById('sortMode').value;
       const sortDesc = document.getElementById('sortDesc').checked;
-      state.rows = state.rawRows.filter(row => sampleMatches(row, filterText));
+      state.rows = state.rawRows.filter(row => trialMatches(row, filterText));
       if (currentAttemptMode() === 'filter') {
         state.rows = state.rows.filter(row => rowHasMatchingAttempt(row));
       }
@@ -1364,7 +1399,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       ctx.fillStyle = '#6f675d';
       ctx.font = '12px IBM Plex Sans, sans-serif';
       ctx.textBaseline = 'top';
-      ctx.fillText('sample', 12, 10);
+      ctx.fillText('trial', 12, 10);
       const range = state.viewEnd - state.viewStart;
       const targetTicks = 8;
       const rawStep = range / targetTicks;
@@ -1847,7 +1882,9 @@ HTML_TEMPLATE = r"""<!doctype html>
 
     function itemTooltipLines(row, item) {
       const lines = [
-        `sample: ${row.sample_index ?? row.row_id}`,
+        `trial: ${row.trial_id ?? row.row_id}`,
+        `trace_id: ${row.trace_id ?? 'n/a'}`,
+        `rollout_id: ${row.rollout_id ?? 'n/a'}`,
         `source: ${row.source ?? 'unknown'}`,
         `name: ${item.name}`,
         `attempt: ${item.attempt}`,
@@ -2037,7 +2074,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       document.getElementById('cursorText').textContent =
         `cursor: ${niceDuration(cursorTime - state.globalStart)}`;
       const lifecycleItems = [
-        { name: 'total samples', value: lifecycleStats.rows, kind: 'lifecycle' },
+        { name: 'total trials', value: lifecycleStats.rows, kind: 'lifecycle' },
         { name: 'not started', value: lifecycleStats.notStarted, kind: 'lifecycle' },
         { name: 'running', value: lifecycleStats.running, kind: 'lifecycle' },
         { name: 'ended', value: lifecycleStats.ended, kind: 'lifecycle' },
@@ -2344,7 +2381,7 @@ def serve_directory(directory: Path, port: int) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("pt_path", help="Path to rollout debug dump .pt file")
+    parser.add_argument("pt_path", help="Path to rollout debug dump .pt or trace-only .jsonl file")
     parser.add_argument("--rebuild", action="store_true", help="Rebuild cache even if it already exists")
     parser.add_argument(
         "--serve",
@@ -2360,7 +2397,7 @@ def main() -> None:
     args = parse_args()
     pt_path = Path(args.pt_path).expanduser().resolve()
     if not pt_path.exists():
-        raise SystemExit(f"pt file not found: {pt_path}")
+        raise SystemExit(f"trace file not found: {pt_path}")
 
     paths = _timeline_paths(pt_path)
     cache_data = ensure_cache(paths, rebuild=args.rebuild)
@@ -2369,7 +2406,7 @@ def main() -> None:
     print(f"pt: {paths.pt_path}")
     print(f"cache: {paths.cache_path}")
     print(f"html: {paths.html_path}")
-    print(f"samples: {cache_data['sample_count']}")
+    print(f"trials: {cache_data['trial_count']}")
 
     if args.serve:
         serve_directory(paths.html_path.parent, args.port)

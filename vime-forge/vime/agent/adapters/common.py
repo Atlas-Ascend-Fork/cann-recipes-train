@@ -17,6 +17,7 @@ import dataclasses
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import nullcontext
 from typing import Any
 
 import aiohttp
@@ -25,6 +26,13 @@ from aiohttp import web
 from vime.agent.model_profile import ModelProfile
 from vime.agent.parsing import parse_model_output
 from vime.agent.trajectory import TrajectoryManager, TurnRecord
+from vime.observability.trace_utils import (
+    TraceHandle,
+    bind_trace_carrier,
+    build_vllm_meta_trace_attrs,
+    trace_event,
+    trace_span,
+)
 
 
 __all__ = ["ProvidedTurn", "TurnRecord"]
@@ -39,8 +47,11 @@ class Session:
     """
 
     sampling_defaults: dict = dataclasses.field(default_factory=dict)
+    # Context budget used both to reject an overlong incoming prompt and to
+    # report any final trajectory tokens clipped during Sample construction.
     max_context_tokens: int = 0
     main_agent_identity: str | None = None
+    trace: TraceHandle | None = None
 
 
 @dataclasses.dataclass
@@ -228,9 +239,6 @@ class BaseAdapter:
     ) -> None:
         """Observe a completion after it has been recorded in the trajectory."""
 
-    def _finalize_turn_dispositions(self, sid: str) -> None:
-        """Resolve pending protocol decisions before exporting samples."""
-
     def _clear_turn_dispositions(self, sid: str) -> None:
         """Discard protocol state when a session is dropped."""
 
@@ -333,6 +341,10 @@ class BaseAdapter:
             await asyncio.gather(generation_task, return_exceptions=True)
             raise
 
+    @staticmethod
+    def _finalize_turn_dispositions(sid: str, *, trace: TraceHandle | None = None) -> None:
+        """Resolve pending protocol decisions before exporting samples."""
+
     # -- session lifecycle ---------------------------------------------------
 
     def open_session(
@@ -341,6 +353,7 @@ class BaseAdapter:
         *,
         sampling_defaults: dict | None = None,
         max_context_tokens: int = 0,
+        trace: TraceHandle | None = None,
     ) -> None:
         """Register a fresh per-sid Session; sids must be unique."""
         if sid in self.store:
@@ -348,6 +361,7 @@ class BaseAdapter:
         self.store[sid] = Session(
             sampling_defaults=dict(sampling_defaults or {}),
             max_context_tokens=int(max_context_tokens or 0),
+            trace=trace,
         )
 
     async def shutdown_session(self, sid: str, *, wait_timeout: float = 5.0) -> None:
@@ -389,13 +403,19 @@ class BaseAdapter:
         await self.shutdown_session(sid, wait_timeout=wait_timeout)
         session = self.store.pop(sid, None)
         max_sample_tokens = int(getattr(session, "max_context_tokens", 0) or 0) if session is not None else 0
-        self._finalize_turn_dispositions(sid)
+        trace = (
+            bind_trace_carrier(session.trace.carrier)
+            if session is not None and session.trace is not None
+            else None
+        )
+        self._finalize_turn_dispositions(sid, trace=trace)
         samples = self.manager.get_trajectory(
             sid,
             base_sample=base_sample,
             reward=reward,
             extra_metadata=extra_metadata,
             max_sample_tokens=max_sample_tokens,
+            trace=trace,
         )
         for s in samples:
             rlen = int(s.response_length or 0)
@@ -455,6 +475,12 @@ class BaseAdapter:
         body = await request.json()
         self._preprocess_body(body)
         sid = self._session_id(request, body)
+        session = self.store.get(sid)
+        trace = getattr(session, "trace", None)
+        with trace_span(trace, "agent_model_turn", record_error=False) if trace else nullcontext():
+            return await self._handle_turn(request, body, sid)
+
+    async def _handle_turn(self, request: web.Request, body: dict, sid: str) -> web.StreamResponse:
         if sid in self.closed:  # session drained; refuse stragglers
             self.logger.debug("[%s] sid=%s request after session closed", self.log_prefix, sid)
             return web.Response(status=503, text="session closed")
@@ -477,15 +503,16 @@ class BaseAdapter:
         t0 = time.monotonic()
         prepared_stream = None
         try:
-            translated, tools_schema = self._translate(body)
-            prompt_ids = _render_token_ids(
-                translated,
-                tok,
-                tools=tools_schema,
-                add_generation_prompt=True,
-                chat_template_kwargs=self.model_profile.chat_template_kwargs,
-            )
-
+            target = bind_trace_carrier(s.trace.carrier) if s.trace else None
+            with trace_span(target, "agent_tokenize", record_error=False) if target else nullcontext():
+                translated, tools_schema = self._translate(body)
+                prompt_ids = _render_token_ids(
+                    translated,
+                    tok,
+                    tools=tools_schema,
+                    add_generation_prompt=True,
+                    chat_template_kwargs=self.model_profile.chat_template_kwargs,
+                )
             context_limit = int(s.max_context_tokens or 0)
             # vLLM handles exhausted context with an empty length-limited turn.
             if self.turn_provider is not None and context_limit > 0 and len(prompt_ids) >= context_limit:
@@ -595,21 +622,29 @@ class BaseAdapter:
             )
 
             prior_turn_count = self.manager.turn_count(sid)
+            event_trace = bind_trace_carrier(s.trace.carrier) if s.trace else None
             self.manager.record_turn(
                 sid,
                 turn=turn,
                 prompt_messages=translated,
                 response_message=reply.manager_message,
                 metadata={"sid": sid, **turn_metadata},
+                trace=event_trace,
             )
             turn_index = self.manager.turn_count(sid)
             if turn_index > prior_turn_count:
                 self._on_turn_recorded(sid, turn_index, body, turn, request_metadata)
             return response
-        except Exception:
+        except Exception as exc:
             if prepared_stream is None:
                 raise
             self.logger.exception("[%s] sid=%s streaming turn failed", self.log_prefix, sid)
+            if s.trace is not None:
+                trace_event(
+                    bind_trace_carrier(s.trace.carrier),
+                    "agentic.streaming_error",
+                    attrs={"error_type": type(exc).__name__},
+                )
             try:
                 await self._fail_stream_response(prepared_stream)
             except ConnectionError:
@@ -739,7 +774,6 @@ async def call_vllm_generate(
             return TurnRecord(prompt_ids=list(prompt_ids), output_ids=[], finish_reason="length")
         sp["max_new_tokens"] = min(int(sp.get("max_new_tokens", remaining_context)), remaining_context)
 
-    vllm_url = adapter.vllm_url
     payload: dict[str, Any] = {
         "token_ids": list(prompt_ids),
         "sampling_params": _vllm_sampling_body(sp),
@@ -750,23 +784,23 @@ async def call_vllm_generate(
     timeout = aiohttp.ClientTimeout(total=None, sock_read=900)
     task = asyncio.current_task()
     started = time.monotonic()
+    target = bind_trace_carrier(session.trace.carrier) if session.trace else None
+    request_trace = (
+        trace_span(
+            target,
+            "vllm_generate",
+            attrs={
+                "input_tokens": len(prompt_ids),
+                "max_new_tokens": int(sp.get("max_new_tokens", 0)),
+            },
+            record_error=False,
+        )
+        if target
+        else nullcontext()
+    )
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as sess, sess.post(
-            f"{vllm_url}/inference/v1/generate",
-            json=payload,
-            headers=headers,
-        ) as r:
-            if r.status >= 400:
-                text = await r.text()
-                logger.warning(
-                    "[%s] sid=%s vllm upstream %d: %.200s",
-                    adapter.log_prefix,
-                    session_id,
-                    r.status,
-                    text,
-                )
-                raise RuntimeError(f"vllm upstream {r.status}: {text[:400]}")
-            data = await r.json(content_type=None)
+        with request_trace as span:
+            data = await _request_vllm_generation(adapter, payload, headers, timeout, session_id, span)
         choice = (data.get("choices") or [{}])[0]
         output_ids, output_log_probs = _tokens_and_logprobs_from_choice(choice)
         fr = choice.get("finish_reason")
@@ -794,6 +828,30 @@ async def call_vllm_generate(
         finish_reason=finish,
         output_log_probs=output_log_probs,
     )
+
+
+async def _request_vllm_generation(adapter, payload, headers, timeout, session_id, span):
+    async with aiohttp.ClientSession(timeout=timeout) as sess, sess.post(
+        f"{adapter.vllm_url}/inference/v1/generate",
+        json=payload,
+        headers=headers,
+    ) as r:
+        if span is not None and hasattr(span, "set"):
+            span.set("http_status", r.status)
+        if r.status >= 400:
+            text = await r.text()
+            adapter.logger.warning(
+                "[%s] sid=%s vllm upstream %d: %.200s",
+                adapter.log_prefix,
+                session_id,
+                r.status,
+                text,
+            )
+            raise RuntimeError(f"vllm upstream {r.status}: {text[:400]}")
+        data = await r.json(content_type=None)
+    if span is not None and hasattr(span, "update"):
+        span.update(build_vllm_meta_trace_attrs(data))
+    return data
 
 
 async def _health(request: web.Request) -> web.Response:

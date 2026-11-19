@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from contextvars import ContextVar
+from contextlib import contextmanager
 import io
 import logging
 import os
@@ -17,7 +18,9 @@ import random
 import sys
 import time
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
+
+from vime.observability.trace_utils import TraceHandle, trace_event, trace_span
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +67,41 @@ class Sandbox(Protocol):
 EXIT_TIME_BUDGET_EXCEEDED = -1
 # Task-local scope, inherited by wait_for's task, never by unrelated sandbox RPCs.
 _MARKER_RPC: ContextVar[str | None] = ContextVar("marker_rpc", default=None)
+_SUPPRESS_COMMAND_SPAN: ContextVar[bool] = ContextVar("suppress_command_span", default=False)
+
+
+def _command_prefix(cmd: str) -> str:
+    """Return a compact, whitespace-normalized command preview."""
+    return " ".join(cmd.split())[:50]
+
+
+@contextmanager
+def _suppress_command_span():
+    token = _SUPPRESS_COMMAND_SPAN.set(True)
+    try:
+        yield
+    finally:
+        _SUPPRESS_COMMAND_SPAN.reset(token)
+
+
+@contextmanager
+def _sandbox_command_span(sandbox: Sandbox, cmd: str):
+    trace = getattr(sandbox, "trace", None)
+    if trace is None or _MARKER_RPC.get() is not None or _SUPPRESS_COMMAND_SPAN.get():
+        yield None
+        return
+    attrs = {
+        "sandbox_id": sandbox.sandbox_id,
+        "sandbox_role": getattr(sandbox, "observation_role", "agent"),
+        "command_prefix": _command_prefix(cmd),
+    }
+    with trace_span(trace, "sandbox_command", attrs=attrs, record_error=False) as span:
+        yield span
+
+
+def _set_command_exit_code(span: Any, exit_code: int) -> None:
+    if span is not None and hasattr(span, "set"):
+        span.set("exit_code", int(exit_code))
 
 
 def _exception_chain(error: BaseException):
@@ -163,29 +201,34 @@ async def exec_and_wait(
     # install_npm_cli's retry loop), which would skip the spawn entirely and
     # read the previous run's stale exit-code marker. Callers must not overlap
     # two exec_and_wait calls with the same tag.
-    await sb.exec(
-        f"rm -rf {lock_dir}; rm -f {out_file} {done_file}",
-        user=user,
-        timeout=30,
-        check=True,
-        idempotent=True,
-    )
-    await sb.exec(
-        f"chmod +x {launcher}; "
-        f"mkdir {lock_dir} 2>/dev/null || exit 0; "
-        f"setsid bash {launcher} < /dev/null > {out_file} 2>&1 &",
-        user=user,
-        env=env,
-        timeout=30,
-        check=True,
-        idempotent=True,
-    )
-    exit_code = await _await_done_marker(sb, done_file, user=user, time_budget_sec=time_budget_sec)
+    with _sandbox_command_span(sb, cmd) as span:
+        with _suppress_command_span():
+            await sb.exec(
+                f"rm -rf {lock_dir}; rm -f {out_file} {done_file}",
+                user=user,
+                timeout=30,
+                check=True,
+                idempotent=True,
+            )
+            await sb.exec(
+                f"chmod +x {launcher}; "
+                f"mkdir {lock_dir} 2>/dev/null || exit 0; "
+                f"setsid bash {launcher} < /dev/null > {out_file} 2>&1 &",
+                user=user,
+                env=env,
+                timeout=30,
+                check=True,
+                idempotent=True,
+            )
+        exit_code = await _await_done_marker(sb, done_file, user=user, time_budget_sec=time_budget_sec)
+        if exit_code != EXIT_TIME_BUDGET_EXCEEDED:
+            _set_command_exit_code(span, exit_code)
     if exit_code == 0 and not want_output:
         return exit_code, ""
     if want_output:
         return exit_code, await sb.read_file(out_file, user=user)
-    _, tail, _ = await sb.exec(f"tail -c 512 {out_file} 2>/dev/null", user=user, timeout=15, check=False)
+    with _suppress_command_span():
+        _, tail, _ = await sb.exec(f"tail -c 512 {out_file} 2>/dev/null", user=user, timeout=15, check=False)
     return exit_code, tail or ""
 
 
@@ -245,8 +288,14 @@ class E2BSandbox:
         selector_mode: str | None = None,
         rpc_retries: int | None = None,
         size: str | None = None,
+        observation_role: str = "agent",
+        trace: TraceHandle | None = None,
     ) -> None:
         self.image = image
+        # Labels events as agent or verifier activity; it does not alter the
+        # sandbox API or execution behavior.
+        self.observation_role = observation_role
+        self.trace = trace
         self.timeout = timeout if timeout is not None else self._lifetime_sec_from_env()
         self.image_metadata_key = image_metadata_key or self._image_metadata_key_from_env()
         self.selector_mode = selector_mode or _getenv(*self.selector_mode_env, default=self.default_selector_mode)
@@ -324,57 +373,26 @@ class E2BSandbox:
         return None
 
     async def _rpc_retry(self, op_name: str, coro_factory, *, idempotent: bool = True):
-        """Run coro_factory() with retries for transient E2B RPC failures.
-
-        :param idempotent: When False, a transient failure is re-raised instead
-            of retried: re-running a non-idempotent op (e.g. a process-spawning
-            exec) after a severed response could double-execute it. Idempotent
-            ops (the default: create / read_file / write_file / short read-only
-            execs) retry as before.
-        """
-        last_err = None
-        for attempt in range(self.rpc_retries):
-            try:
-                result = await coro_factory()
-                if attempt and _MARKER_RPC.get() == op_name:
-                    logger.info("[agent.sandbox] marker RPC recovered sandbox=%s attempts=%d",
-                                self.sandbox_id, attempt + 1)
-                return result
-            except Exception as e:
-                marker_cause = self._marker_transport_cause(op_name, e) if idempotent else None
-                if _MARKER_RPC.get() == op_name and _terminal_marker_error(e):
-                    raise
-                if marker_cause is None and not self._is_transient_rpc_error(e):
-                    raise
-                if not idempotent:
-                    raise
-                last_err = e
-                if attempt + 1 < self.rpc_retries:
-                    # The installed pyqwest SDK shares process-wide pools; its
-                    # connect() can resume expired sandboxes. Reissue only this
-                    # read-only RPC, letting the transport replace broken sockets.
-                    # Do not flush shared pools or renew the sandbox lifetime.
-                    if marker_cause is None:
-                        await self._reset_conn_pool()
-                    else:
-                        logger.warning(
-                            "[agent.sandbox] marker transport retry sandbox=%s cause=%s attempt=%d/%d",
-                            self.sandbox_id, type(marker_cause).__name__, attempt + 1, self.rpc_retries,
-                        )
-                    ceiling = min(self.rpc_backoff_cap_sec, self.rpc_backoff_base_sec * (2**attempt))
-                    backoff = random.uniform(0.0, ceiling)
-                    logger.debug(
-                        "[agent.sandbox] %s transient %s, retry %d/%d in %.1fs: %s",
-                        op_name,
-                        type(marker_cause).__name__ if marker_cause is not None else type(e).__name__,
-                        attempt + 1,
-                        self.rpc_retries,
-                        backoff,
-                        "connection-level failure" if marker_cause is not None else str(e)[:120],
-                    )
-                    await asyncio.sleep(backoff)
-        assert last_err is not None
-        raise last_err
+        started = time.monotonic()
+        try:
+            return await self._rpc_retry_impl(op_name, coro_factory, idempotent=idempotent)
+        except Exception as e:
+            if type(e).__name__ == "CommandExitException":
+                raise
+            if self.trace is not None:
+                trace_event(
+                    self.trace,
+                    "agentic.sandbox_rpc_failed",
+                    attrs={
+                        "operation": op_name.split("(", 1)[0],
+                        "sandbox_id": self.sandbox_id,
+                        "sandbox_role": self.observation_role,
+                        "idempotent": idempotent,
+                        "error_type": type(e).__name__,
+                        "duration_ms": (time.monotonic() - started) * 1000,
+                    },
+                )
+            raise
 
     async def _reset_conn_pool(self) -> None:
         """Tear down the sandbox's httpcore pool so the next RPC reconnects."""
@@ -411,6 +429,16 @@ class E2BSandbox:
 
         self._sb = await self._rpc_retry("create", create)
         self.sandbox_id = self._sb.sandbox_id
+        if self.trace is not None:
+            trace_event(
+                self.trace,
+                "agentic.sandbox_ready",
+                attrs={
+                    "sandbox_id": self.sandbox_id,
+                    "sandbox_role": self.observation_role,
+                    "selector_mode": self.selector_mode,
+                },
+            )
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
@@ -418,6 +446,16 @@ class E2BSandbox:
             if self._sb is not None:
                 await self._sb.kill()
         except Exception as e:
+            if self.trace is not None:
+                trace_event(
+                    self.trace,
+                    "agentic.sandbox_destroy_failed",
+                    attrs={
+                        "sandbox_id": self.sandbox_id,
+                        "sandbox_role": self.observation_role,
+                        "error_type": type(e).__name__,
+                    },
+                )
             logger.warning("[agent.sandbox] kill %s failed: %s", self.sandbox_id[:8], e)
 
     async def exec(
@@ -432,26 +470,29 @@ class E2BSandbox:
     ) -> ExecResult:
         from e2b.sandbox.commands.command_handle import CommandExitException
 
-        try:
-            res = await self._rpc_retry(
-                f"exec({cmd[:60]!r})",
-                lambda: self._sb.commands.run(
-                    cmd,
-                    user=user,
-                    envs=env,
-                    timeout=timeout,
-                    on_stdout=lambda s: None,
-                    on_stderr=lambda s: None,
-                ),
-                idempotent=idempotent,
-            )
-            return res.exit_code, res.stdout or "", res.stderr or ""
-        except CommandExitException as e:
-            if check:
-                raise RuntimeError(
-                    f"e2b exec failed (exit={e.exit_code}): {cmd[:120]}\n{(e.stderr or '')[:400]}"
-                ) from None
-            return e.exit_code, e.stdout or "", e.stderr or ""
+        with _sandbox_command_span(self, cmd) as span:
+            try:
+                res = await self._rpc_retry(
+                    f"exec({cmd[:60]!r})",
+                    lambda: self._sb.commands.run(
+                        cmd,
+                        user=user,
+                        envs=env,
+                        timeout=timeout,
+                        on_stdout=lambda s: None,
+                        on_stderr=lambda s: None,
+                    ),
+                    idempotent=idempotent,
+                )
+                _set_command_exit_code(span, res.exit_code)
+                return res.exit_code, res.stdout or "", res.stderr or ""
+            except CommandExitException as e:
+                _set_command_exit_code(span, e.exit_code)
+                if check:
+                    raise RuntimeError(
+                        f"e2b exec failed (exit={e.exit_code}): {cmd[:120]}\n{(e.stderr or '')[:400]}"
+                    ) from None
+                return e.exit_code, e.stdout or "", e.stderr or ""
 
     async def write_file(self, sandbox_path: str, content: FileContent, *, user: str = "root") -> None:
         if isinstance(content, Path):
@@ -499,6 +540,78 @@ class E2BSandbox:
             )
         except Exception:
             return ""
+
+    async def _rpc_retry_impl(self, op_name: str, coro_factory, *, idempotent: bool = True):
+        """Run coro_factory() with retries for transient E2B RPC failures.
+
+        :param idempotent: When False, a transient failure is re-raised instead
+            of retried: re-running a non-idempotent op (e.g. a process-spawning
+            exec) after a severed response could double-execute it. Idempotent
+            ops (the default: create / read_file / write_file / short read-only
+            execs) retry as before.
+        """
+        last_err = None
+        for attempt in range(self.rpc_retries):
+            try:
+                result = await coro_factory()
+                if attempt and _MARKER_RPC.get() == op_name:
+                    logger.info("[agent.sandbox] marker RPC recovered sandbox=%s attempts=%d",
+                                self.sandbox_id, attempt + 1)
+                return result
+            except Exception as e:
+                marker_cause = self._marker_transport_cause(op_name, e) if idempotent else None
+                if _MARKER_RPC.get() == op_name and _terminal_marker_error(e):
+                    raise
+                if marker_cause is None and not self._is_transient_rpc_error(e):
+                    raise
+                if not idempotent:
+                    raise
+                last_err = e
+                if attempt + 1 < self.rpc_retries:
+                    await self._wait_rpc_retry(op_name, attempt, e, marker_cause)
+        assert last_err is not None
+        raise last_err
+
+    async def _wait_rpc_retry(self, op_name: str, attempt: int, error: Exception, marker_cause) -> None:
+        """Reset transport state, record the retry, and wait before retrying."""
+        # The installed pyqwest SDK shares process-wide pools; its connect()
+        # can resume expired sandboxes. Do not flush shared pools or renew the
+        # sandbox lifetime for marker transport retries.
+        if marker_cause is None:
+            await self._reset_conn_pool()
+        else:
+            logger.warning(
+                "[agent.sandbox] marker transport retry sandbox=%s cause=%s attempt=%d/%d",
+                self.sandbox_id, type(marker_cause).__name__, attempt + 1, self.rpc_retries,
+            )
+        ceiling = min(self.rpc_backoff_cap_sec, self.rpc_backoff_base_sec * (2**attempt))
+        backoff = random.uniform(0.0, ceiling)
+        self._record_rpc_retry(op_name, attempt, error, backoff)
+        logger.debug(
+            "[agent.sandbox] %s transient %s, retry %d/%d in %.1fs: %s",
+            op_name,
+            type(marker_cause).__name__ if marker_cause is not None else type(error).__name__,
+            attempt + 1,
+            self.rpc_retries,
+            backoff,
+            "connection-level failure" if marker_cause is not None else str(error)[:120],
+        )
+        await asyncio.sleep(backoff)
+
+    def _record_rpc_retry(self, op_name: str, attempt: int, error: Exception, backoff: float) -> None:
+        if self.trace is not None:
+            trace_event(
+                self.trace,
+                "agentic.sandbox_rpc_retry",
+                attrs={
+                    "operation": op_name.split("(", 1)[0],
+                    "sandbox_id": self.sandbox_id,
+                    "sandbox_role": self.observation_role,
+                    "attempt": attempt + 1,
+                    "error_type": type(error).__name__,
+                    "backoff_sec": backoff,
+                },
+            )
 
 
 async def ensure_agent_user(sb: Sandbox, workdir: str) -> None:

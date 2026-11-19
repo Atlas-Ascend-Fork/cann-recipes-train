@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Any
 
 import numpy as np
@@ -157,6 +158,79 @@ def _compute_zero_std_metrics(args, all_samples: list[Sample]):
     interesting_rewards = [str(round(g[0].get_reward_value(args), 1)) for g in interesting_sample_groups]
 
     return {f"zero_std/count_{reward}": len(items) for reward, items in group_by(interesting_rewards).items()}
+
+
+def get_grpo_max_cg(args) -> int | None:
+    """Return the configured upper bound for ``c_g`` and validate it."""
+    if getattr(args, "advantage_estimator", None) != "grpo":
+        return None
+
+    group_size = int(getattr(args, "n_samples_per_prompt", 0))
+    if group_size <= 1:
+        return None
+
+    raw_value = os.environ.get("VIME_GRPO_MAX_CG")
+    if raw_value is None:
+        return group_size - 1
+    try:
+        max_cg = int(raw_value)
+    except ValueError as exc:
+        raise ValueError(
+            f"VIME_GRPO_MAX_CG must be an integer in [1, {group_size - 1}], got {raw_value!r}"
+        ) from exc
+    if not 1 <= max_cg < group_size:
+        raise ValueError(f"VIME_GRPO_MAX_CG must be in [1, {group_size - 1}], got {max_cg}")
+    return max_cg
+
+
+def record_grpo_group_reward_events(args, all_samples: list[Sample]) -> dict[str, int]:
+    """Report reward-0/reward-1 counts for each GRPO group.
+
+    A compact agentic rollout can produce multiple Sample segments.  The
+    segment-level list therefore cannot be counted directly: all segments
+    with the same ``(group_index, rollout_id)`` represent one GRPO response.
+    One trace event is emitted for each group before the rollout dump is
+    written. The returned metric counts groups with ``1 <= c_g <= bound``
+    and at least one reward-0 rollout, and is forwarded to TensorBoard.
+    """
+    if getattr(args, "advantage_estimator", None) != "grpo":
+        return {}
+
+    from vime.observability.trace_utils import trace_event
+
+    max_cg = get_grpo_max_cg(args)
+    if max_cg is None:
+        return {}
+
+    rewards_by_group: dict[Any, dict[Any, float]] = {}
+    representatives: dict[Any, Sample] = {}
+    for sample in all_samples:
+        group_index = sample.group_index
+        rollout_id = sample.rollout_id
+        if group_index is None or rollout_id is None:
+            continue
+
+        representatives.setdefault(group_index, sample)
+        rewards_by_group.setdefault(group_index, {}).setdefault(rollout_id, sample.get_reward_value(args))
+
+    mixed_group_count = 0
+    for group_index, rewards in rewards_by_group.items():
+        reward_1_count = sum(reward == 1 for reward in rewards.values())
+        reward_0_count = sum(reward == 0 for reward in rewards.values())
+        mixed_group_count += 1 <= reward_1_count <= max_cg and reward_0_count > 0
+        trace_event(
+            representatives[group_index],
+            "agentic.grpo_group_reward_counts",
+            attrs={
+                "group_index": group_index,
+                "reward_1_count": reward_1_count,
+                "reward_0_count": reward_0_count,
+            },
+        )
+
+    if not representatives:
+        return {}
+    return {"grpo/mixed_group_count": mixed_group_count}
 
 
 def _compute_top_p_kept_vocab_metrics(all_samples: list[Sample]):

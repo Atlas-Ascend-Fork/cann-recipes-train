@@ -16,7 +16,12 @@ from vime.observability.rollout_data_utils import (
     validate_rollout_id_annotated,
     validate_rollout_routed_experts_for_replay,
 )
-from vime.observability.rollout_metrics import log_eval_rollout_data, log_rollout_data
+from vime.observability.rollout_metrics import (
+    get_grpo_max_cg,
+    log_eval_rollout_data,
+    log_rollout_data,
+    record_grpo_group_reward_events,
+)
 from vime.rollout.base_types import call_rollout_fn
 from vime.rollout.reward_normalization import normalize_rewards_by_trajectory
 from vime.rollout.sample_hooks import set_current_rollout_id
@@ -45,6 +50,8 @@ class RolloutManager:
 
         self.pg = pg
         self.args = args
+        # Validate the optional GRPO metric setting before starting rollout servers.
+        get_grpo_max_cg(self.args)
 
         rollout_init_handles: list[Any] = []
         if self.args.debug_train_only:
@@ -196,6 +203,7 @@ class RolloutManager:
         if self.args.ci_test and self.args.use_fault_tolerance and rollout_id >= 2:
             self._try_ci_fault_injection()
         data, metrics = self._get_rollout_data(rollout_id=rollout_id)
+        metrics = {**(metrics or {}), **record_grpo_group_reward_events(self.args, data)}
         save_debug_rollout_data(
             self.args.save_debug_rollout_data,
             data,

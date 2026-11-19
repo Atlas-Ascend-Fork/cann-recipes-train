@@ -25,7 +25,7 @@ import secrets
 import time
 import traceback
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Any
 
@@ -39,6 +39,7 @@ from vime.agent.model_profile import (
     uses_single_system_message_policy,
 )
 from vime.agent.sandbox import E2BSandbox
+from vime.observability.trace_utils import bind_trace, export_trace, import_trace, trace_event, trace_span
 from vime.utils.misc import SingletonMeta
 from vime.utils.processing_utils import load_tokenizer
 from vime.utils.types import Sample
@@ -122,8 +123,23 @@ VERIFIER_SPECS = load_verifier_specs(CONFIG.verifier_spec_map) if CONFIG.verifie
 _BOOT_SEM = asyncio.Semaphore(CONFIG.boot_concurrency)
 
 
+async def _boot_sandbox_attempt(cand: E2BSandbox, trace, attempt: int) -> None:
+    async with _BOOT_SEM:
+        with trace_span(trace, "sandbox_create", attrs={"attempt": attempt}, record_error=False):
+            await cand.__aenter__()
+        try:
+            with trace_span(trace, "harness_install", record_error=False) if trace else nullcontext():
+                await HARNESS_CLS().install_cli(cand)
+        except BaseException:
+            with trace_span(trace, "sandbox_cleanup", record_error=False) if trace else nullcontext():
+                await cand.__aexit__(None, None, None)
+            raise
+
+
 @asynccontextmanager
-async def boot_agent_sandbox(image: str, instance_id: str) -> AsyncIterator[E2BSandbox]:
+async def boot_agent_sandbox(
+    image: str, instance_id: str, *, trace=None
+) -> AsyncIterator[E2BSandbox]:
     """Boot a fresh E2B sandbox and install the selected harness toolchain.
 
     Create the sandbox from the dataset image, install Node 22 + the harness CLI
@@ -133,19 +149,24 @@ async def boot_agent_sandbox(image: str, instance_id: str) -> AsyncIterator[E2BS
     sb = None
     last_err: Exception | None = None
     for attempt in range(CONFIG.boot_retries):
-        cand = E2BSandbox(image)
+        cand = E2BSandbox(image, trace=trace)
         try:
-            async with _BOOT_SEM:
-                await cand.__aenter__()
-                try:
-                    await HARNESS_CLS().install_cli(cand)
-                except BaseException:
-                    await cand.__aexit__(None, None, None)
-                    raise
+            with trace_span(trace, "sandbox_boot_wait", record_error=False) if trace else nullcontext():
+                await _boot_sandbox_attempt(cand, trace, attempt)
             sb = cand
             break
         except Exception as e:
             last_err = e
+            if trace is not None:
+                trace_event(
+                    trace,
+                    "agentic.sandbox_boot_attempt_failed",
+                    attrs={
+                        "boot_attempt": attempt + 1,
+                        "error_type": type(e).__name__,
+                        "will_retry": attempt + 1 < CONFIG.boot_retries,
+                    },
+                )
             logger.warning(
                 "[coding_agent_rl] %s: provision attempt %d/%d failed: %s: %s",
                 instance_id,
@@ -154,14 +175,16 @@ async def boot_agent_sandbox(image: str, instance_id: str) -> AsyncIterator[E2BS
                 type(e).__name__,
                 str(e)[:200],
             )
-            await asyncio.sleep(1 + attempt + random.random())
+            with trace_span(trace, "sandbox_boot_backoff", record_error=False) if trace else nullcontext():
+                await asyncio.sleep(1 + attempt + random.random())
     if sb is None:
         assert last_err is not None
         raise last_err
     try:
         yield sb
     finally:
-        await sb.__aexit__(None, None, None)
+        with trace_span(trace, "sandbox_cleanup", record_error=False) if trace else nullcontext():
+            await sb.__aexit__(None, None, None)
 
 
 class _AdapterService(metaclass=SingletonMeta):
@@ -228,6 +251,20 @@ class _AdapterService(metaclass=SingletonMeta):
 
 
 async def generate(args, base_sample: Sample, sampling_params: dict[str, Any], evaluation: bool = False):
+    samples = None
+    try:
+        with trace_span(base_sample, "coding_rollout", record_error=False):
+            samples = await _generate(args, base_sample, sampling_params, evaluation)
+        return samples
+    finally:
+        # The carrier is copied to emitted Samples by TrajectoryManager. Keep
+        # the final trace on the base Sample for upstream debug dumps too.
+        if samples and getattr(base_sample, "trace", None) is not None:
+            for sample in samples:
+                sample.trace = base_sample.trace
+
+
+async def _generate(args, base_sample, sampling_params, evaluation):
     """Per-sample agent function with wall-clock guard (see rollout_guard_sec)."""
     state = _AdapterService(args)
     protocol = CONFIG.eval_protocol if evaluation else CONFIG.train_protocol
@@ -254,31 +291,46 @@ async def generate(args, base_sample: Sample, sampling_params: dict[str, Any], e
         return _abort_result(base_sample, f"unevaluatable:{reason}", instance_id)
 
     session_id = base_sample.session_id = _session_id(base_sample, instance_id)
-    state.adapter.open_session(
-        session_id,
-        sampling_defaults=sampling_params,
-        max_context_tokens=state.max_context_len,
-    )
     t0 = time.time()
     try:
         async with asyncio.timeout(CONFIG.rollout_guard_sec):
-            async with boot_agent_sandbox(md["image"], instance_id) as sb:
-                await swe.prepare_workspace(sb, md["workdir"], md)
-                agent_exit_code = await HARNESS_CLS().run(
-                    sb,
-                    workdir=md["workdir"],
-                    session_id=session_id,
-                    adapter_url=state.adapter_url,
-                    time_budget_sec=CONFIG.agent_time_budget_sec,
-                    prompt=swe.SWE_PROMPT,
-                )
-                diff_text = await swe.git_diff(sb, md["workdir"])
+            async with boot_agent_sandbox(md["image"], instance_id, trace=base_sample) as sb:
+                with trace_span(base_sample, "workspace_prepare", record_error=False):
+                    await swe.prepare_workspace(sb, md["workdir"], md)
+                with trace_span(base_sample, "agent_run", record_error=False) as stage:
+                    # Export after entering ``agent_run`` so the adapter's
+                    # independent event loop keeps this span as its parent.
+                    trace = import_trace(export_trace(bind_trace(base_sample)), base_sample.trace)
+                    state.adapter.open_session(
+                        session_id,
+                        sampling_defaults=sampling_params,
+                        max_context_tokens=state.max_context_len,
+                        trace=trace,
+                    )
+                    agent_exit_code = await HARNESS_CLS().run(
+                        sb,
+                        workdir=md["workdir"],
+                        session_id=session_id,
+                        adapter_url=state.adapter_url,
+                        time_budget_sec=CONFIG.agent_time_budget_sec,
+                        prompt=swe.SWE_PROMPT,
+                    )
+                    stage.set("exit_code", agent_exit_code)
+                with trace_span(base_sample, "patch_extract", record_error=False):
+                    diff_text = await swe.git_diff(sb, md["workdir"])
 
-            eval_result = await swe.run_evaluation(
-                md,
-                diff_text=diff_text,
-                timeout_sec=CONFIG.eval_timeout_sec,
-            )
+            with trace_span(base_sample, "evaluation", record_error=False) as span:
+                eval_result = await swe.run_evaluation(
+                    md,
+                    diff_text=diff_text,
+                    timeout_sec=CONFIG.eval_timeout_sec,
+                    trace=base_sample,
+                )
+                span.update({
+                    "reward": float(eval_result.reward),
+                    "applied_cleanly": bool(eval_result.applied_cleanly),
+                    "status": eval_result.status,
+                })
             reward = eval_result.reward
             applied_cleanly = eval_result.applied_cleanly
             if eval_result.infra_failure:
@@ -288,18 +340,19 @@ async def generate(args, base_sample: Sample, sampling_params: dict[str, Any], e
                         f"verifier_infra_error:{eval_result.reason or 'unknown'}",
                         instance_id,
                     )
-                samples = await state.adapter.finish_session(
-                    session_id,
-                    base_sample=base_sample,
-                    reward=0.0,
-                    extra_metadata={
-                        "instance_id": instance_id,
-                        "verifier_spec_id": md.get("verifier_spec_id"),
-                        "verifier_status": eval_result.status,
-                        "verifier_infra_failure": True,
-                        "verifier_reason": eval_result.reason,
-                    },
-                )
+                with trace_span(base_sample, "trajectory_finalize", record_error=False):
+                    samples = await state.adapter.finish_session(
+                        session_id,
+                        base_sample=base_sample,
+                        reward=0.0,
+                        extra_metadata={
+                            "instance_id": instance_id,
+                            "verifier_spec_id": md.get("verifier_spec_id"),
+                            "verifier_status": eval_result.status,
+                            "verifier_infra_failure": True,
+                            "verifier_reason": eval_result.reason,
+                        },
+                    )
                 if not samples:
                     return _abort_result(base_sample, "verifier_infra_error:empty_session", instance_id)
                 for sample in samples:
@@ -324,21 +377,22 @@ async def generate(args, base_sample: Sample, sampling_params: dict[str, Any], e
                     instance_id=instance_id,
                 )
 
-            samples = await state.adapter.finish_session(
-                session_id,
-                base_sample=base_sample,
-                reward=float(reward),
-                extra_metadata={
-                    "grading_solved": float(reward) == 1.0,
-                    "instance_id": instance_id,
-                    "sandbox_template_id": md.get("template_id"),
-                    "sandbox_source_image": md.get("source_image"),
-                    "verifier_spec_id": md.get("verifier_spec_id"),
-                    "verifier_status": eval_result.status,
-                    "verifier_infra_failure": False,
-                    "verifier_reason": eval_result.reason,
-                },
-            )
+            with trace_span(base_sample, "trajectory_finalize", record_error=False):
+                samples = await state.adapter.finish_session(
+                    session_id,
+                    base_sample=base_sample,
+                    reward=float(reward),
+                    extra_metadata={
+                        "grading_solved": float(reward) == 1.0,
+                        "instance_id": instance_id,
+                        "sandbox_template_id": md.get("template_id"),
+                        "sandbox_source_image": md.get("source_image"),
+                        "verifier_spec_id": md.get("verifier_spec_id"),
+                        "verifier_status": eval_result.status,
+                        "verifier_infra_failure": False,
+                        "verifier_reason": eval_result.reason,
+                    },
+                )
             if not samples:
                 return _abort_result(base_sample, "adapter_session_empty", instance_id)
 
@@ -375,7 +429,8 @@ async def generate(args, base_sample: Sample, sampling_params: dict[str, Any], e
         )
         return _abort_result(base_sample, f"exception:{type(e).__name__}", instance_id)
     finally:
-        await state.adapter.drop_session(session_id, wait_timeout=30)  # cleanup only, idempotent
+        with trace_span(base_sample, "adapter_cleanup", record_error=False):
+            await state.adapter.drop_session(session_id, wait_timeout=30)  # cleanup only, idempotent
         await asyncio.sleep(10)
 
 
@@ -412,6 +467,7 @@ def _session_id(sample: Sample, instance_id: str) -> str:
 def _abort_result(sample: Sample, reason: str, instance_id: str) -> list[Sample]:
     """Mark ``sample`` aborted in place and return it in the list shape this
     fan-out generate function always yields."""
+    trace_event(sample, "agentic.trial_aborted", attrs={"reason": reason})
     # Preserve one identity per attempt, just as normal trajectory segments do.
     if sample.rollout_id is None:
         sample.rollout_id = sample.index

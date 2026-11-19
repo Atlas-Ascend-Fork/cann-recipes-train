@@ -30,6 +30,7 @@ import logging
 import os
 import sys
 import tempfile
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,6 +39,7 @@ from typing import Any
 from vime.agent import sandbox as agent_sandbox
 from vime.agent.adapters.common import flatten_content
 from vime.agent.sandbox import E2BSandbox, Sandbox, exec_and_wait
+from vime.observability.trace_utils import trace_event, trace_span
 from vime.utils.types import Sample
 
 try:
@@ -308,21 +310,47 @@ async def git_diff(sb: Sandbox, workdir: str) -> str:
 # ---------------------------------------------------------------------------
 # Eval dispatch (fresh sandbox, apply diff, run dataset tests)
 # ---------------------------------------------------------------------------
-async def run_evaluation(md: dict, *, diff_text: str, timeout_sec: int) -> EvalResult:
+@asynccontextmanager
+async def _evaluation_sandbox(image: str, trace):
+    sandbox = E2BSandbox(image, observation_role="verifier", trace=trace)
+    with trace_span(trace or [], "evaluation_sandbox_create", record_error=False):
+        evaluator = await sandbox.__aenter__()
+    try:
+        yield evaluator
+    finally:
+        with trace_span(trace or [], "evaluation_sandbox_cleanup", record_error=False):
+            await sandbox.__aexit__(*sys.exc_info())
+
+
+async def run_evaluation(md: dict, *, diff_text: str, timeout_sec: int, trace=None) -> EvalResult:
     """Uniform entry point: dispatch to the protocol's grader.
 
     No-test-cheating guarantee (both grading protocols): the eval sandbox is built from
     the same image but starts CLEAN, so only the model-produced diff affects
-    reward."""
+    reward.
+    """
     if md.get("protocol") == PROTOCOL_SWEBENCH:
-        return await _grade_swebench(md, diff_text, timeout_sec)
-    return await _grade_scaleswe(md, diff_text, timeout_sec)
+        result = await _grade_swebench(md, diff_text, timeout_sec, trace=trace)
+    else:
+        result = await _grade_scaleswe(md, diff_text, timeout_sec, trace=trace)
+    if trace is not None and result.report is not None:
+        try:
+            tests = result.report.get("tests_status") or {}
+            for bucket in ("FAIL_TO_PASS", "PASS_TO_PASS"):
+                _ratio(tests.get(bucket, {}))
+        except Exception as exc:
+            trace_event(
+                trace,
+                "agentic.verifier_diagnostic_error",
+                attrs={"error_type": type(exc).__name__},
+            )
+    return result
 
 
 # ---------------------------------------------------------------------------
 # scaleswe grader
 # ---------------------------------------------------------------------------
-async def _grade_scaleswe(md: dict, diff_text: str, timeout_sec: int) -> EvalResult:
+async def _grade_scaleswe(md: dict, diff_text: str, timeout_sec: int, *, trace=None) -> EvalResult:
     """Three mutually-exclusive grading paths, in priority order: swepro test
     harness, a shell ``eval_cmd``, or a self-contained ``f2p_script`` pytest
     file. All resolve to "exit 0 == solved", reward is 1.0 iff solved."""
@@ -338,24 +366,26 @@ async def _grade_scaleswe(md: dict, diff_text: str, timeout_sec: int) -> EvalRes
         logger.warning("[swe.scaleswe] no swepro/eval_cmd/f2p_script; reward=0")
         return EvalResult(0.0, True, "configuration_error", reason="missing_scaleswe_grader")
 
-    async with E2BSandbox(image) as ev:
-        await agent_sandbox.ensure_agent_user(ev, workdir)
-        if swepro:
-            await _setup_swepro_assets(ev, swepro)
-            await apply_before_repo_set_cmd(ev, workdir, swepro)
-        if pre_commands:
-            await apply_pre_commands(ev, workdir, pre_commands)
+    async with _evaluation_sandbox(image, trace) as ev:
+        with trace_span(trace or [], "evaluation_prepare", record_error=False):
+            await agent_sandbox.ensure_agent_user(ev, workdir)
+            if swepro:
+                await _setup_swepro_assets(ev, swepro)
+                await apply_before_repo_set_cmd(ev, workdir, swepro)
+            if pre_commands:
+                await apply_pre_commands(ev, workdir, pre_commands)
 
-        applied = await _apply_diff(ev, workdir, diff_text)
-        if not applied:
-            return EvalResult(0.0, False, "invalid_patch", reason="model_patch_apply_failed")
+            applied = await _apply_diff(ev, workdir, diff_text)
+            if not applied:
+                return EvalResult(0.0, False, "invalid_patch", reason="model_patch_apply_failed")
 
-        if swepro:
-            r = await _run_swepro(ev, workdir, swepro, timeout_sec)
-        elif eval_cmd:
-            r = await _run_eval_cmd(ev, workdir, eval_cmd, timeout_sec)
-        else:
-            r = await _run_f2p_script(ev, workdir, f2p_script, timeout_sec)
+        with trace_span(trace or [], "evaluation_tests", record_error=False):
+            if swepro:
+                r = await _run_swepro(ev, workdir, swepro, timeout_sec)
+            elif eval_cmd:
+                r = await _run_eval_cmd(ev, workdir, eval_cmd, timeout_sec)
+            else:
+                r = await _run_f2p_script(ev, workdir, f2p_script, timeout_sec)
         return EvalResult(r, True, "resolved" if r == 1.0 else "unresolved")
 
 
@@ -553,7 +583,7 @@ def _log_swebench_result(instance_id: str, exit_code, info: dict, log: str) -> N
     )
 
 
-async def _grade_swebench(md: dict, diff_text: str, timeout_sec: int) -> EvalResult:
+async def _grade_swebench(md: dict, diff_text: str, timeout_sec: int, *, trace=None) -> EvalResult:
     """reward=1.0 iff sweb's get_eval_report declares the instance ``resolved``."""
     instance_id = md["instance_id"]
     try:
@@ -607,34 +637,37 @@ async def _grade_swebench(md: dict, diff_text: str, timeout_sec: int) -> EvalRes
         logger.warning("[swe.swebench] %s: missing template selector", instance_id)
         return EvalResult(0.0, True, "infra_error", infra_failure=True, reason="missing_template")
 
-    async with E2BSandbox(image) as ev:
-        writes = [
-            ev.write_file(_PATCH, diff_text or "", user="root"),
-            ev.write_file(_EVAL_SCRIPT, eval_sh, user="root"),
-        ]
-        if spec is not None and spec.test_patch_owner == "verifier":
-            writes.append(ev.write_file(_TEST_PATCH, spec.test_patch, user="root"))
-        await asyncio.gather(*writes)
-        # Apply the model patch first (eval_script assumes it is already applied);
-        # if no apply strategy works, the instance is unsolvable -- skip the eval.
-        if not await _apply_model_patch(ev, md["workdir"]):
-            logger.warning("[swe.swebench] %s: model patch failed to apply; reward=0", instance_id)
-            return EvalResult(0.0, False, "invalid_patch", reason="model_patch_apply_failed")
-        if spec is not None and spec.test_patch_owner == "verifier":
-            if not await _apply_test_patch(ev, md["workdir"]):
+    async with _evaluation_sandbox(image, trace) as ev:
+        with trace_span(trace or [], "evaluation_prepare", record_error=False):
+            writes = [
+                ev.write_file(_PATCH, diff_text or "", user="root"),
+                ev.write_file(_EVAL_SCRIPT, eval_sh, user="root"),
+            ]
+            if spec is not None and spec.test_patch_owner == "verifier":
+                writes.append(ev.write_file(_TEST_PATCH, spec.test_patch, user="root"))
+            await asyncio.gather(*writes)
+            if not await _apply_model_patch(ev, md["workdir"]):
+                logger.warning("[swe.swebench] %s: model patch failed to apply; reward=0", instance_id)
+                return EvalResult(0.0, False, "invalid_patch", reason="model_patch_apply_failed")
+            if (
+                spec is not None
+                and spec.test_patch_owner == "verifier"
+                and not await _apply_test_patch(ev, md["workdir"])
+            ):
                 logger.warning(
                     "[swe.swebench] %s: hidden test patch failed to apply; reward=0",
                     instance_id,
                 )
                 return EvalResult(0.0, False, "invalid_patch", reason="test_patch_conflict")
-        exit_code, log = await exec_and_wait(
-            ev,
-            cmd=f"bash {_EVAL_SCRIPT}",
-            user="root",
-            time_budget_sec=min(timeout_sec, spec.timeout_sec) if spec is not None else timeout_sec,
-            tag="eval",
-            want_output=True,
-        )
+        with trace_span(trace or [], "evaluation_tests", record_error=False):
+            exit_code, log = await exec_and_wait(
+                ev,
+                cmd=f"bash {_EVAL_SCRIPT}",
+                user="root",
+                time_budget_sec=min(timeout_sec, spec.timeout_sec) if spec is not None else timeout_sec,
+                tag="eval",
+                want_output=True,
+            )
 
     if exit_code < 0:
         return EvalResult(0.0, True, "infra_error", infra_failure=True, reason="verifier_timeout")

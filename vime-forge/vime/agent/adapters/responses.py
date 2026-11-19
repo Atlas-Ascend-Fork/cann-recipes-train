@@ -41,6 +41,7 @@ from aiohttp import web
 from vime.agent.adapters.common import (
     BaseAdapter,
     Reply,
+    bind_trace_carrier,
     flatten_content,
     manager_finish_reason,
     sid_from_bearer,
@@ -135,21 +136,26 @@ class ResponsesAdapter(BaseAdapter):
         )
         self._apply_disposition_updates([update])
 
-    def _finalize_turn_dispositions(self, sid: str) -> None:
-        self._apply_disposition_updates(self.turn_dispositions.finalize_session(sid))
+    def _finalize_turn_dispositions(self, sid: str, *, trace=None) -> None:
+        self._apply_disposition_updates(self.turn_dispositions.finalize_session(sid), trace=trace)
         self.turn_dispositions.clear_session(sid)
 
     def _clear_turn_dispositions(self, sid: str) -> None:
         self.turn_dispositions.clear_session(sid)
 
-    def _apply_disposition_updates(self, updates: list[DispositionUpdate]) -> None:
+    def _apply_disposition_updates(self, updates: list[DispositionUpdate], *, trace=None) -> None:
         for update in updates:
+            session = self.store.get(update.session_id)
+            event_trace = trace
+            if event_trace is None and session is not None and session.trace is not None:
+                event_trace = bind_trace_carrier(session.trace.carrier)
             found = self.manager.set_turn_disposition(
                 update.session_id,
                 update.turn_index,
                 disposition=update.disposition,
                 reason=update.reason,
                 trainable=update.trainable,
+                trace=event_trace,
             )
             if not found:
                 logger.warning(
