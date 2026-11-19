@@ -16,7 +16,7 @@
 | 操作系统 | Linux ARM |
 | 驱动版本 | Ascend HDK 25.1.RC2 |
 | CANN版本 | 9.3.0 |
-| 镜像版本 | [dsv4.1_train_torchtitan_a5_cann_master_newest_0916](https://cann-ai.obs.cn-north-4.myhuaweicloud.com/cann-quantization/deepseek_train/dsv4.1_train_torchtitan_a5_cann_master_newest_0916.tar.xz) |
+| 镜像版本 | [dsv4_1_flash_torchtitan_a5_cann_master_newest_1116](https://cann-ai.obs.cn-north-4.myhuaweicloud.com/cann-quantization/deepseek_train/dsv4_1_flash_torchtitan_a5_cann_master_newest_1116.tar.xz) |
 
 > [!NOTE]
 > **安装校验与版本选择建议：**
@@ -29,12 +29,13 @@
 
 ## 源码准备
 
-执行如下命令拉取源码：
+执行如下命令拉取源码，拉取到对应的 commit 点：
 
 ```shell
 mkdir -p /home/code && cd /home/code/
 git clone -b master https://gitcode.com/cann/torchtitan-npu.git
 cd torchtitan-npu
+git checkout b780d3ae1cca755c7f55c236772f4e1c7c0f3019
 ```
 
  cann-recipes 仓不归档对应的训练拉起脚本, 直接使用 torchtitan-npu 仓 examples/deepseek_v4_1 目录下拉起脚本
@@ -44,18 +45,18 @@ cd torchtitan-npu
 ## 获取Docker镜像
 
 ```shell
-docker load -i dsv4.1_train_torchtitan_a5_cann_master_newest_0916.tar.xz
+docker load -i dsv4_1_flash_torchtitan_a5_cann_master_newest_1116.tar.xz
 ```
 
 加载后镜像版本如下：
 
 ```shell
-dsv4.1_train_torchtitan_a5:cann_master_newest_0916
+dsv4_1_flash_train_a5:cann_master_newest_1116
 ```
 
 ## 启动Docker容器
 
-dsv4.1_train_torchtitan_a5:cann_master_newest_0916 镜像支持 DeepSeek-V4.1-Flash 模型，以该镜像的 docker 启动举例，执行如下命令启动容器：
+ dsv4_1_flash_train_a5:cann_master_newest_1116 镜像支持 DeepSeek-V4.1-Flash 模型，以该镜像的 docker 启动举例，执行如下命令启动容器：
 
 ```shell
 docker run -u root -itd --ulimit nproc=65535:65535 --ipc=host \
@@ -89,7 +90,7 @@ docker run -u root -itd --ulimit nproc=65535:65535 --ipc=host \
         --net=host \
         --entrypoint /bin/bash \
         --name dsv4.1_train_torchtitan_a5 \
-        --privileged dsv4.1_train_torchtitan_a5:cann_master_newest_0916 \
+        --privileged dsv4_1_flash_train_a5:cann_master_newest_1116 \
         #-c "sleep infinity"
 ```
 
