@@ -355,24 +355,23 @@ TP 大于 1 时，log_prob 与熵在各 TP rank 的词表分片上计算后归�
 
 ## 5 权重传输
 
-训练侧的权重是 FSDP/TP 分片、fp32、torchtitan 命名（MoE 专家为分组张量），vLLM 需要完整、bf16、HF 命名的逐专家张量。权重转换读取 `model_parts`（推送时加载的是 actor 权重，3.3 节）完成这一转换，再按部署方式传输：共卡时经 NPU IPC，分离部署时经 HCCL broadcast。
+训练侧的权重是 FSDP/TP 分片、fp32、torchtitan 命名（MoE 专家为分组张量），vLLM 需要 HF 命名的完整逐专家张量，精度与训练前向一致，量化权重附带 scale。权重转换读取 `model_parts`（推送时加载的是 actor 权重，3.3 节）完成这一转换，再按部署方式传输：共卡时经 NPU IPC，分离部署时经 HCCL broadcast。
 
 ![图 6 权重传输](./image/torchtitan-backend/fig6-weight-transfer.svg)
 
 ### 5.1 权重转换
 
-公共的权重转换迭代器 `get_hf_per_tensor` 逐个产出"(HF 权重名, 完整张量)"，依次经过六个阶段：
+公共的权重转换迭代器 `get_hf_per_tensor` 逐个产出"(HF 权重名, 完整张量)"，依次经过五个阶段：
 
 | 阶段 | 操作 | 说明 |
 |---|---|---|
-| ① 分块 | 按 transformer block 逐块获取 `state_dict` | `FusedQKVLinear` 的 state_dict hook 会在 fp32 下聚合融合权重，分块后同一时刻只存在一层的聚合结果 |
+| ① 分块与转精度 | 按 transformer block 逐块获取 `state_dict`，在保存 hook 前应用 FSDP 前向 dtype | 复用初始化后收集的 `fsdp_param_dtypes`；同一时刻只保留一层融合权重的聚合结果 |
 | ② 改名 | `sd_adapter.to_hf` | torchtitan 名称与布局转换为 HF；分组专家张量在这里拆成逐专家张量 |
-| ③ 转精度 | 浮点张量转为计算精度（bf16） | 与 vLLM 推理及训练前向的精度一致；先转精度后聚合，通信量减半 |
-| ④ 聚合 | `DTensor.full_tensor()` | 合并 FSDP 与 TP 分片 |
-| ⑤ 专家聚合 | EP 大于 1 时，在 EP 组内 all-gather 专家张量 | 专家名一次性收集；各 EP rank 的专家数须相同 |
-| ⑥ 量化 | 预留，目前为恒等变换 | 见 5.4 节 |
+| ③ 量化 | 调用训练 wrapper 的 `to_inference_weight()` | 按训练 wrapper 配置量化；普通参数跳过 |
+| ④ 聚合 | `DTensor.full_tensor()` | 合并 FSDP 与 TP 分片；量化数据和 scale 分别按字节传输 |
+| ⑤ 专家聚合 | EP 大于 1 时，在 EP 组内 all-gather 专家权重及 scale | 专家名一次性收集；各 EP rank 的专家数须相同 |
 
-`to_hf` 不产出 `lm_head.weight`（它与 embedding 是同一张量）时，直接复用已聚合的 embedding，不再聚合第二次。
+`to_hf` 不产出 `lm_head.weight`（它与 embedding 是同一张量）时，直接复用已聚合的 embedding 及其 scale，不再聚合第二次。
 
 由于阶段 ④⑤ 是集合通信，权重转换有一条约束：
 

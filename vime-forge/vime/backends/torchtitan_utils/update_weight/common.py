@@ -13,56 +13,114 @@
 # limitations under the License.
 
 """torchtitan weight iteration and HF format conversion utilities."""
+from collections import OrderedDict
 from collections.abc import Callable, Iterator
 
 import torch
 import torch.distributed as dist
 from torch import nn
+from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor
 
-from .weight_quantization import dsv4_export_dtype, export_rollout_weights, validate_rollout_quantization_config
-from .weight_quantization import get_mxfp4_export_config
+from .weight_quantization import iter_named_tensors, quantize_and_gather_weight, view_as_uint8
 
 
-def _state_dict_chunks(model):
+def _state_dict_chunks(model, *, fsdp_param_dtypes=None):
     """Yield the model's state_dict a piece at a time, one transformer block per piece.
 
-    Keys match the whole-model ones. Chunking keeps one layer's ``FusedQKVLinear`` save hook (a
-    Replicate gather in fp32) alive at a time instead of the whole stack.
+    Keys match the whole-model ones. Chunking keeps one layer's ``FusedQKVLinear`` save-hook
+    tensors materialized at a time instead of the whole stack.
     """
     for name, child in model.named_children():
         if isinstance(child, (nn.ModuleDict, nn.ModuleList)):
             for sub_name, sub in child.named_children():
-                yield sub.state_dict(prefix=f"{name}.{sub_name}.")
+                prefix = f"{name}.{sub_name}."
+                if fsdp_param_dtypes is None:
+                    yield sub.state_dict(prefix=prefix)
+                else:
+                    yield sub.state_dict(
+                        destination=_FSDPExportStateDict(fsdp_param_dtypes),
+                        prefix=prefix,
+                        keep_vars=True,
+                    )
         else:
-            yield child.state_dict(prefix=f"{name}.")
+            if fsdp_param_dtypes is None:
+                yield child.state_dict(prefix=f"{name}.")
+            else:
+                yield child.state_dict(
+                    destination=_FSDPExportStateDict(fsdp_param_dtypes),
+                    prefix=f"{name}.",
+                    keep_vars=True,
+                )
 
     # Anything held directly on the model rather than on a child.
-    own = {n: p for n, p in model.named_parameters(recurse=False)}
+    own = _FSDPExportStateDict(fsdp_param_dtypes) if fsdp_param_dtypes is not None else {}
+    own.update(model.named_parameters(recurse=False))
     own.update(model.named_buffers(recurse=False))
     if own:
         yield own
 
 
-def _hf_params_dict(model_parts, sd_adapter, raw_params=None):
-    """Build the whole HF-format params dict at once: state_dict + sd_adapter.to_hf + weight tying.
+class _FSDPExportStateDict(OrderedDict):
+    """Apply FSDP forward dtypes before save hooks split or rename parameters."""
 
-    Only the EP>1 path uses this; it needs every expert tensor in hand to pair with the names
-    gathered from the other EP ranks. Everything else streams through _state_dict_chunks.
+    def __init__(self, param_dtypes):
+        super().__init__()
+        self._param_dtypes = param_dtypes
+        self._metadata = OrderedDict()
+
+    @torch.no_grad()
+    def __setitem__(self, name, tensor):
+        dtype = (
+            self._param_dtypes.get(id(tensor))
+            if isinstance(self._param_dtypes, dict)
+            else self._param_dtypes
+        )
+        if dtype is not None and tensor.is_floating_point():
+            local_tensor = tensor.to_local() if isinstance(tensor, DTensor) else tensor
+            if isinstance(local_tensor, nn.Parameter):
+                local_tensor = local_tensor.data
+            if not callable(getattr(local_tensor, "to_inference_weight", None)):
+                tensor = tensor.to(dtype)
+        super().__setitem__(name, tensor)
+
+
+def _collect_fsdp_param_dtypes(model_parts):
+    """Map current sharded parameters to their effective FSDP forward dtypes."""
+    dtypes = {}
+    # No public API exposes each parameter's effective FSDP dtype.
+    for model in model_parts:
+        state = fully_shard.state(model)
+        state._lazy_init()
+        for fsdp_state in state._state_ctx.all_states:
+            for group in fsdp_state._fsdp_param_groups:
+                for param in group.fsdp_params:
+                    if param.param_dtype is not None:
+                        dtypes[id(param.sharded_param)] = param.param_dtype
+    return dtypes
+
+
+def _hf_params_dict(model_parts, sd_adapter, raw_params=None, *, fsdp_param_dtypes=None):
+    """Build the full HF state for EP export and precision guard.
+
+    EP export needs every expert tensor in hand to pair with the names gathered from the
+    other EP ranks. Non-EP export streams through _state_dict_chunks.
 
     The state dict comes from the module, not from DCP's ``get_model_state_dict``: ``to_hf``
     expects the keys the state-dict hooks produce (``FusedQKVLinear`` presents ``wqkv`` as
     ``wq`` / ``wk`` / ``wv``), which DCP's attribute walk cannot resolve.
 
-    ``raw_params`` replaces the read-from-model step, so gradients or optimizer state of the same
-    shape convert through the same path. Its keys must match the model's ``state_dict``.
+    Optional ``raw_params`` must use the same state-dict keys, allowing gradients and optimizer
+    state to share this path.
     """
     if raw_params is not None:
-        params = dict(raw_params)
+        params = _FSDPExportStateDict(fsdp_param_dtypes) if fsdp_param_dtypes is not None else {}
+        params.update(raw_params)
     else:
         params = {}
-        for m in model_parts:
-            params.update(m.state_dict())
+        for model in model_parts:
+            for chunk in _state_dict_chunks(model, fsdp_param_dtypes=fsdp_param_dtypes):
+                params.update(chunk)
 
     if sd_adapter is not None:
         params = sd_adapter.to_hf(params)
@@ -73,47 +131,29 @@ def _hf_params_dict(model_parts, sd_adapter, raw_params=None):
     return params
 
 
-def _full_tensor(param, device, dtype, *, unwrap_mxfp4=False):
-    """Cast float tensors to ``dtype``, then gather a DTensor to full on device.
+@torch.no_grad()
+def _get_export_tensors(param, device):
+    """Export either inference payload/scale or a full ordinary tensor."""
+    local_weight = param.to_local() if isinstance(param, DTensor) else param
 
-    The cast comes first so the collective moves the narrower dtype; the result is bitwise the same
-    either way. Non-float buffers keep their dtype; ``dtype=None`` keeps native precision, which
-    only the precision guard asks for.
-    """
-    if unwrap_mxfp4:
-        local = param.to_local() if isinstance(param, DTensor) else param
-        wrapper = local if callable(getattr(local, "to_tensor", None)) else None
-        if wrapper is not None:
-            raw = wrapper.to_tensor()
-            if isinstance(param, DTensor):
-                param = DTensor.from_local(
-                    raw,
-                    param.device_mesh,
-                    param.placements,
-                    run_check=False,
-                    shape=param.shape,
-                    stride=param.stride(),
-                )
-            else:
-                param = raw
-    if dtype is not None and param.is_floating_point() and param.dtype != dtype:
-        param = param.to(dtype)
-    t = param.full_tensor() if isinstance(param, DTensor) else param
-    return t if t.device == device else t.to(device, non_blocking=True)
+    # Wrapper tensors are Tensor subclasses; classify them before ordinary tensors.
+    if isinstance(local_weight, nn.Parameter):
+        local_weight = local_weight.data
+    if callable(getattr(local_weight, "to_inference_weight", None)):
+        # Quantized wrappers export packed data and scales.
+        return quantize_and_gather_weight(param, device)
+    else:
+        # Ordinary parameters only need to be materialized from their FSDP/TP shards.
+        return (param.full_tensor() if isinstance(param, DTensor) else param,)
 
 
-def _resolve_param_dtype(param_dtype, name, param):
-    """Resolve the forward/export dtype for one HF parameter.
-
-    The callable form is intentionally small and temporary: DSV4 has a few
-    FP32 forward-policy overrides while the remaining parameters use the
-    mixed-precision parameter dtype. Keeping the resolver here ensures the
-    dtype decision happens before DTensor materialization and before any
-    rollout quantization.
-    """
-    if callable(param_dtype):
-        return param_dtype(name, param)
-    return param_dtype
+def _ep_all_gather(tensor, ep_group, ep_size):
+    """Gather one EP tensor using a HCCL-supported transport dtype."""
+    # Make the byte view contiguous: NPU copy kernels do not support every MX dtype.
+    transport_tensor = view_as_uint8(tensor).contiguous()
+    gathered = [torch.empty_like(transport_tensor) for _ in range(ep_size)]
+    dist.all_gather(gathered, transport_tensor, group=ep_group)
+    return [item.view(tensor.dtype) for item in gathered]
 
 
 def get_hf_per_tensor(
@@ -121,98 +161,67 @@ def get_hf_per_tensor(
     sd_adapter,
     device,
     *,
-    param_dtype: torch.dtype | Callable[[str, torch.Tensor], torch.dtype | None] | None,
+    param_dtype: torch.dtype | None = None,
+    fsdp_param_dtypes=None,
     parallel_dims=None,
     raw_params=None,
     yield_experts_on_all_ranks=False,
-    train_quantization=None,
-    model_type=None,
 ) -> Callable[[], Iterator[tuple[str, torch.Tensor]]]:
-    """Validate export config now and return a reusable weight-iterator factory.
+    """Return a reusable HF weight factory; all ranks must consume each iterator.
 
-    Each invocation reads current model state and starts fresh collectives. Creating
-    the factory does not materialize weights; all ranks must consume each iterator.
+    Use either a uniform ``param_dtype`` or collected per-parameter FSDP dtypes.
     """
-    validate_rollout_quantization_config(train_quantization)
-    quantized_rollout = bool(getattr(train_quantization, "enable_quantized_training", False))
-    rollout_quantization = getattr(train_quantization, "recipe", None)
-    mxfp4_config = get_mxfp4_export_config(train_quantization) if quantized_rollout else None
-
-    def effective_param_dtype(name, param):
-        dtype = _resolve_param_dtype(param_dtype, name, param)
-        # Keep None's native-precision contract for checkpoint/precision exports.
-        # DSV4's FP32 state is independent of whether its linear weights are quantized.
-        if model_type == "deepseek_v4" and dtype is not None:
-            return dsv4_export_dtype(
-                name,
-                dtype,
-                recipe=rollout_quantization,
-                mxfp4_config=mxfp4_config,
-            )
-        return dtype
-
-    def iter_weights():
+    def _iter_weights():
         ep_group, ep_size = _get_ep_group(parallel_dims)
-        if ep_group is None:
-            chunks = [dict(raw_params)] if raw_params is not None else (
-                chunk for m in model_parts for chunk in _state_dict_chunks(m)
+        param_dtypes = param_dtype if param_dtype is not None else fsdp_param_dtypes
+        if ep_group is not None:
+            chunks = [_hf_params_dict(model_parts, sd_adapter, raw_params, fsdp_param_dtypes=param_dtypes)]
+        elif raw_params is not None:
+            chunk = _FSDPExportStateDict(param_dtypes) if param_dtypes is not None else {}
+            chunk.update(raw_params)
+            chunks = [chunk]
+        else:
+            chunks = (
+                chunk
+                for model in model_parts
+                for chunk in _state_dict_chunks(model, fsdp_param_dtypes=param_dtypes)
             )
-            tied_embedding = None
-            saw_lm_head = False
-            for chunk in chunks:
-                hf_chunk = sd_adapter.to_hf(chunk) if sd_adapter is not None else chunk
-                for name, param in hf_chunk.items():
-                    tensor = _full_tensor(
-                        param, device, effective_param_dtype(name, param),
-                        unwrap_mxfp4=mxfp4_config is not None,
-                    )
-                    saw_lm_head = saw_lm_head or name == "lm_head.weight"
-                    if name == "model.embed_tokens.weight":
-                        tied_embedding = tensor
-                    yield name, tensor
-            if tied_embedding is not None and not saw_lm_head:
-                yield "lm_head.weight", tied_embedding
-            return
+        expert_params = []
+        tied_embedding = None
+        saw_lm_head = False
+        for chunk in chunks:
+            if ep_group is None and sd_adapter is not None:
+                chunk = sd_adapter.to_hf(chunk)
+            for name, param in chunk.items():
+                if ep_group is not None and ".experts." in name:
+                    expert_params.append((name, param))
+                    continue
+                export_tensors = _get_export_tensors(param, device)
+                saw_lm_head = saw_lm_head or name == "lm_head.weight"
+                if name == "model.embed_tokens.weight":
+                    tied_embedding = export_tensors
+                yield from iter_named_tensors(name, export_tensors)
 
-        params = _hf_params_dict(model_parts, sd_adapter, raw_params)
-        expert_params = [(n, p) for n, p in params.items() if ".experts." in n]
-        non_expert_params = [(n, p) for n, p in params.items() if ".experts." not in n]
-        for name, param in non_expert_params:
-            yield name, _full_tensor(
-                param, device, effective_param_dtype(name, param),
-                unwrap_mxfp4=mxfp4_config is not None,
+        if tied_embedding is not None and not saw_lm_head:
+            yield from iter_named_tensors("lm_head.weight", tied_embedding)
+        if ep_group is not None:
+            ep_names = [None] * ep_size
+            dist.all_gather_object(ep_names, [name for name, _ in expert_params], group=ep_group)
+            assert all(len(names) == len(expert_params) for names in ep_names), (
+                f"EP ranks hold different expert counts {[len(names) for names in ep_names]}; "
+                "names and tensors would be paired wrongly"
             )
+            is_src = (not dist.is_initialized()) or dist.get_rank() == 0
+            for index, (_, param) in enumerate(expert_params):
+                # Restore TP/FSDP shards before gathering experts across EP ranks.
+                export_tensors = _get_export_tensors(param, device)
+                gathered = [_ep_all_gather(tensor, ep_group, ep_size) for tensor in export_tensors]
+                if is_src or yield_experts_on_all_ranks:
+                    for ep_rank, expert_tensors in enumerate(zip(*gathered)):
+                        yield from iter_named_tensors(ep_names[ep_rank][index], expert_tensors)
 
-        is_src = (not dist.is_initialized()) or dist.get_rank() == 0
-        ep_names = [None] * ep_size
-        dist.all_gather_object(ep_names, [n for n, _ in expert_params], group=ep_group)
-        assert all(len(names) == len(expert_params) for names in ep_names), (
-            f"EP ranks hold different expert counts {[len(n) for n in ep_names]}; "
-            "names and tensors would be paired wrongly"
-        )
-        for i, (name, raw_param) in enumerate(expert_params):
-            tensor = _full_tensor(
-                raw_param, device, effective_param_dtype(name, raw_param),
-                unwrap_mxfp4=mxfp4_config is not None,
-            ).contiguous()
-            gathered = [torch.empty_like(tensor) for _ in range(ep_size)]
-            dist.all_gather(gathered, tensor, group=ep_group)
-            if not is_src and not yield_experts_on_all_ranks:
-                continue
-            for ep_rank in range(ep_size):
-                yield ep_names[ep_rank][i], gathered[ep_rank]
+    return _iter_weights
 
-    def rollout_weights_iter():
-        weights = iter_weights()
-        if quantized_rollout:
-            return export_rollout_weights(
-                weights,
-                recipe=rollout_quantization,
-                mxfp4_config=mxfp4_config,
-            )
-        return weights
-
-    return rollout_weights_iter
 
 def _get_ep_group(parallel_dims):
     """Return (ep_group, ep_size) or (None, 1) when EP is not enabled."""

@@ -323,6 +323,7 @@ def get_hf_per_tensor_selected_experts(
     param_dtype,
     parallel_dims=None,
     raw_params=None,
+    fsdp_param_dtypes=None,
     yield_experts_on_all_ranks=False,
     expert_limit=None,
     progress=None,
@@ -335,10 +336,9 @@ def get_hf_per_tensor_selected_experts(
     """
     from vime.backends.torchtitan_utils.update_weight import common
 
-    params = common._hf_params_dict(model_parts, sd_adapter, raw_params)
-    ep_group, ep_size = common._get_ep_group(parallel_dims)
-
     if progress is not None:
+        params = common._hf_params_dict(model_parts, sd_adapter, raw_params)
+        ep_group, ep_size = common._get_ep_group(parallel_dims)
         non_expert_params = [(name, param) for name, param in params.items() if ".experts." not in name]
         if ep_group is None:
             selected = [
@@ -390,6 +390,7 @@ def get_hf_per_tensor_selected_experts(
         sd_adapter,
         device,
         param_dtype=param_dtype,
+        fsdp_param_dtypes=fsdp_param_dtypes,
         parallel_dims=parallel_dims,
         raw_params=raw_params,
         yield_experts_on_all_ranks=yield_experts_on_all_ranks,
@@ -522,7 +523,8 @@ def record_weight(args, model_parts, parallel_dims, *, role, rollout_id, step_id
         args, site="weight", role=role, rollout_id=rollout_id, step_id=step_id,
         named_tensors=get_hf_per_tensor_selected_experts(
             model_parts, a.engine.sd_adapter, _device(),
-            param_dtype=export_dtype(args), parallel_dims=parallel_dims,
+            param_dtype=export_dtype(args), fsdp_param_dtypes=a.engine.fsdp_param_dtypes,
+            parallel_dims=parallel_dims,
             expert_limit=getattr(args, "precision_guard_expert_limit", -1),
             progress=progress,
         ),

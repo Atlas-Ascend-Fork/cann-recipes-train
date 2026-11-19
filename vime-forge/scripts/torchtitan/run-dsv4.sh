@@ -120,7 +120,6 @@ else
   VLLM_ARGS+=(--rollout-num-gpus-per-engine "${VLLM_RANKS_PER_ENGINE}")
 fi
 if [[ "${ENABLE_MXFP4}" == "1" ]]; then
-  VLLM_ARGS+=(--vllm-enable-mxfp4)
   VLLM_ARGS+=(--vllm-additional-config '{"enable_mxfp4_li":true}')
 fi
 # Release cached allocations between training phases for DSV4 memory pressure.

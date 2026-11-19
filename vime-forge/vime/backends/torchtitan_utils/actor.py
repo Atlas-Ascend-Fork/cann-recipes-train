@@ -189,22 +189,17 @@ class TorchTitanTrainRayActor(TrainRayActor):
             update_weight_cls = UpdateWeightFromTensor
         else:
             update_weight_cls = UpdateWeightFromDistributed
-        extension = getattr(self.engine.config, "extension", None)
-        train_quantization = getattr(extension, "quantization", None)
 
-        # Validate export configuration during initialization; the updater calls
-        # the returned factory to read fresh weights on every synchronization.
+        # The updater calls the returned factory to read fresh weights on every synchronization.
         self.weight_updater = update_weight_cls(
             args,
             get_hf_per_tensor(
                 self.engine.model_parts,
                 self.engine.sd_adapter,
                 device,
-                param_dtype=self.engine.compute_dtype,
+                fsdp_param_dtypes=self.engine.fsdp_param_dtypes,
                 parallel_dims=self.engine.parallel_dims,
                 yield_experts_on_all_ranks=args.colocate,
-                train_quantization=train_quantization,
-                model_type=self.engine.config.model_spec.name,
             ),
         )
 

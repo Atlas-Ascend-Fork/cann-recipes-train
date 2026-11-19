@@ -53,7 +53,7 @@ from ._titan_compat import assert_model_matches_checkpoint, enable_fsdp_gradient
 from .data import get_batch, restore_global_response_fields
 from .loss import loss_function
 from .quantization import apply_training_quantization, validate_quantized_model
-from .update_weight.common import get_hf_per_tensor
+from .update_weight.common import _collect_fsdp_param_dtypes, get_hf_per_tensor
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +173,7 @@ class TitanEngine:
         loaded_rollout_id = ckpt.load(engine.checkpointer, args)
         for model in engine.model_parts:
             validate_quantized_model(model, engine.config)
+        engine.fsdp_param_dtypes = _collect_fsdp_param_dtypes(engine.model_parts)
         # todo: critic output layer reinit not supported
         clear_memory()
         return engine, loaded_rollout_id
@@ -181,6 +182,7 @@ class TitanEngine:
         self.args = args
         self.config = config
         self.hf_config = hf_config
+        self.fsdp_param_dtypes = {}
         model_spec = apply_training_quantization(config)
         assert model_spec is not None, "model_spec must be set by the config_registry recipe"
         self.sequence_padding_multiple = 64 if model_spec.name == "qwen3_5" else 1
@@ -761,18 +763,18 @@ class TitanEngine:
         path = args.save_hf.format(rollout_id=rollout_id)
 
         try:
-            extension = getattr(self.config, "extension", None)
-            train_quantization = getattr(extension, "quantization", None)
             tensors = {}
             for name, tensor in get_hf_per_tensor(
                 self.model_parts, self.sd_adapter, self.device,
-                param_dtype=self.compute_dtype, parallel_dims=self.parallel_dims,
-                train_quantization=train_quantization,
-                model_type=self.config.model_spec.name,
+                fsdp_param_dtypes=self.fsdp_param_dtypes,
+                parallel_dims=self.parallel_dims,
             )():
                 # Drain collectives on every rank, but retain full weights only on rank 0's CPU.
                 if is_rank0:
-                    tensors[name] = tensor.detach().cpu().contiguous()
+                    tensor = tensor.detach().cpu().contiguous()
+                    if tensor.dtype in (torch.float4_e2m1fn_x2, torch.float8_e8m0fnu):
+                        tensor = tensor.view(torch.uint8)
+                    tensors[name] = tensor
                 del tensor
             if is_rank0:
                 os.makedirs(path, exist_ok=True)

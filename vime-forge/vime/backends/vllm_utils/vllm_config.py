@@ -8,11 +8,6 @@ import yaml
 logger = logging.getLogger(__name__)
 
 
-def uses_mxfp4_weights(args) -> bool:
-    """Whether VIME should use its MXFP4 rollout weight configuration."""
-    return getattr(args, "vllm_enable_mxfp4", False)
-
-
 @dataclasses.dataclass
 class ServerGroupConfig:
     """Configuration for a single server group.
@@ -109,30 +104,6 @@ class ModelConfig:
                 self.update_weights = False
             else:
                 self.update_weights = True
-
-        # Rollout engines start before the training actor. Allocate the published
-        # weight format at initialization.
-        if self.update_weights and uses_mxfp4_weights(args):
-            for group in self.server_groups:
-                if group.worker_type in {"placeholder", "encoder"}:
-                    continue
-                overrides = {key.replace("-", "_").removeprefix("vllm_"): value for key, value in group.overrides.items()}
-                hf_overrides = dict(getattr(args, "vllm_hf_overrides", None) or {})
-                hf_overrides.update(overrides.get("hf_overrides") or {})
-                hf_overrides["quantization_config"] = {
-                    "quant_method": "mxfp8",
-                    "fmt": "e4m3",
-                    "scale_fmt": "ue8m0",
-                    "activation_scheme": "dynamic",
-                    "group_size": 32,
-                    "routed_expert_dtype": "mxfp4",
-                }
-                overrides["hf_overrides"] = hf_overrides
-                overrides["quantization"] = "deepseek_v4_mxfp4"
-                # Source HF assets may use another weight format. Training loads
-                # them, then publishes the first complete model before rollout.
-                overrides["load_format"] = "dummy"
-                group.overrides = overrides
 
     @property
     def has_pd_disaggregation(self) -> bool:

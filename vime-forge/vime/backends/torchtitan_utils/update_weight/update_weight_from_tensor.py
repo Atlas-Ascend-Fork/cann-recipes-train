@@ -30,7 +30,6 @@ import torch
 import torch.distributed as dist
 
 from vime.utils import accelerator
-from vime.backends.vllm_utils.vllm_config import uses_mxfp4_weights
 from vime.utils.distributed_utils import get_gloo_group
 
 logger = logging.getLogger(__name__)
@@ -118,8 +117,7 @@ class UpdateWeightFromTensor:
 
         self.weight_version += 1
         rank = dist.get_rank()
-        mxfp4_weights = uses_mxfp4_weights(self.args)
-        if rank == 0 and not (mxfp4_weights and self.args.offload_rollout):
+        if rank == 0 and not self.args.offload_rollout:
             # sleep() already paused and cleared the offloaded engines. A DP
             # pause here would execute dummy forwards before KV restoration.
             ray.get([engine.pause_generation.remote() for engine in self.rollout_engines])
@@ -127,9 +125,8 @@ class UpdateWeightFromTensor:
         dist.barrier(group=get_gloo_group())
 
         if rank == self._ipc_gather_src:
-            # get_hf_per_tensor emits checkpoint names/layouts, including packed
-            # experts and scales. Let the model loader shard and postprocess them.
-            ray.get(self._ipc_engine.start_weight_update.remote(is_checkpoint_format=mxfp4_weights))
+            # All exports use checkpoint names and layouts.
+            ray.get(self._ipc_engine.start_weight_update.remote(is_checkpoint_format=True))
         dist.barrier(group=get_gloo_group())
 
         bucket: list[tuple[str, torch.Tensor]] = []
@@ -149,10 +146,7 @@ class UpdateWeightFromTensor:
         torch.npu.synchronize()
 
         if rank == self._ipc_gather_src:
-            if mxfp4_weights:
-                ray.get(self._ipc_engine.finish_weight_update.remote(weight_version=str(self.weight_version)))
-            else:
-                ray.get(self._ipc_engine.finish_weight_update.remote())
+            ray.get(self._ipc_engine.finish_weight_update.remote(weight_version=str(self.weight_version)))
         dist.barrier(group=get_gloo_group())
 
         # Split wake restores weights before this update and KV cache afterwards.
