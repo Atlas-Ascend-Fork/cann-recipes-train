@@ -125,11 +125,12 @@ check_subdir_patches() {
 # Check if patch names appear in README.md.
 # -----------------------------------------
 check_patch_references_in_readme() {
-    local readme_path="README.md"
+    local readme_path="$1"
+    shift
     local -a patches=("$@")
 
     if [[ ! -f "$readme_path" ]]; then
-        ERRORS+=("[Missing README.md] README.md is not found")
+        ERRORS+=("[Missing README.md] $readme_path is not found")
         return
     fi
     
@@ -161,7 +162,7 @@ done < <(find "$ROOT" -maxdepth 1 -type f -name "*.patch" -printf "%f\n")
 check_root_patches "${root_files[@]}"
 
 # Check root-level patches against root README.md (if it exists)
-check_patch_references_in_readme "${root_files[@]}"
+check_patch_references_in_readme "README.md" "${root_files[@]}"
 
 # Subdirectories (only level-1)
 while IFS= read -r sub; do
@@ -175,7 +176,9 @@ while IFS= read -r sub; do
     check_subdir_patches "$sub" "${mod_files[@]}"
     
     # Check subdirectory patches against their respective README.md (if it exists)
-    check_patch_references_in_readme "${mod_files[@]}"
+    if [[ -f "$sub/README.md" ]]; then
+        check_patch_references_in_readme "$sub/README.md" "${mod_files[@]}"
+    fi
 
 done < <(find "$ROOT" -maxdepth 1 -mindepth 1 -type d)
 
