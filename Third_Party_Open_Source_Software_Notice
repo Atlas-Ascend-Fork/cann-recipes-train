@@ -1805,3 +1805,10 @@ Copyright Notice(s):
 Copyright 2024 Bytedance Ltd. and/or its affiliates
 License: Apache License V2.0
 Please see above
+
+Software: slime (source-derived async_utils.py in vime-forge/vime/utils)
+Source: https://github.com/THUDM/slime
+Copyright 2025 Zhipu AI
+License: Apache License, Version 2.0
+Original full notice and license: vime-forge/LICENSE
+The bundled Vime README identifies slime as its upstream. Huawei copyright applies to modifications.
