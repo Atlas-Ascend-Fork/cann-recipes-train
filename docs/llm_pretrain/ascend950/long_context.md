@@ -45,14 +45,9 @@ V4.1 的 ReUse 设计带来一个整网层面的优化空间：原理上每层�
 
 $$
 \begin{gathered}
-\mathcal{L}^{I}\stackrel{\triangle}{=}\sum_{t}Z_{t}\;\mathbb{D}_{\mathrm{KL}}\left(\tilde{p}_{t}\;\|\;\mathrm{Softmax}\left(I_{t}\right)\right)=\sum_{t}Z_{t}\;\mathbb{D}_{\mathrm{KL}}\left(\tilde{p}_{t}\;\|\;Y_{t}\right)\\
-\nabla_{I_t}\mathcal L^I
-=
--\left(\frac{\partial \log Y_t}{\partial I_t}\right)^\top p_t
-=
-\left(Y_t\mathbf 1^\top-I_K\right)p_t
+\mathcal{L}^{I}\stackrel{\triangle}{=}\sum_{t}Z_{t}\mkern5mu\mathbb{D}_{\mathrm{KL}}\left(\tilde{p}_{t}\mkern5mu\Vert\mkern5mu \mathrm{Softmax}\left(I_{t}\right)\right)=\sum_{t}Z_{t}\mkern5mu\mathbb{D}_{\mathrm{KL}}\left(\tilde{p}_{t}\mkern5mu\Vert\mkern5mu Y_{t}\right)\\
+\nabla_{I_t}\mathcal L^I=-\left(\frac{\partial \log Y_t}{\partial I_t}\right)^\top p_t=\left(Y_t\mathbf 1^\top-I_K\right)p_t
 \end{gathered}
-
 $$
 
 因此，在 SparseFlashMLAGrad 的反向封装中，可将未归一化教师分布返回值 `cmp_softmax_l1_norm` 作为教师项梯度贡献回传，借助 PyTorch 自动微分框架完成对 Indexer Loss 中 KL 散度教师分布的自动累加。由于最终教师分布本身是各层注意力分布的加权，因此可以在 ReIndex 层集中计算一次损失梯度，而非每层重复计算。这一优化将 Indexer Loss 相关的 CP 通信与计算次数从$O(L)$降至$O(L_{ReIndex})$。
