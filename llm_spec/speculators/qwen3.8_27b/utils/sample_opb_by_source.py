@@ -114,8 +114,21 @@ def count_lines(path):
 def collect_files(src_dirs):
     """收集各 source 的分片文件：{source: [path, ...]}。"""
     files = defaultdict(list)
+    seen = set()
     for d in src_dirs:
         for path in sorted(glob.glob(os.path.join(d, "*.jsonl"))):
+            try:
+                info = os.stat(path)
+            except OSError:
+                info = None
+            if info is not None and info.st_ino:
+                identity = (info.st_dev, info.st_ino)
+            else:
+                # Fall back to the resolved path when a file ID is unavailable.
+                identity = os.path.normcase(os.path.realpath(path))
+            if identity in seen:
+                continue
+            seen.add(identity)
             files[source_of(path)].append(path)
     return dict(files)
 
