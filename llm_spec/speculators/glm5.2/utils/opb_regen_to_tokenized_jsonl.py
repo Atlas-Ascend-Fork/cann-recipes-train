@@ -168,7 +168,10 @@ def parse_args():
     ap.add_argument("--max-samples", type=int, default=None, help="抽样条数，不给则全量")
     ap.add_argument("--seed", type=int, default=42, help="抽样随机种子")
     ap.add_argument("--seq-length", type=int, default=8192, help="序列长度上限")
-    return ap.parse_args()
+    args = ap.parse_args()
+    if args.max_samples is not None and args.max_samples < 0:
+        ap.error("--max-samples must be non-negative")
+    return args
 
 
 def pick_rows(files, max_samples, seed):
