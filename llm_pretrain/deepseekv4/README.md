@@ -260,11 +260,11 @@ bash scripts/run_train_multinodes_dsv4_pro_pretrain.sh
 * 进入 `torchtitan-npu` 源码目录后，在昇腾950PR/DT系列A5上参与训练的单机节点上执行如下命令，即可分别启动 `DeepSeek-V4-Flash` 单机裁剪模型的BF16/MXFP8的CPT训练任务：
 
 ```shell
-bash run_train_dsv4_flash_A5_BF16_pretrain.sh
+bash scripts/run_train_dsv4_flash_A5_BF16_pretrain.sh
 ```
 
 ```shell
-bash run_train_dsv4_flash_A5_MXFP8_pretrain.sh
+bash scripts/run_train_dsv4_flash_A5_MXFP8_pretrain.sh
 ```
 
 ## DeepSeek-V4-Flash A5 HiF8 低精度训练
