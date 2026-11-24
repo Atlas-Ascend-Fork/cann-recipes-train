@@ -4,7 +4,7 @@
 
 本文面向 `torchtitan-npu` 仓中的 `DeepSeek-V4-Flash` 模型以及 `DeepSeek-V4-Pro` 模型的训练场景，介绍源码获取、数据准备、模型权重准备与 BF16 转换、镜像准备、Docker 容器拉起、训练配置说明以及多机训练启动方式。
 
-本文的优化方案介绍和性能Benchmark可参见技术报告[DeepSeek-V4昇腾训练支持：基于CANN平台的TorchTitan-NPU + AutoFuse 极简训练优化实践](../../docs/llm_pretrain/deepseek-v4_torchtitan_npu_autofuse.md)。
+本文的优化方案介绍和性能Benchmark可参见技术报告[DeepSeek-V4昇腾训练支持：基于CANN平台的TorchTitan-NPU + AutoFuse 极简训练优化实践](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/llm_pretrain/deepseek_v4/zh/deepseek-v4_torchtitan_npu_autofuse.md)。
 
 ## 硬件与软件要求
 

@@ -1,7 +1,7 @@
 # Qwen3.6-27B SFT Guide
 
 This document describes how to perform SFT (supervised fine-tuning) on Qwen3.6-27B with MindSpeed-MM.
-For training results and the training process report, see the [practice report](../../../docs/llm_sft/qwen36_ascendc/qwen36_ascendc_sft_report.md).
+For training results and the training process report, see the [practice report](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/llm_sft/qwen36_ascendc/zh/qwen36_ascendc_sft_report.md).
 
 Example environment and version information:
 

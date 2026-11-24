@@ -148,7 +148,7 @@ Atlas A3 系列产品。
     # 根据模型许可和实际网络环境下载 FLUX 权重到 data/flux
     ```
     hugging_face 下载地址：https://huggingface.co/black-forest-labs/FLUX.1-dev
-    
+
     modelscope 下载地址：https://www.modelscope.cn/models/black-forest-labs/FLUX.1-dev
 
 2. 准备 HPS 和 CLIP 权重。训练脚本默认从 `hps_ckpt` 加载，请将所需权重下载到该目录。

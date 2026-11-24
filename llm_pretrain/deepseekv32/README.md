@@ -2,7 +2,7 @@
 
 ## 概述
 
-本样例针对DeepSeek-V3.2模型，基于[TorchTitan开源框架](https://github.com/pytorch/torchtitan)，在64卡Atlas A3集群上完成32K长序列预训练全流程的优化适配。优化点介绍可参见[CANN+TorchTitan: DeepSeek-V3.2 32k长序列预训练昇腾优化实践](../../docs/llm_pretrain/deepseek-v32_pre_train_optimization.md)。
+本样例针对DeepSeek-V3.2模型，基于[TorchTitan开源框架](https://github.com/pytorch/torchtitan)，在64卡Atlas A3集群上完成32K长序列预训练全流程的优化适配。优化点介绍可参见[CANN+TorchTitan: DeepSeek-V3.2 32k长序列预训练昇腾优化实践](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/llm_pretrain/deepseek_v32/zh/deepseek-v32_pre_train_optimization.md)。
 
 训练框架使用昇腾官方维护的 [torchtitan-npu](https://gitcode.com/cann/torchtitan-npu) 插件（本样例对应版本 `v0.2.2`），需在本样例目录下拉取后使用，详见下文「源码准备」。
 

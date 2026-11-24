@@ -4,7 +4,7 @@
 
 本文面向 `torchtitan-npu` 仓中的 `DeepSeek-V4.1-Flash` 模型训练场景，介绍源码获取、数据准备、模型权重准备与 BF16 转换、镜像准备、Docker 容器拉起、训练配置说明以及多机训练启动方式。
 
-围绕超大规模、超长序列、多模态、高可用训练及训练开发者效率提升等复杂场景方案可参见技术报告[基于昇腾950超节点的万亿MoE模型预训练系统参考实践](../../docs/llm_pretrain/ascend950_superpod_moe_pretrain_system_reference.md)。
+围绕超大规模、超长序列、多模态、高可用训练及训练开发者效率提升等复杂场景方案可参见技术报告[基于昇腾950超节点的万亿MoE模型预训练系统参考实践](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/llm_pretrain/ascend950/zh/ascend950_superpod_moe_pretrain_system_reference.md)。
 
 ## 硬件与软件要求
 

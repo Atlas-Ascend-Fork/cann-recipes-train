@@ -1,7 +1,7 @@
 # TorchTitan Ascend C 算子生成全参数 SFT 样例
 
 本样例基于 **TorchTitan-NPU**，对 Qwen3.6-27B 进行 Ascend C 算子生成全参数监督微调。训练配置面向 Ascend C 算子生成语料和 CP8 × FSDP2，支持完整 DCP 保存与 Hugging Face 权重导出。
-训练效果及训练过程报告请参考：[实践报告](../../../docs/llm_sft/qwen36_ascendc/qwen36_ascendc_sft_report.md)。
+训练效果及训练过程报告请参考：[实践报告](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/llm_sft/qwen36_ascendc/zh/qwen36_ascendc_sft_report.md)。
 
 ## 文件说明
 

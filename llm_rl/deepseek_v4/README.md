@@ -6,7 +6,7 @@ DeepSeek团队发布了模型DeepSeek-V4技术报告，本实践基于DeepSeek�
 
 本文介绍在 **Ascend 950DT 系列、Linux ARM** 环境下，使用 Vime 作为rl流程控制框架后端对接torchtitan和vllm分别作为rl训练及推理侧框架。
 
-- 本实践的相关特性可参见 [基于鲲鹏CPU、昇腾950和灵衢协同的Agentic RL训练实践](../../docs/llm_rl/kunpeng_ascend_agentic_rl_infrastructure.md)
+- 本实践的相关特性可参见 [基于鲲鹏CPU、昇腾950和灵衢协同的Agentic RL训练实践](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/llm_rl/kunpeng_ascend_agentic_rl/zh/kunpeng_ascend_agentic_rl_infrastructure.md)
 
 
 

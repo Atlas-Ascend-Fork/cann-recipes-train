@@ -2,7 +2,7 @@
 
 ## 概述
 
-本样例针对DeepSeek-V3 裁剪模型，基于[MindSpeed 框架](https://gitcode.com/Ascend/MindSpeed)，在 8 卡 Atlas A5 上完成8K序列MXFP8/HiF8 低精度预训练。MXFP8/HiF8 低精度预训练介绍可参见[HiF8精度与性能双优：面向大模型训练的低精度优化实践](../../docs/llm_pretrain/deepseek-v3_pre_train_hif8_mxfp8.md)。
+本样例针对DeepSeek-V3 裁剪模型，基于[MindSpeed 框架](https://gitcode.com/Ascend/MindSpeed)，在 8 卡 Atlas A5 上完成8K序列MXFP8/HiF8 低精度预训练。MXFP8/HiF8 低精度预训练介绍可参见[HiF8精度与性能双优：面向大模型训练的低精度优化实践](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/llm_pretrain/deepseek_v3/zh/deepseek-v3_pre_train_hif8_mxfp8.md)。
 
 ## 硬件要求
 产品型号：Atlas A5 950DT 系列
@@ -29,7 +29,7 @@ pip3 install torch_npu-2.7.1.post2-cp310-cp310-manylinux_2_28_aarch64.whl
 
 ```bash
 # 请根据实际路径进行替换，当前支持A5的商发cann包暂时未发布，发布后安装即可
-source /usr/local/Ascend/cann/set_env.sh 
+source /usr/local/Ascend/cann/set_env.sh
 source /usr/local/Ascend/nnal/atb/set_env.sh
 
 # 创建代码目录工程
@@ -41,7 +41,7 @@ cd train_code
 git clone https://gitcode.com/ascend/MindSpeed.git
 cd MindSpeed
 git checkout master  # checkout commit from MindSpeed master
-pip3 install -r requirements.txt 
+pip3 install -r requirements.txt
 pip3 install -e .
 cd ..
 

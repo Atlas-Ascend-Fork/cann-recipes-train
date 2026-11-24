@@ -3,9 +3,9 @@
 ## 概述
 本样例针对Qwen3-235B-A22B和Qwen3-32B模型，基于[veRL开源框架](https://github.com/volcengine/verl)，以及veRL原生支持的MindSpeed和vLLM-Ascend框架，完成了多项强化学习实践。
 
-针对Qwen3-235B-A22B RL训练全流程的优化适配，参见[Qwen3-235B 32K长序列RL训练优化实践](../../../docs/llm_rl/qwen3_235B_32k_longseq_rl_train_optimization.md)。
+针对Qwen3-235B-A22B RL训练全流程的优化适配，参见[Qwen3-235B 32K长序列RL训练优化实践](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/llm_rl/qwen3/qwen3_235B/zh/qwen3_235B_32k_longseq_rl_train_optimization.md)。
 
-针对Qwen3-32B上的SAM投机推理实践，参见[SAM投机推理：长序列强化学习训练加速利器](../../../docs/llm_rl/sam_decoding.md)。
+针对Qwen3-32B上的SAM投机推理实践，参见[SAM投机推理：长序列强化学习训练加速利器](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/llm_rl/qwen3/sam_decoding/zh/sam_decoding.md)。
 
 注：在当前版本，由于使用npugraph_ex替代了GE图模式，235B长序列优化实践文档中部分特性的patch已经失效，若想查看实践中完整的优化实现，请参考[v0.1.0版本](https://gitcode.com/cann/cann-recipes-train/tree/v0.1.0/llm_rl/qwen3)的代码。
 
@@ -28,7 +28,7 @@
 1. **GRPO算法RL训练**：针对Qwen3-32B模型，本样例基于Atlas A3 16卡集群，加载真实权重，使用deepscaler数据集，Prefill/Decode阶段长度分别为2K与34K，开启/关闭SAM投机推理特性，同时开启/关闭npugraph_ex特性，性能测试结果如下：
 
    | 基础模型  | 机器型号      | GBS | n_samples | step | max_prompt_length(最大输入长度) | max_response_length(最大输出长度) | SAM投机推理 | npugraph_ex | timing_s/generate_sequences(首步推理时间) | 提升 |
-   | --------- | ------------- | --- | --------- | ---- | ----------------- | ------------------- | --- |  --- | ------------ | --- | 
+   | --------- | ------------- | --- | --------- | ---- | ----------------- | ------------------- | --- |  --- | ------------ | --- |
    | Qwen3-32B | Atlas A3 16卡 | 128 | 16        | 1    | 2048              | 34816               | 关闭  | 关闭 | 2444       |      |
    | Qwen3-32B | Atlas A3 16卡 | 128 | 16        | 1    | 2048              | 34816               | 开启  | 关闭 | 2106       | 13%     |
    | Qwen3-32B | Atlas A3 16卡 | 128 | 16        | 1    | 2048              | 34816               | 开启  | 开启 | 1621       | 33%     |
@@ -36,7 +36,7 @@
 2. **DAPO算法RL训练**：针对Qwen3-32B模型，本样例基于Atlas A3 16卡集群，加载真实权重，使用dapo-math-17k数据集，Prefill/Decode阶段长度分别为2K与34K，开启/关闭SAM投机推理特性，同时开启/关闭npugraph_ex特性，性能测试结果如下：
 
    | 基础模型  | 机器型号      | GBS | n_samples | step | max_prompt_length(最大输入长度) | max_response_length(最大输出长度) | SAM投机推理 | npugraph_ex | timing_s/generate_sequences(首步推理时间) | 提升 |
-   | --------- | ------------- | --- | --------- | ---- | ----------------- | ------------------- | --- |  --- | ------------ | --- | 
+   | --------- | ------------- | --- | --------- | ---- | ----------------- | ------------------- | --- |  --- | ------------ | --- |
    | Qwen3-32B | Atlas A3 16卡 | 128 | 16        | 1    | 2048              | 34816               | 关闭    | 关闭 | 4562       |      |
    | Qwen3-32B | Atlas A3 16卡 | 128 | 16        | 1    | 2048              | 34816               | 开启    | 关闭 | 4109       | 10%     |
    | Qwen3-32B | Atlas A3 16卡 | 128 | 16        | 1    | 2048              | 34816               | 开启    | 开启 | 3261       | 29%     |
@@ -143,7 +143,7 @@ source /usr/local/Ascend/ascend-toolkit/set_env.sh
 export USE_ALLTOALL_OVERLAP=1
 
 # 单机执行权重切分，切分后权重保存至指定目录，修改"hf_model_path"为huggingface权重下载路径，"output_path"为切分权重保存路径
-torchrun --nproc_per_node 16 converter_hf_to_mcore.py \ 
+torchrun --nproc_per_node 16 converter_hf_to_mcore.py \
    --hf_model_path "your_hf_weights" \
    --output_path "your_sharded_weights" \
    --trust_remote_code \
@@ -223,7 +223,7 @@ export VLLM_ROLLOUT_EARLY_STOP_MIN_TOKENS=10000
 bash internal/train_grpo_qwen3_resampler_example.sh
 ```
 
-该特性的设计背景、实现方案和收益说明可参考[Length-Aware Resampler：基于历史 Response 长度的 Rollout 重采样优化](../../../docs/features/length_aware_resampler.md)。
+该特性的设计背景、实现方案和收益说明可参考[Length-Aware Resampler：基于历史 Response 长度的 Rollout 重采样优化](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/features/zh/length_aware_resampler.md)。
 
 ### 可选特性：History Tree Dynamic RL
 
@@ -235,7 +235,7 @@ bash internal/train_grpo_qwen3_resampler_example.sh
 bash internal/train_grpo_qwen3_30b_16die_dynamic_rl.sh
 ```
 
-该脚本基于已验证的 16 卡 Qwen3-30B GRPO 启动脚本，只保留当前已实现的 `dynamic_rl` 配置。特性的设计和配置说明可参考[History Tree Dynamic RL 投机解码](../../../docs/features/history_tree_dynamic_rl.md)。
+该脚本基于已验证的 16 卡 Qwen3-30B GRPO 启动脚本，只保留当前已实现的 `dynamic_rl` 配置。特性的设计和配置说明可参考[History Tree Dynamic RL 投机解码](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/features/zh/history_tree_dynamic_rl.md)。
 
 ## 附录
 
@@ -258,7 +258,7 @@ bash internal/train_grpo_qwen3_30b_16die_dynamic_rl.sh
 |verl|[0008-verl-bugfix-enable_compile.patch](patches/verl/0008-verl-bugfix-enable_compile.patch)|NPU上MindSpeed训练框架会无效化torch.compile规避训练侧的compile失败，在推理时开启compile|
 |verl|[0009-verl-feature-support_EPLB.patch](patches/verl/0009-verl-feature-support_EPLB.patch)|`VLLM_ENABLE_EPLB`开启时，使能推理的EPLB|
 |verl|[0010-verl-feature-enable_hdp.patch](patches/verl/0010-verl-feature-enable_hdp.patch)|`USE_HDP`开启时，使能HDP功能|
-|verl|[0011-verl-feature-enable_rollout_rebalance.patch](patches/verl/0011-verl-feature-enable_rollout_rebalance.patch)|`ROLLOUT_REBALANCE_ENABLE`开启时，使能Rollout Rebalance功能，详细说明可参考[RL On-Policy 推理场景的序列级均衡调度引擎](../../../docs/features/rollout_rebalance.md)|
+|verl|[0011-verl-feature-enable_rollout_rebalance.patch](patches/verl/0011-verl-feature-enable_rollout_rebalance.patch)|`ROLLOUT_REBALANCE_ENABLE`开启时，使能Rollout Rebalance功能，详细说明可参考[RL On-Policy 推理场景的序列级均衡调度引擎](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/features/zh/rollout_rebalance.md)|
 |verl|[0012-verl-feature-npugraph_ex_for_spec_decode.patch](patches/verl/0012-verl-feature-npugraph_ex_for_spec_decode.patch)|允许通过脚本配置项配置投机推理以及npugraph_ex相关参数|
 |verl|[0013-verl-bugfix-dataProto_concat.patch](patches/verl/0013-verl-bugfix-dataProto_concat.patch)|合并DataProto数据时，避免因不同节点的`data['timing']['generate_sequences']`存在细微差异导致报错|
 |verl|[0014-verl-feature-dapo_data_rebalance.patch](patches/verl/0014-verl-feature-dapo_data_rebalance.patch)|`data_rebalance` DAPO算法适配|
@@ -266,8 +266,8 @@ bash internal/train_grpo_qwen3_30b_16die_dynamic_rl.sh
 |verl|[0016-verl-bugfix-hot_swap_expandable_segments.patch](patches/verl/0016-verl-bugfix-hot_swap_expandable_segments.patch)|在sleep mode下使能虚拟内存特性热切换|
 |verl|[0017-verl-bugfix-adapt_new_vllm_version.patch](patches/verl/0017-verl-bugfix-adapt_new_vllm_version.patch)|修复切换到vllm>=0.13.0版本引入的import error|
 |verl|[0018-verl-bugfix-ignore_redundant_logs.patch](patches/verl/0018-verl-bugfix-ignore_redundant_logs.patch)|去除多余的警告日志|
-|verl|[0019-verl-feature-length_aware_resampler.patch](patches/verl/0019-verl-feature-length_aware_resampler.patch)|新增 Length-Aware Resampler：基于历史 response 长度对 epoch 内样本重新排序，并提供可选的 rollout 长尾保护机制，详细说明可参考[Length-Aware Resampler：基于历史 Response 长度的 Rollout 重采样优化](../../../docs/features/length_aware_resampler.md)|
-|verl|[0020-verl-feature-enable_history_tree_dynamic_rl.patch](patches/verl/0020-verl-feature-enable_history_tree_dynamic_rl.patch)|新增 History Tree Dynamic RL：在 Rollout 中接入历史响应草稿缓存、EAGLE3 draft model 和动态分支切换，详细说明可参考[History Tree Dynamic RL 投机解码](../../../docs/features/history_tree_dynamic_rl.md)|
+|verl|[0019-verl-feature-length_aware_resampler.patch](patches/verl/0019-verl-feature-length_aware_resampler.patch)|新增 Length-Aware Resampler：基于历史 response 长度对 epoch 内样本重新排序，并提供可选的 rollout 长尾保护机制，详细说明可参考[Length-Aware Resampler：基于历史 Response 长度的 Rollout 重采样优化](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/features/zh/length_aware_resampler.md)|
+|verl|[0020-verl-feature-enable_history_tree_dynamic_rl.patch](patches/verl/0020-verl-feature-enable_history_tree_dynamic_rl.patch)|新增 History Tree Dynamic RL：在 Rollout 中接入历史响应草稿缓存、EAGLE3 draft model 和动态分支切换，详细说明可参考[History Tree Dynamic RL 投机解码](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/features/zh/history_tree_dynamic_rl.md)|
 |vllm|[0001-vllm-feature-disable_gc.patch](patches/vllm/0001-vllm-feature-disable_gc.patch)|在decode step前关闭gc，避免因内存管理导致host bound影响推理性能|
 |vllm|[0002-vllm-feature-enable_sam_decoding.patch](patches/vllm/0002-vllm-feature-enable_sam_decoding.patch)|SAM投机推理适配vllm框架：在投机推理的配置中支持`method`为`sam`的选项|
 |vllm|[0003-vllm-bugfix-rope_registry.patch](patches/vllm/0003-vllm-bugfix-rope_registry.patch)|修复ROPE注册时import flash_attn的bug|
@@ -331,7 +331,7 @@ bash internal/train_grpo_qwen3_30b_16die_dynamic_rl.sh
 
 
 3. 源码编译安装vLLM和vLLM-Ascend。
-   
+
    vLLM:
    ```bash
    VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /workspace/vllm/[audio] --extra-index https://download.pytorch.org/whl/cpu/ && \

@@ -29,8 +29,8 @@
 - [2026/10] 新增 [speculators DSpark 草稿模型训练样例](llm_spec/speculators/README.md)，在 Atlas A2 上完成 Qwen3.8-27B（BF16）与 GLM5.2（W4A8C8）DSpark 草稿模型训练，接受长度在同一评测框架下与 DeepSeek 官方模型并列参考
 - [2026/09] 新增 [Qwen2.5 HiF8 低精度 RL 样例](llm_rl/qwen2_5/verl_npu_demo_a5_hif8/README.md)，在 Atlas A5 上支持多卡 HiF8 低精度 RL 后训练
 - [2026/09] 新增 [DeepSpec DSpark草稿模型训练支持](llm_sft/DeepSpec/README.md)样例，在 Atlas A3上完成开源DSpark同结构草稿模型训练
-- [2026/09] 新增 [鲲鹏CPU、昇腾950与灵衢协同的 Agentic RL 训练实践](docs/llm_rl/kunpeng_ascend_agentic_rl_infrastructure.md)，支持 AgentENV 沙箱与多 Harness 训练，实现 DSV4 Flash 训推bitwise对齐 MXFP8/MXFP4 低精度训练与长序列等特性。
-- [2026/09] 新增 [基于昇腾950超节点的万亿MoE模型预训练系统参考实践](docs/llm_pretrain/ascend950_superpod_moe_pretrain_system_reference.md)，围绕**超大规模、超长序列、多模态、高可用训练及训练开发者效率提升**等复杂场景提供系统参考实践。
+- [2026/09] 新增 [鲲鹏CPU、昇腾950与灵衢协同的 Agentic RL 训练实践](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/llm_rl/kunpeng_ascend_agentic_rl/zh/kunpeng_ascend_agentic_rl_infrastructure.md)，支持 AgentENV 沙箱与多 Harness 训练，实现 DSV4 Flash 训推bitwise对齐 MXFP8/MXFP4 低精度训练与长序列等特性。
+- [2026/09] 新增 [基于昇腾950超节点的万亿MoE模型预训练系统参考实践](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/llm_pretrain/ascend950/zh/ascend950_superpod_moe_pretrain_system_reference.md)，围绕**超大规模、超长序列、多模态、高可用训练及训练开发者效率提升**等复杂场景提供系统参考实践。
 - [2026/09] 新增 [DeepSeek-V4.1-Flash 模型CPT/SFT支持](llm_pretrain/deepseek_v4_1/README.md)样例，基于 TorchTitan-NPU + TorchAO-NPU，在 **Ascend950 64 卡**集群完成全参模型低精度训练复现
 - [2026/09] 新增 Qwen3.6-27B 和 DeepSeek-V4-Flash-0731 模型 AscendC 算子生成监督微调支持，包括 Qwen3.6-27B 的 [TorchTitan-NPU 样例](llm_sft/qwen36_ascendc/torchtitan/README.md)、[MindSpeed-MM 样例](llm_sft/qwen36_ascendc/mindspeed-mm/README.md)，以及 DeepSeek-V4-Flash-0731 的 [MindSpeed-LLM LoRA 样例](llm_sft/dsv4_flash_ascendc/mindspeed-llm/README.md)
 - [2026/08] 新增 [DeepSeek-V4-Flash HiF8 低精度预训练](llm_pretrain/deepseekv4/README.md#deepseek-v4-flash-a5-hif8-%E4%BD%8E%E7%B2%BE%E5%BA%A6%E8%AE%AD%E7%BB%83)样例，在 Atlas A5 上使能单卡 HiF8 低精度预训练
@@ -66,7 +66,7 @@ cann-recipes-train 为热门大模型和多模态模型提供**可复现、可�
 | 🚀 强化学习训练 | 基于 veRL + MindSpeed + vLLM-Ascend，覆盖 GRPO / DAPO、长序列 rollout、投机推理等场景 | `llm_rl/` |
 | 🎨 多模态强化学习 | 基于 FLUX GRPO，覆盖文生图模型 GRPO 训练、HPSv2 奖励优化及 NPU 适配 | `multimodal_rl/` |
 | 🤖 Agent / Code RL | 面向工具调用、代码沙盒等 Agent 训练任务 | `agent_rl/` |
-| 📚 优化特性文档 | 训练入图、SAM、序列级均衡调度、Length-Aware Resampler 等特性详细介绍 | `docs/` |
+| 📚 优化特性文档 | 训练入图、SAM、序列级均衡调度、Length-Aware Resampler 等特性详细介绍 | [训练优化文档目录](https://gitcode.com/cann/cann-recipes-docs/tree/master/train) |
 
 <h3 id="user-guide">🗺️ 用户导航</h3>
 
@@ -198,18 +198,18 @@ flowchart TB
 
 | 阶段 | 原子化特性 | 解决什么问题 | 代表样例 / 文档 |
 |------|------------|--------------|------------------|
-| 预训练 / 续训练/ SFT | 1M序列/多模态理解/Engram等Offload/Profile-aware通算掩盖 | 超长序列内存、负载均衡问题；参数、梯度、Engram完全offload到Host侧，减少Device内存占用；优化整网通信占比| [基于昇腾950超节点的万亿MoE模型预训练系统参考实践](docs/llm_pretrain/ascend950_superpod_moe_pretrain_system_reference.md) |
-| 预训练 / 续训练 | 训练入图（torch.compile + AutoFuse） | 降低 Python 调度与小算子启动开销，提升训练执行效率 | [DeepSeek-V4 训练优化文档](docs/llm_pretrain/deepseek-v4_torchtitan_npu_autofuse.md) |
+| 预训练 / 续训练/ SFT | 1M序列/多模态理解/Engram等Offload/Profile-aware通算掩盖 | 超长序列内存、负载均衡问题；参数、梯度、Engram完全offload到Host侧，减少Device内存占用；优化整网通信占比| [基于昇腾950超节点的万亿MoE模型预训练系统参考实践](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/llm_pretrain/ascend950/zh/ascend950_superpod_moe_pretrain_system_reference.md) |
+| 预训练 / 续训练 | 训练入图（torch.compile + AutoFuse） | 降低 Python 调度与小算子启动开销，提升训练执行效率 | [DeepSeek-V4 训练优化文档](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/llm_pretrain/deepseek_v4/zh/deepseek-v4_torchtitan_npu_autofuse.md) |
 | 预训练 / 续训练 | 大规模并行训练（TP / PP / EP / CP / FSDP2） | 支撑超大模型在多机多卡上的显存切分、长序列训练和计算扩展 | [DeepSeek-V4](llm_pretrain/deepseekv4/README.md)、[DeepSeek-V3.2](llm_pretrain/deepseekv32/README.md) |
-| 预训练 / 续训练 | 低精度训练（MXFP8 / HiF8） | 通过低精度数据格式兼顾显存、吞吐与训练精度 | [DeepSeek-V3 低精度训练文档](docs/llm_pretrain/deepseek-v3_pre_train_hif8_mxfp8.md) |
-| 预训练 / 续训练 | Swap Optimizer / 优化器状态卸载 | 降低 FSDP2 场景下优化器状态的设备显存占用 | [DeepSeek-V4 训练优化文档](docs/llm_pretrain/deepseek-v4_torchtitan_npu_autofuse.md) |
+| 预训练 / 续训练 | 低精度训练（MXFP8 / HiF8） | 通过低精度数据格式兼顾显存、吞吐与训练精度 | [DeepSeek-V3 低精度训练文档](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/llm_pretrain/deepseek_v3/zh/deepseek-v3_pre_train_hif8_mxfp8.md) |
+| 预训练 / 续训练 | Swap Optimizer / 优化器状态卸载 | 降低 FSDP2 场景下优化器状态的设备显存占用 | [DeepSeek-V4 训练优化文档](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/llm_pretrain/deepseek_v4/zh/deepseek-v4_torchtitan_npu_autofuse.md) |
 | SFT | MindSpeed-LLM SFT 链路适配 | 提供数据处理、权重转换、训练启动的一站式微调链路 | [Qwen3-1.7B SFT](llm_sft/qwen3/README.md) |
 | SFT | Ascend C 算子生成领域全参数微调 | 提供基于 TorchTitan-NPU 的 8 卡 910C（16 die）、CP8 × FSDP2 长序列领域微调 | [Qwen3.6-27B Ascend C 算子生成](llm_sft/qwen36_ascendc/torchtitan/README.md) |
-| RL | TorchAir / npugraph_ex 推理图优化 | 在 rollout 推理阶段降低动态图调度开销，提升长序列 RL 性能 | [Qwen3 长序列 RL 训练优化文档](docs/llm_rl/qwen3_235B_32k_longseq_rl_train_optimization.md) |
-| RL | SAM 无损投机解码 | 在保持训练结果一致性的前提下提升 rollout decode 效率 | [SAM 无损投机推理文档](docs/features/sam_speculative_decoding.md) |
-| RL | Rollout Rebalance 序列级均衡调度 | 缓解 On-Policy rollout 中 response 长尾导致的推理负载不均 | [Rollout Rebalance 文档](docs/features/rollout_rebalance.md) |
-| RL | Length-Aware Resampler | 基于历史 response 长度重排样本，降低 generation batch 内长短样本混排 | [Length-Aware Resampler 文档](docs/features/length_aware_resampler.md) |
-| RL | EPLB / HDP / AllToAllV Reshard | 优化 MoE 专家负载、长序列数据并行和训推权重重分发效率 | [Qwen3 长序列 RL 训练优化文档](docs/llm_rl/qwen3_235B_32k_longseq_rl_train_optimization.md) |
+| RL | TorchAir / npugraph_ex 推理图优化 | 在 rollout 推理阶段降低动态图调度开销，提升长序列 RL 性能 | [Qwen3 长序列 RL 训练优化文档](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/llm_rl/qwen3/qwen3_235B/zh/qwen3_235B_32k_longseq_rl_train_optimization.md) |
+| RL | SAM 无损投机解码 | 在保持训练结果一致性的前提下提升 rollout decode 效率 | [SAM 无损投机推理文档](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/features/zh/sam_speculative_decoding.md) |
+| RL | Rollout Rebalance 序列级均衡调度 | 缓解 On-Policy rollout 中 response 长尾导致的推理负载不均 | [Rollout Rebalance 文档](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/features/zh/rollout_rebalance.md) |
+| RL | Length-Aware Resampler | 基于历史 response 长度重排样本，降低 generation batch 内长短样本混排 | [Length-Aware Resampler 文档](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/features/zh/length_aware_resampler.md) |
+| RL | EPLB / HDP / AllToAllV Reshard | 优化 MoE 专家负载、长序列数据并行和训推权重重分发效率 | [Qwen3 长序列 RL 训练优化文档](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/llm_rl/qwen3/qwen3_235B/zh/qwen3_235B_32k_longseq_rl_train_optimization.md) |
 | Agentic RL | 工具调用 / 代码沙盒训练链路 | 支持模型在训练中调用外部工具、代码沙盒或执行环境获得反馈 | [Qwen3 Tool Agent](agent_rl/qwen3_tool_agent/README.md)、[Code RL](agent_rl/qwen2_code_rl/README.md) |
 | Agentic RL | Code RL 投机解码扩展 | 面向代码任务构造多轮工具调用训练闭环，并支持 suffix / EAGLE3 等投机解码扩展 | [Qwen3 Code ToolCall](agent_rl/qwen3_code_toolcall/README.md) |
 
@@ -275,15 +275,15 @@ flowchart TB
 
 | 特性 | 文档 |
 |------|------|
-| DeepSeek-V4 TorchTitan-NPU + AutoFuse 训练优化 | [docs/llm_pretrain/deepseek-v4_torchtitan_npu_autofuse.md](docs/llm_pretrain/deepseek-v4_torchtitan_npu_autofuse.md) |
-| DeepSeek-V3.2 32K 长序列预训练优化 | [docs/llm_pretrain/deepseek-v32_pre_train_optimization.md](docs/llm_pretrain/deepseek-v32_pre_train_optimization.md) |
-| DeepSeek-V3 MXFP8 / HiF8 低精度训练 | [docs/llm_pretrain/deepseek-v3_pre_train_hif8_mxfp8.md](docs/llm_pretrain/deepseek-v3_pre_train_hif8_mxfp8.md) |
-| Qwen3-235B 32K 长序列 RL 训练优化 | [docs/llm_rl/qwen3_235B_32k_longseq_rl_train_optimization.md](docs/llm_rl/qwen3_235B_32k_longseq_rl_train_optimization.md) |
-| DeepSeek-R1 RL 训练优化 | [docs/llm_rl/deepseek_rl_train_optimization.md](docs/llm_rl/deepseek_rl_train_optimization.md) |
-| CANN 原子化特性能力总览 | [docs/cann_capability_overview.md](docs/cann_capability_overview.md) |
-| SAM 无损投机推理 | [docs/features/sam_speculative_decoding.md](docs/features/sam_speculative_decoding.md) |
-| RL On-Policy 序列级均衡调度 | [docs/features/rollout_rebalance.md](docs/features/rollout_rebalance.md) |
-| Length-Aware Resampler | [docs/features/length_aware_resampler.md](docs/features/length_aware_resampler.md) |
+| DeepSeek-V4 TorchTitan-NPU + AutoFuse 训练优化 | [查看文档](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/llm_pretrain/deepseek_v4/zh/deepseek-v4_torchtitan_npu_autofuse.md) |
+| DeepSeek-V3.2 32K 长序列预训练优化 | [查看文档](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/llm_pretrain/deepseek_v32/zh/deepseek-v32_pre_train_optimization.md) |
+| DeepSeek-V3 MXFP8 / HiF8 低精度训练 | [查看文档](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/llm_pretrain/deepseek_v3/zh/deepseek-v3_pre_train_hif8_mxfp8.md) |
+| Qwen3-235B 32K 长序列 RL 训练优化 | [查看文档](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/llm_rl/qwen3/qwen3_235B/zh/qwen3_235B_32k_longseq_rl_train_optimization.md) |
+| DeepSeek-R1 RL 训练优化 | [查看文档](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/llm_rl/deepseek/zh/deepseek_rl_train_optimization.md) |
+| CANN 原子化特性能力总览 | [查看文档](docs/cann_capability_overview.md) |
+| SAM 无损投机推理 | [查看文档](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/features/zh/sam_speculative_decoding.md) |
+| RL On-Policy 序列级均衡调度 | [查看文档](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/features/zh/rollout_rebalance.md) |
+| Length-Aware Resampler | [查看文档](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/features/zh/length_aware_resampler.md) |
 
 </details>
 
@@ -315,17 +315,19 @@ cann-recipes-train/
 │   ├── qwen3_tool_agent/          # Qwen3 Tool Agent RL
 │   ├── qwen2_code_rl/             # 代码沙盒 Code RL
 │   └── qwen3_code_toolcall/       # 多轮工具调用 Code RL
-├── docs/                          # 优化技术文档
-│   ├── cann_capability_overview.md # CANN 原子化特性能力总览
-│   ├── llm_pretrain/              # 预训练优化实践
-│   ├── llm_rl/                    # RL 训练优化实践
-│   ├── multimodal_rl/             # 多模态 RL 图片等资源
-│   └── features/                  # 通用训练特性说明
+├── docs/                          # 仓库能力总览与 README 配套图片资源
+│   ├── cann_capability_overview.md # CANN 能力与样例覆盖索引
+│   ├── assets/                    # 仓库 README 配套资源
+│   ├── llm_rl/                    # RL 样例配套图片
+│   ├── llm_sft/                   # SFT 样例配套图片
+│   └── multimodal_rl/             # 多模态 RL 样例配套图片
 ├── ci/                            # CI 辅助脚本
 ├── CONTRIBUTION.md
 ├── LICENSE
 └── README.md
 ```
+
+优化技术文档统一维护在 [cann-recipes-docs/train](https://gitcode.com/cann/cann-recipes-docs/tree/master/train)，仓库能力总览和 README 配套图片保留在本仓库 `docs/` 下。
 
 </details>
 

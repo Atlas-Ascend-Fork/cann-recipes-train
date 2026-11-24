@@ -1,7 +1,7 @@
 # Qwen3.6-27B SFT 使用指南
 
 本文档说明如何基于 MindSpeed-MM 对 Qwen3.6-27B 进行 SFT（监督微调）。
-训练效果及训练过程报告请参考：[实践报告](../../../docs/llm_sft/qwen36_ascendc/qwen36_ascendc_sft_report.md)。
+训练效果及训练过程报告请参考：[实践报告](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/llm_sft/qwen36_ascendc/zh/qwen36_ascendc_sft_report.md)。
 
 示例环境与版本信息：
 

@@ -2,7 +2,7 @@
 
 ## 概述
 
-本样例针对DeepSeek-R1模型，基于[verl开源框架](https://github.com/volcengine/verl)，配合MindSpeed-LLM和vLLM-Ascend框架，完成RL训练全流程的优化适配。优化点介绍可参见[基于veRL前端&A3集群的DeepSeekR1模型RL训练优化实践](../../docs/llm_rl/deepseek_rl_train_optimization.md)。
+本样例针对DeepSeek-R1模型，基于[verl开源框架](https://github.com/volcengine/verl)，配合MindSpeed-LLM和vLLM-Ascend框架，完成RL训练全流程的优化适配。优化点介绍可参见[基于veRL前端&A3集群的DeepSeekR1模型RL训练优化实践](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/llm_rl/deepseek/zh/deepseek_rl_train_optimization.md)。
 
 本样例基于Atlas A3 128卡集群，加载真实权重，使用deepscaler数据集，Prefill/Decode阶段长度分别为1K与3K，系统吞吐可达到120TPS/卡。随着训练的进行，模型response_length会有所增长，系统吞吐可以进一步提升。
 | 基础模型             | 机器型号     | GBS | n_samples | step | max_prompt_length | max_response_length | 端到端TPS |

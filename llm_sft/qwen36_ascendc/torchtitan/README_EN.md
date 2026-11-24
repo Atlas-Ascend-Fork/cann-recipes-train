@@ -1,7 +1,7 @@
 # TorchTitan Full-Parameter SFT Example for Ascend C Operator Generation
 
 This example uses **TorchTitan-NPU** to perform full-parameter supervised fine-tuning of Qwen3.6-27B for Ascend C operator generation. The training configuration targets Ascend C operator-generation data and CP8 × FSDP2, with support for complete DCP checkpoint saving and Hugging Face weight export.
-For training results and the training process report, see the [practice report](../../../docs/llm_sft/qwen36_ascendc/qwen36_ascendc_sft_report.md).
+For training results and the training process report, see the [practice report](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/llm_sft/qwen36_ascendc/zh/qwen36_ascendc_sft_report.md).
 
 ## Files
 
