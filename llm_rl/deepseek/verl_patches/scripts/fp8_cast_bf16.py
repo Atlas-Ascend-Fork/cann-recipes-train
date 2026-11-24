@@ -85,7 +85,6 @@ def main(fp8_path, bf16_path):
 
     # Cache for loaded safetensor files
     loaded_files = {}
-    fp8_weight_names = []
 
     # Helper function to get tensor from the correct file
     def get_tensor(tensor_name):
@@ -123,11 +122,12 @@ def main(fp8_path, bf16_path):
                 try:
                     # Get scale_inv from the correct file
                     scale_inv = get_tensor(scale_inv_name)
-                    fp8_weight_names.append(weight_name)
                     new_state_dict[weight_name] = weight_dequant(weight, scale_inv)
-                except KeyError:
-                    print(f"Warning: Missing scale_inv tensor for {weight_name}, skipping conversion")
-                    new_state_dict[weight_name] = weight
+                except KeyError as err:
+                    raise KeyError(
+                        f"Missing scale_inv tensor '{scale_inv_name}' "
+                        f"for FP8 weight '{weight_name}'"
+                    ) from err
             else:
                 new_state_dict[weight_name] = weight
 
@@ -141,10 +141,7 @@ def main(fp8_path, bf16_path):
 
     # Update model index
     new_model_index_file = os.path.join(bf16_path, "model.safetensors.index.json")
-    for weight_name in fp8_weight_names:
-        scale_inv_name = f"{weight_name}_scale_inv"
-        if scale_inv_name in weight_map:
-            weight_map.pop(scale_inv_name)
+    weight_map = {k: v for k, v in weight_map.items() if not k.endswith("_scale_inv")}
     with open(new_model_index_file, "w") as f:
         json.dump({"metadata": {}, "weight_map": weight_map}, f, indent=2)
 

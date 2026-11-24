@@ -152,7 +152,7 @@ def int4_assistance_bias(weight, weight_scale):
     repeat_times = weight.shape[1] // weight_scale.shape[1]
     expanded_scale = weight_scale.repeat_interleave(repeat_times, dim=1)
     # 8 is the max value of INT4, for normalizing the quantization range of assistance bias.
-    weight_assistant_matrix = (expanded_scale * weight * 8).sum(dim=1).float()
+    weight_assistant_matrix = (expanded_scale.float() * weight.float() * 8).sum(dim=1)
     return weight_assistant_matrix
 
 
@@ -210,7 +210,7 @@ def generate_quant_group(a_num_bits=8, w_num_bits=8, targets=None, activation_us
 
 def generate_quant_config(c8, ignores, w4a8=False, clip=False):
     """
-    Generate a quantization configuration dictionary based on the specified parameters. 
+    Generate a quantization configuration dictionary based on the specified parameters.
     """
     kv_cache_scheme = {"num_bits": 8,
                        "type": 'int',
@@ -313,13 +313,13 @@ def main(fp8_path, output_path, quant_type, clip=False, quant_param_path=None):
     Converts FP8 weights to BF16 and saves the converted weights.
 
     This function reads FP8 weights from the specified directory, converts them to BF16,
-    and saves the converted weights to another specified directory. It also updates the 
+    and saves the converted weights to another specified directory. It also updates the
     model index file to reflect the changes.
 
     Args:
     fp8_path (str): The path to the directory containing the FP8 weights and model index file.
     output_path (str): The path to the directory where the converted BF16/INT8 weights will be saved.
-    quant_type (str): The type of quantization to apply. Supported values are "bfloat16", 
+    quant_type (str): The type of quantization to apply. Supported values are "bfloat16",
     "w8a8c16", "w8a8c8", "w4a8c16", and "w4a8c8".
     clip (bool, optional): Whether to apply clipping during quantization. Defaults to False.
     quant_param_path (str, optional): The path to the directory containing quantization parameters.
@@ -392,8 +392,12 @@ def main(fp8_path, output_path, quant_type, clip=False, quant_param_path=None):
             loaded_files[file_name] = load_file(file_path, device="cpu")
         return loaded_files[file_name][tensor_name]
 
-    if c8 and clip:
-        assert quant_param_path is not None, "Please pass the quant_param_path"
+    kv_clip_params, act_clip_params, weight_clip_params = {}, {}, {}
+    if clip:
+        if not (w8a8 or w4a8):
+            raise ValueError("--clip is only supported for quantized modes (w8a8/w4a8), not bfloat16.")
+        if quant_param_path is None:
+            raise ValueError("Please pass --quant_param_path when --clip is enabled.")
         kv_clip_params, act_clip_params, weight_clip_params = load_clip_params(
             num_hidden_layers, num_nextn_predict_layers, quant_param_path)
 
@@ -476,7 +480,7 @@ def main(fp8_path, output_path, quant_type, clip=False, quant_param_path=None):
             glob(os.path.join(output_path, "*.safetensors")))
         safetensor_files.sort()
         first_safetensor_file = safetensor_files[-1]
-        file_name = os.path.basename(safetensor_file)
+        file_name = os.path.basename(first_safetensor_file)
         first_safetensor_dict = load_file(first_safetensor_file, device="cpu")
 
         if c8:
@@ -494,9 +498,10 @@ def main(fp8_path, output_path, quant_type, clip=False, quant_param_path=None):
             for weight_name in act_clip_params.keys():
                 new_weight_map[weight_name] = file_name
 
-        first_safetensor_dict.update(kv_clip_params)
-        for weight_name in kv_clip_params.keys():
-            new_weight_map[weight_name] = file_name
+        if c8 and clip:
+            first_safetensor_dict.update(kv_clip_params)
+            for weight_name in kv_clip_params:
+                new_weight_map[weight_name] = file_name
 
         new_safetensor_file = os.path.join(output_path, file_name)
         save_file(first_safetensor_dict, new_safetensor_file,

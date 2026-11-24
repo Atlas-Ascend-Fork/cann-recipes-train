@@ -168,6 +168,12 @@ def copy_py_json(src, target):
                 shutil.copy2(src_path, dst_path)
 
 
+def weight_to_scale_name(weight_name: str) -> str:
+    if weight_name.endswith('.weight'):
+        return f"{weight_name[:-len('.weight')]}.scale"
+    return f"{weight_name}.scale"
+
+
 def main(fp8_path, output_path, quant_type, quant_param_path=None):
     """
     Converts FP8 weights to BF16 and saves the converted weights.
@@ -231,6 +237,8 @@ def main(fp8_path, output_path, quant_type, quant_param_path=None):
             quantization_config = generate_quant_config(
                 cache_scheme, quant_ignore_layers, w4a8=w4a8, is_fp=mx)
             config['quantization_config'] = quantization_config
+    else:
+        config.pop('quantization_config', None)
     quant_layers = generate_quant_layers(num_layers, num_experts, compress_ratios, w4a8=w4a8, is_mx=mx)
     # Cache for loaded safetensor files
     loaded_files = {}
@@ -267,8 +275,8 @@ def main(fp8_path, output_path, quant_type, quant_param_path=None):
             if weight_name.endswith(".scale"):
                 continue
             elif weight.element_size() == 1:
-                # FP8 weight
-                scale_inv_name = weight_name.replace('.weight', '.scale')
+                # FP8 / packed MXFP4 weight
+                scale_inv_name = weight_to_scale_name(weight_name)
                 try:
                     # Get scale_inv from the correct file
                     scale_inv = get_tensor(scale_inv_name)
@@ -277,9 +285,11 @@ def main(fp8_path, output_path, quant_type, quant_param_path=None):
                         weight = weight_dequant(weight, scale_inv, block_size=32, is_mx=True)
                     else:
                         weight = weight_dequant(weight, scale_inv)
-                except KeyError:
-                    print(
-                        f"Warning: Missing scale_inv tensor for {weight_name}, skipping conversion")
+                except KeyError as err:
+                    raise KeyError(
+                        f"Missing scale tensor '{scale_inv_name}' "
+                        f"for quantized weight '{weight_name}'"
+                    ) from err
                 new_state_dict[weight_name] = weight
                 new_weight_map[weight_name] = file_name
             else:
@@ -296,7 +306,7 @@ def main(fp8_path, output_path, quant_type, quant_param_path=None):
                             quant_weight = pack_uint4(quant_weight)
                     else:
                         quant_weight, scale_inv, bias = int_weight_quant(weight, bits=bit)
-                    new_scale_name = weight_name.replace('.weight', '.scale')
+                    new_scale_name = weight_to_scale_name(weight_name)
 
                     new_state_dict[weight_name] = quant_weight
                     new_state_dict[new_scale_name] = scale_inv
