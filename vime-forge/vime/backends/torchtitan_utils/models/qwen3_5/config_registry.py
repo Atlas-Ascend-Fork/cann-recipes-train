@@ -12,19 +12,36 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Dense text-only Qwen3.5 recipes for the prepared NPU stack and Ascend CP.
+"""Dense Qwen3.5 recipes for the prepared NPU stack, Ascend CP and vision input.
 
 ``vime_qwen35_4b`` and ``vime_qwen35_9b`` retain the prepared CP=1 setup.
 The 4B, 9B and 27B CP recipes select the Ascend CP kernels, defaulting to CP=4.
+``vime_qwen35_4b_vl`` uses torchtitan_npu's vision support with CP=1.
 """
 
 from dataclasses import replace
 
+from torchtitan_npu.models.qwen3_5 import model_registry as npu_model_registry
 from torchtitan.models.qwen3_5 import model_registry
 from torchtitan.models.qwen3_5.parallelize import parallelize_qwen3_5
 from torchtitan.trainer import Trainer
 
+from ...multimodal import vision_recipe
 from ..qwen3.config_registry import _vime_rl_config
+from . import vision_inputs
+
+# NovaSwap provides optimizer-state swapping with checkpoint support.
+_SWAP_OPTIMIZER_OVERRIDE = "torchtitan_npu.override.common.optimizer.swap_optimizer"
+# Text recipes keep the Triton GDN kernel they were validated on.
+_TEXT_KERNEL_OVERRIDES = (
+    "torchtitan_npu.override.qwen3_5.gated_delta.triton",
+    _SWAP_OPTIMIZER_OVERRIDE,
+)
+# Vision recipes use the NPU GDN kernel: its causal convolution has no FLA dependency.
+_VISION_KERNEL_OVERRIDES = (
+    "torchtitan_npu.override.qwen3_5.gated_delta.npu",
+    _SWAP_OPTIMIZER_OVERRIDE,
+)
 
 
 def _text_inputs(_model, args, kwargs):
@@ -68,8 +85,6 @@ def _qwen35_config(
     flavor: str, *, tie_word_embeddings: bool, context_parallel: bool = False,
 ) -> Trainer.Config:
     if context_parallel:
-        from torchtitan_npu.models.qwen3_5 import model_registry as npu_model_registry
-
         spec = npu_model_registry(flavor, attn_backend="varlen")
         parallelize_fn = _parallelize_text_cp
     else:
@@ -97,13 +112,7 @@ def _qwen35_config(
         config.checkpoint.initial_load_in_hf = True
         config.checkpoint.initial_load_model_only = True
     else:
-        config.override.imports.extend(
-            [
-                "torchtitan_npu.override.qwen3_5.gated_delta.triton",
-                # NovaSwap optimizer-state swapping with checkpoint support.
-                "torchtitan_npu.override.common.optimizer.swap_optimizer",
-            ]
-        )
+        config.override.imports.extend(_TEXT_KERNEL_OVERRIDES)
     return config
 
 
@@ -132,3 +141,17 @@ def vime_qwen35_9b_cp() -> Trainer.Config:
 def vime_qwen36_27b_cp() -> Trainer.Config:
     """Dense Qwen3.6-27B text training with Ascend CP and separate embeddings."""
     return _qwen35_config("27B", tie_word_embeddings=False, context_parallel=True)
+
+
+# -- multimodal (vision) recipes -------------------------------------------------------------
+@vision_recipe(vision_inputs.bind)
+def vime_qwen35_4b_vl() -> Trainer.Config:
+    """Qwen3.5-4B multimodal GRPO with tied embeddings; CP must stay 1. Without the
+    text-only input hook.
+    """
+    # attn_backend selects decoder attention, not ViT attention.
+    spec = npu_model_registry("4B", attn_backend="varlen")
+    spec.model.enable_weight_tying = True
+    config = _vime_rl_config(spec, lr=3e-6, spmd_backend="partial_dtensor")
+    config.override.imports.extend(_VISION_KERNEL_OVERRIDES)
+    return config

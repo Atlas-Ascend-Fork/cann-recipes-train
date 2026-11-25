@@ -256,7 +256,6 @@ class TorchTitanTrainRayActor(TrainRayActor):
             )
 
         if "multimodal_train_inputs" in rollout_data:
-            # todo: multimodal not supported
             rollout_data["multimodal_train_inputs"] = [
                 (
                     {

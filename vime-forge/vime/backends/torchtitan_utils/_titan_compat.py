@@ -39,7 +39,7 @@ from ._arch_fields import hf_arch_signature, values_equal
 logger = logging.getLogger(__name__)
 
 
-# HF model_type -> torchtitan model name (ported from verl utils.py:68-77).
+# HF model_type -> torchtitan model name (ported from verl utils.py).
 _HF_MODEL_TYPE_TO_TORCHTITAN_NAME = {
     "qwen2": "qwen3",
     "qwen3": "qwen3",
@@ -181,7 +181,7 @@ def assert_model_matches_checkpoint(model_spec, hf_config) -> None:
 
 
 def enable_fsdp_gradient_division(model: nn.Module, dp_size: int) -> None:
-    """Re-enable FSDP automatic gradient division (disabled by torchtitan by default). Ported from verl utils.py:151-167.
+    """Re-enable FSDP automatic gradient division (disabled by torchtitan by default). Ported from verl utils.py.
 
     torchtitan defaults to disable_fsdp_gradient_division (gradient_divide_factor=1.0, paired with
     global token normalization). If vime's loss scales by dp_size, set the factor back to dp_size

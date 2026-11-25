@@ -320,6 +320,7 @@ def get_batch(
     keys: Sequence[str] | None = None,
     *,
     sequence_padding_multiple: int = 1,
+    mm_build=None,
 ) -> dict:
     """Fetch a micro-batch from the iterator then build a packed micro-batch and
     response metadata for contiguous CP shards.
@@ -330,6 +331,9 @@ def get_batch(
 
     Loss targets are selected from packed_ids using response offsets.
 
+    ``mm_build`` (a multimodal recipe's build) is called once here and its kwargs are
+    stored as ``batch["multimodal_kwargs"]``; text recipes pass None.
+
     Return the global packed tensors from build_packed_microbatch. With CP > 1,
     add cp_response_index_spans, local_response_lengths and cp_group.
     Slice response-shaped RL fields, including teacher_log_probs, by the targets owned
@@ -338,17 +342,16 @@ def get_batch(
     total_lengths, response_lengths and sample denominators remain global per-sample
     metadata. packed_ids remains available here for global target-to-token lookup.
     This layout requires context_parallel_load_balancer=None.
-    BSHD and multimodal processing are not supported.
+    BSHD is not supported.
     """
     if keys is None:
         keys = [
             "tokens", "loss_masks", "total_lengths", "response_lengths",
             "log_probs", "advantages", "rollout_mask_sums", "ref_log_probs",
             "rollout_log_probs",
+            "multimodal_train_inputs",
             # Global sample indices name the per-sample quantities the precision guard
-            # records. They are what makes those records comparable across backends and
-            # parallel layouts, where rank-local positions differ. get_next returns None for
-            # a missing key, so rollout_data without it is fine.
+            # records.
             "sample_indices",
         ]
 
@@ -379,6 +382,10 @@ def get_batch(
         pad_to_multiple=pad_to_multiple,
     )
     batch.update(packed_mb)  # adds packed_ids, cu_seqlens, position_ids, seqlens
+    if mm_build is not None:
+        batch["multimodal_kwargs"] = mm_build(
+            batch.get("multimodal_train_inputs"), batch["packed_ids"], batch["position_ids"]
+        )
     # Model inputs are sliced in the engine; response fields are sliced below
     if cp_size > 1:
         padded_length = packed_mb["packed_ids"].numel()
@@ -429,9 +436,6 @@ def get_batch(
 
     # Preserve full sample lengths and denominators alongside the local response
     # fields; local_response_lengths describes the latter when CP is enabled.
-
-    # todo: multimodal not supported
-    # multimodal_train_inputs = batch.get("multimodal_train_inputs", None)
 
     return batch
 

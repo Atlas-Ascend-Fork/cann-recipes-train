@@ -227,7 +227,7 @@ torchtitan 配置由三层来源合成，优先级从低到高：
 | 层 | 内容 | 位置 |
 |---|---|---|
 | 预置配置 | 模型规格、优化器超参、精度、激活重计算、override 列表、ckpt 开关 | `models/<族>/config_registry.py`，由脚本中的 `--module` / `--config` 指定 |
-| vime 派生值 | 由 vime 参数推导出的 torchtitan 字段 | `engine.py::_titan_argv` |
+| vime 派生值 | 由 vime 参数推导出的 torchtitan 字段 | `engine.py::build_titan_config` |
 | 脚本点分参数 | 脚本中 `--a.b` 形式参数的原文 | `args.titan_cli_overrides` |
 
 分三层使每个字段只有一个来源：命令行无法表达或随模型固定的内容放在预置配置，由 vime 参数决定的字段由 vime 派生，其余随运行变化的字段由脚本给出。vime 派生值包括：

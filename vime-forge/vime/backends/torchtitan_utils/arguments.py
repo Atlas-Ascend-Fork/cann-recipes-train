@@ -30,9 +30,6 @@ from vime.utils import accelerator
 
 logger = logging.getLogger(__name__)
 
-# torchtitan flags carrying no dot: ConfigManager's recipe selectors (torchtitan/config/manager.py).
-_TITAN_BARE_FLAGS = ("module", "config")
-
 
 def _safe_add(parser, *names, **kwargs):
     """Add an argument only if none of its option strings are already registered."""
@@ -44,6 +41,12 @@ def _safe_add(parser, *names, **kwargs):
 def _add_vime_operational_args(parser):
     """vime-side knobs that vime's common parser does not register. What torchtitan owns arrives as
     dotted flags, and the model architecture is backfilled from the HF config."""
+    # ConfigManager's recipe selectors (torchtitan/config/manager.py), parsed here so the recipe
+    # name is a plain field; build_titan_config turns them back into the torchtitan argv.
+    _safe_add(parser, "--module", type=str, default=None,
+              help="torchtitan recipe module, e.g. vime.backends.torchtitan_utils.models.qwen3")
+    _safe_add(parser, "--config", type=str, default=None,
+              help="torchtitan recipe function name; also the vision builder registration key")
     _safe_add(parser, "--fp16", action="store_true", default=False)  # flips the bf16 default
     # Leave TorchTitan's --debug.batch_invariant in its dotted override channel.
     _safe_add(
@@ -90,15 +93,14 @@ def _add_vime_operational_args(parser):
 def _split_titan_cli_overrides(unknown):
     """Split parse_known_args leftovers into (titan_argv, other).
 
-    A token is torchtitan's iff its flag name carries a dot (``--optimizer.beta2``) or is in
-    _TITAN_BARE_FLAGS; both ``--a.b v`` and ``--a.b=v`` survive verbatim. The caller discards
-    ``other``.
+    A token is torchtitan's iff its flag name carries a dot (``--optimizer.beta2``); both
+    ``--a.b v`` and ``--a.b=v`` survive verbatim. The caller discards ``other``.
     """
     dotted, other, i = [], [], 0
     while i < len(unknown):
         tok = unknown[i]
         name = tok[2:].split("=", 1)[0] if tok.startswith("--") else ""
-        if "." in name or name in _TITAN_BARE_FLAGS:
+        if "." in name:
             dotted.append(tok)
             if "=" not in tok and i + 1 < len(unknown) and not unknown[i + 1].startswith("--"):
                 dotted.append(unknown[i + 1])

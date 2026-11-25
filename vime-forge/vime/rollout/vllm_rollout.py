@@ -418,7 +418,23 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
     skip_decode = True if skip_sp is None else bool(skip_sp)
     text = state.tokenizer.decode(new_response_tokens, skip_special_tokens=skip_decode) if new_response_tokens else ""
 
-    # Build meta_info from the vLLM `choices` response format.
+    meta = _inference_generate_meta_info(output)
+
+    sample.append_response_tokens(
+        args,
+        tokens=new_response_tokens,
+        log_probs=new_response_log_probs,
+        trainable=True,
+        meta_info=meta,
+        text=text,
+    )
+
+    return sample
+
+
+def _inference_generate_meta_info(output: dict[str, Any]) -> dict[str, Any]:
+    """Build Sample metadata from a vLLM generate response."""
+    choice = output["choices"][0]
     fr = choice.get("finish_reason") or "stop"
     if isinstance(fr, dict):
         finish = fr
@@ -459,16 +475,7 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
             offsets.append(offsets[-1] + len(token_ids))
         meta["top_p_token_offsets"] = offsets
 
-    sample.append_response_tokens(
-        args,
-        tokens=new_response_tokens,
-        log_probs=new_response_log_probs,
-        trainable=True,
-        meta_info=meta,
-        text=text,
-    )
-
-    return sample
+    return meta
 
 
 @trace_function("generate_and_rm", target="sample")

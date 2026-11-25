@@ -14,8 +14,8 @@
 
 """TitanEngine: torchtitan component assembly plus the vime forward / training step.
 
-Config comes from torchtitan's ConfigManager: the recipe named by ``--module`` / ``--config``
-supplies the base, ``_titan_argv`` adds the values vime derives at runtime, and the script's dotted
+Config comes from torchtitan's ConfigManager: ``build_titan_config`` turns the recipe named by
+``--module`` / ``--config`` plus the values vime derives at runtime into argv, and the script's dotted
 flags come last and win.
 
 ``TitanEngine.__init__`` is ``Trainer.__init__``'s non-PP path minus the components vime owns, plus
@@ -52,6 +52,7 @@ from . import checkpoint as ckpt
 from ._titan_compat import assert_model_matches_checkpoint, enable_fsdp_gradient_division
 from .data import get_batch, restore_global_response_fields
 from .loss import loss_function
+from .multimodal import assert_vision_parallelism, vision_input_builder
 from .quantization import apply_training_quantization, validate_quantized_model
 from .update_weight.common import _collect_fsdp_param_dtypes, get_hf_per_tensor
 
@@ -63,8 +64,14 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _titan_argv(args):
-    """torchtitan argv: the values vime derives, then the script's flags, which win on any overlap."""
+def build_titan_config(args):
+    """Resolve the full ``Trainer.Config``: recipe + vime-derived values + script flags."""
+    if not args.module or not args.config:
+        raise ValueError(
+            "The torchtitan backend needs a recipe: pass --module and --config in the run script, "
+            "e.g. --module vime.backends.torchtitan_utils.models.qwen3 --config vime_qwen3_4b "
+            "(see vime/backends/torchtitan_utils/models/)."
+        )
     steps = (args.num_rollout or 1) * args.rollout_batch_size * args.n_samples_per_prompt // args.global_batch_size
     argv = [
         "--hf_assets_path", args.hf_checkpoint,  # HF weights + tokenizer
@@ -73,6 +80,8 @@ def _titan_argv(args):
         # point it elsewhere; --checkpoint.no_initial_load_in_hf then selects the DCP format.
         "--checkpoint.initial_load_path", args.hf_checkpoint,
         "--checkpoint.initial_load_in_hf",
+        "--module", args.module,
+        "--config", args.config,
     ]
     # The checkpoint directory. An absolute folder replaces dump_folder in torchtitan's join, so
     # dump_folder keeps its own default and holds only what torchtitan writes there.
@@ -86,19 +95,7 @@ def _titan_argv(args):
     mbs = int(getattr(args, "micro_batch_size", 0) or 0)
     if mbs:
         argv += ["--training.local_batch_size", str(mbs)]
-    return argv + list(args.titan_cli_overrides or [])
-
-
-def build_titan_config(args):
-    """Resolve the full ``Trainer.Config``: recipe + vime-derived values + script flags."""
-    argv = _titan_argv(args)
-    if not any(tok.split("=", 1)[0] in ("--module", "--config") for tok in argv):
-        raise ValueError(
-            "The torchtitan backend needs a recipe: pass --module and --config in the run script, "
-            "e.g. --module vime.backends.torchtitan_utils.models.qwen3 --config vime_qwen3_4b "
-            "(see vime/backends/torchtitan_utils/models/)."
-        )
-    return ConfigManager().parse_args(argv)
+    return ConfigManager().parse_args(argv + list(args.titan_cli_overrides or []))
 
 
 def _is_main_rank(parallel_dims) -> bool:
@@ -183,6 +180,8 @@ class TitanEngine:
         self.config = config
         self.hf_config = hf_config
         self.fsdp_param_dtypes = {}
+        # The selected torchtitan recipe (--config); also the vision builder registration key.
+        self.recipe = args.config
         model_spec = apply_training_quantization(config)
         assert model_spec is not None, "model_spec must be set by the config_registry recipe"
         self.sequence_padding_multiple = 64 if model_spec.name == "qwen3_5" else 1
@@ -271,7 +270,18 @@ class TitanEngine:
         model.train()
         self.model_parts = [model]
 
-        # vime: before the optimizer is built, so frozen params get no update and no state slot.
+        builder = vision_input_builder(self.recipe)
+        if builder is None:
+            if getattr(args, "multimodal_keys", None):
+                raise ValueError(
+                    f"--multimodal-keys {args.multimodal_keys} needs a recipe declared with "
+                    f"@vision_recipe; {self.recipe!r} declares none."
+                )
+            self._mm_build = None
+        else:
+            self._mm_build = builder(model, hf_config=hf_config, args=args)
+
+        # before the optimizer is built, so frozen params get no update and no state slot.
         self._freeze_model_params()
         # After freezing, so the trainable count reflects the applied mask.
         _log_parameter_counts(self.model_parts, pd, f"{model_spec.name} {model_spec.flavor}")
@@ -372,6 +382,13 @@ class TitanEngine:
                 "activation_checkpoint is SelectiveAC, which is numerically inconsistent for vime "
                 "(no_grad old-forward + TP/DTensor); prefer FullAC or None in the recipe."
             )
+        assert_vision_parallelism(
+            recipe=self.recipe,
+            cp_enabled=pd.cp_enabled,
+            cp=pd.cp,
+            spmd_backend=backend,
+            multimodal_keys=getattr(self.args, "multimodal_keys", None),
+        )
         max_ctx = int(getattr(self.args, "rollout_max_context_len", 0) or 0)
         if max_ctx:
             assert config.training.seq_len >= max_ctx, (
@@ -408,15 +425,18 @@ class TitanEngine:
         """One packed micro-batch through the model: flat [T] tokens -> logits [T, V].
 
         The batch dimension the pinned torchtitan expects is added and removed here and nowhere
-        else, as views. ``get_attention_masks`` turns the position resets into whatever metadata
+        else, as views. The model's input seam turns the position resets into whatever metadata
         type the configured attention backend takes. Under tp>1 the logits stay a vocab-sharded
         DTensor for the caller's to_local(); at tp=1 full_tensor() merges them.
+
+        A multimodal recipe's vision kwargs arrive on the batch: get_batch translated them
+        next to the packed streams, so this step only merges them after the input seam.
         """
         tokens = batch["packed_ids"].unsqueeze(0)
         positions = batch["position_ids"].unsqueeze(0)
-        return self._forward_model(tokens, positions).squeeze(0)
+        return self._forward_model(tokens, positions, **(batch.get("multimodal_kwargs") or {})).squeeze(0)
 
-    def _forward_model(self, tokens, positions):
+    def _forward_model(self, tokens, positions, **extra_model_kwargs):
         """Run the model after constructing the attention metadata for packed tokens."""
         model = self.model_parts[0]
         build_attention_masks = getattr(model, "build_attention_masks", None)
@@ -456,6 +476,9 @@ class TitanEngine:
                 torch.zeros_like(tokens),
                 model_kwargs,
             )
+        # Vision kwargs bypass input sharding/annotation; _validate calls
+        # assert_vision_parallelism to reject CP>1 and spmd_types for vision runs.
+        model_kwargs.update(extra_model_kwargs)
         logits = model(tokens, **model_kwargs)
         if isinstance(logits, DTensor):
             # CP leaves the sequence dimension sharded. Gathering it here
@@ -500,6 +523,7 @@ class TitanEngine:
                 batch = get_batch(
                     args, data_iterator[0], self.parallel_dims, self.device,
                     sequence_padding_multiple=self.sequence_padding_multiple,
+                    mm_build=self._mm_build,
                 )
                 with self.train_context():
                     logits = self._forward(batch)
@@ -531,7 +555,7 @@ class TitanEngine:
                 reordered[origin_index] = value
             collected[k] = reordered
 
-        # todo: pp / multimodal; currently single PP direct collection
+        # todo: pp; currently single PP direct collection
         return collected
 
     @ptl.perf_timer("optimizer_step")
@@ -547,7 +571,7 @@ class TitanEngine:
 
         Returns (grad_norm, metric_keys, metric_sums), aggregated across mb/DP by the caller.
 
-        todo: MTP / PP combined-1f1b / multimodal not supported
+        todo: MTP / PP combined-1f1b not supported
         """
         args = self.args
         for m in self.model_parts:
@@ -568,6 +592,7 @@ class TitanEngine:
             batch = get_batch(
                 args, data_iterator[0], self.parallel_dims, self.device,
                 sequence_padding_multiple=self.sequence_padding_multiple,
+                mm_build=self._mm_build,
             )
             pg_titan.stamp_coord(args, batch, role=role, rollout_id=rollout_id, step_id=step_id)  # precision-guard
 
@@ -670,7 +695,7 @@ class TitanEngine:
         global_batch_size. The LAST step's reduced metrics are returned, along with its divisor so
         the caller reuses it without a redundant all-reduce.
 
-        todo: MTP / PP / multimodal / offload_train not supported
+        todo: MTP / PP / offload_train not supported
         """
         args = self.args
         assert len(num_microbatches) == len(global_batch_sizes), (

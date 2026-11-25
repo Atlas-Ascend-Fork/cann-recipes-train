@@ -32,8 +32,6 @@ MODE="${MODE:-sync}"
 # HCCL. Training and rollout must agree on HCCL or weight transfer deadlocks.
 DET="${DET:-on}"
 
-# Checkpoint saving: off by default for local/smoke runs. Set SAVE_ON=on in
-# common/local.sh to enable periodic checkpoint saves.
 SAVE_ON="${SAVE_ON:-on}"
 
 # EVAL_ON is not set here: it follows MODE (on for sync/async, off for
@@ -89,10 +87,8 @@ export HCCL_ASYNC_ERROR_HANDLING="${HCCL_ASYNC_ERROR_HANDLING:-0}"
 
 RT_ENV=(
    RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1  # ray assigns NPUs per worker itself
-   PYTORCH_NPU_ALLOC_CONF=expandable_segments:True     # ⚠ torchtitan needs it; incompatible
-                                                       #   with vLLM sleep-mode, so that stays off
-   TORCH_NPU_DEVICE_CAPABILITY=0.0                     # torch_npu returns None; <9 avoids
-                                                       #   CUDA-only fast paths
+   PYTORCH_NPU_ALLOC_CONF=expandable_segments:True     # torchtitan needs it; vLLM sleep-mode is off
+   TORCH_NPU_DEVICE_CAPABILITY=0.0                     # torch_npu returns None; <9 avoids CUDA-only paths
    VLLM_VERSION="${VLLM_VERSION:-0.23.0}"              # vllm-ascend branches on vllm_version_is()
    VLLM_ASCEND_ENABLE_NZ=0                             # ⚠ RL weight hot-update needs FRACTAL_NZ off
    VLLM_USE_AOT_COMPILE=0                              # ⚠ torch2.12 <-> torch_npu aot path crashes
@@ -103,7 +99,5 @@ RT_ENV=(
    PYTHONUNBUFFERED=1
    HYDRA_FULL_ERROR=1
    DISABLE_L2_CACHE=1
-   CUDA_DEVICE_MAX_CONNECTIONS=1                       # carried over from the original script;
-                                                       #   no evidence torchtitan depends on it
    RAY_memory_usage_threshold="${RAY_memory_usage_threshold:-0.95}"
 )

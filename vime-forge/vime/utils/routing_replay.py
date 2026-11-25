@@ -60,17 +60,9 @@ def _compute_topk_for_current_router(
     num_groups=None,
     group_topk=None,
 ):
-    # VLLM's deterministic DeepSeek/GLM biased top-k uses
-    # torch.topk(..., sorted=False).  Megatron's local compute_topk uses the
-    # default sorted=True.  The selected expert set is the same, but the
-    # low-latency-compatible owner reduction consumes experts in top-k column
-    # order, so the difference changes BF16 accumulation before any route
-    # actually diverges.
-    #
-    # Only override routers registered by the DeepEP alignment bridge, and only for the
-    # non-grouped Megatron path used by GLM-5 (n_group=topk_group=1 in VLLM,
-    # represented as no group limit in Megatron).  Other training paths retain
-    # Megatron's original semantics.
+    # vLLM's biased top-k uses sorted=False while Megatron's uses sorted=True; the expert
+    # set matches, but the order changes BF16 accumulation. Override only the DeepEP
+    # bridge's non-grouped path; other paths keep Megatron semantics.
     if ORDERED_TOPK_CAPTURE_ROUTER is not None and not group_topk:
         return torch.topk(scores, k=topk, dim=1, sorted=False)
 

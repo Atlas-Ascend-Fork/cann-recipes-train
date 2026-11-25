@@ -12,4 +12,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Dense text-only Qwen3.5 TorchTitan recipes, including Ascend CP training."""
+"""Qwen3.5 TorchTitan recipes, text and vision-language, including Ascend CP training."""
