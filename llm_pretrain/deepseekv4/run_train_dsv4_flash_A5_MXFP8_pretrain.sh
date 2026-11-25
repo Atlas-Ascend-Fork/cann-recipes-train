@@ -19,11 +19,13 @@ source /usr/local/Ascend/cann/set_env.sh
 source /usr/local/Ascend/cann/opp/vendors/customize/bin/set_env.bash
 source /usr/local/Ascend/cann/opp/vendors/custom_transformer/bin/set_env.bash
 
+set -o pipefail
+
 export PYTHONUNBUFFERED=1
 NGPU=${NGPU:-"8"}
 export LOG_RANK=${LOG_RANK:-0}
 MODULE=${MODULE:-"torchtitan_npu.models.deepseek_v4"}
-CONFIG=${CONFIG:-"deepseek_v4_flash_debug_16_experts_43_layers_mxfp8"}
+CONFIG=${CONFIG:-"debug_deepseek_v4_flash_single_node_mxfp8"}
 TRAIN_FILE=${TRAIN_FILE:-"torchtitan_npu.entry"}
 COMM_MODE=${COMM_MODE:-""}
 
@@ -47,5 +49,5 @@ else
     TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE} \
     torchrun --nproc_per_node=${NGPU} --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
     --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
-    -m ${TRAIN_FILE} --module ${MODULE} --config ${CONFIG} "$@"  2>&1 | tee -a .mkdir -p logs/${logfile}
+    -m ${TRAIN_FILE} --module ${MODULE} --config ${CONFIG} "$@"  2>&1 | tee -a "logs/${logfile}"
 fi

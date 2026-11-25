@@ -27,23 +27,15 @@
 
 
 
-## 源码准备
+## A3 多机源码准备
 
-如果是A3环境执行如下命令拉取源码：
+下文的 DeepSeek-V4-Flash 和 DeepSeek-V4-Pro 多机训练配置位于 `torchtitan-npu` 的 `v0.2.2-dev` 分支。执行以下命令获取源码：
 
 ```shell
 mkdir -p /home/code && cd /home/code/
 git clone -b v0.2.2-dev https://gitcode.com/cann/torchtitan-npu.git
 cd torchtitan-npu
 ```
-如果是A5环境执行如下命令拉取源码：
-
-```shell
-mkdir -p /home/code && cd /home/code/
-git clone -b master https://gitcode.com/cann/torchtitan-npu.git
-cd torchtitan-npu
-```
-
 
 下载 cann-recipes 仓对应的脚本, 拷贝至 torchtitan-npu 的 scripts 目录
 ```
@@ -52,8 +44,6 @@ git clone https://gitcode.com/cann/cann-recipes-train.git
 cp ./cann-recipes-train/llm_pretrain/deepseekv4/run_train_multinodes_dsv4_flash_pretrain.sh ./torchtitan-npu/scripts
 cp ./cann-recipes-train/llm_pretrain/deepseekv4/run_train_multinodes_dsv4_flash_perf.sh ./torchtitan-npu/scripts
 cp ./cann-recipes-train/llm_pretrain/deepseekv4/run_train_multinodes_dsv4_pro_pretrain.sh ./torchtitan-npu/scripts
-cp ./cann-recipes-train/llm_pretrain/deepseekv4/run_train_dsv4_flash_A5_BF16_pretrain.sh ./torchtitan-npu/scripts
-cp ./cann-recipes-train/llm_pretrain/deepseekv4/run_train_dsv4_flash_A5_MXFP8_pretrain.sh ./torchtitan-npu/scripts
 
 ```
 
@@ -257,7 +247,29 @@ CONFIG_FILE=./torchtitan_npu/models/deepseek_v4/train_configs/deepseek_v4_pro_61
 bash scripts/run_train_multinodes_dsv4_pro_pretrain.sh
 ```
 
-* 进入 `torchtitan-npu` 源码目录后，在昇腾950PR/DT系列A5上参与训练的单机节点上执行如下命令，即可分别启动 `DeepSeek-V4-Flash` 单机裁剪模型的BF16/MXFP8的CPT训练任务：
+## A5 单机 BF16 / MXFP8 预训练
+
+在昇腾 950 PR/DT 系列 A5 单机 8 卡环境中，使用以下固定版本的 `torchtitan-npu` 运行 DeepSeek-V4-Flash 裁剪模型（43 层、16 个路由专家）。该版本的 `torchtitan_npu.entry` 接受 `--module` 和 `--config`。
+
+将本仓克隆到 `/home/code/cann-recipes-train`，再准备 A5 源码及脚本：
+
+```shell
+cd /home/code
+git clone -b deprecated_master_260831 https://gitcode.com/cann/torchtitan-npu.git torchtitan-npu-a5
+cd torchtitan-npu-a5
+git checkout --detach 2de648e5539502a1dc406735d8e61673e2712d52
+cp ../cann-recipes-train/llm_pretrain/deepseekv4/run_train_dsv4_flash_A5_BF16_pretrain.sh scripts/
+cp ../cann-recipes-train/llm_pretrain/deepseekv4/run_train_dsv4_flash_A5_MXFP8_pretrain.sh scripts/
+```
+
+在已配置 CANN 和自定义算子的 A5 训练环境中，按该提交的 `requirements.txt` 安装 Python 依赖，并将训练所需 tokenizer 放到配置指定的 `hf_assets_path`。两个脚本默认使用模块 `torchtitan_npu.models.deepseek_v4`，对应配置如下。
+
+| 精度 | 默认配置 |
+| --- | --- |
+| BF16 | `debug_deepseek_v4_flash_single_node` |
+| MXFP8 | `debug_deepseek_v4_flash_single_node_mxfp8` |
+
+在 `torchtitan-npu-a5` 源码目录中按所需精度执行对应命令。
 
 ```shell
 bash scripts/run_train_dsv4_flash_A5_BF16_pretrain.sh

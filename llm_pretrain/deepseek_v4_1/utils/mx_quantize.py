@@ -364,7 +364,7 @@ def _quantize_elemwise_core(A, bits, exp_bits, max_norm, round='nearest',
     # handle Inf/NaN
     out[A == float("Inf")] = float("Inf")
     out[A == -float("Inf")] = -float("Inf")
-    out[A == float("NaN")] = float("NaN")
+    out[torch.isnan(A)] = float("NaN")
 
     return out
 

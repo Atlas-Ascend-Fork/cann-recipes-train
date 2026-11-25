@@ -116,6 +116,27 @@ dataset = "cc12m-test"
 
 若直接按默认配置拉起训练，默认的 `cc12m-test` 数据集；若使用自定义数据集，请提前准备好数据目录，并在后续训练配置中修改 `dataset` 和 `dataset_path`。
 
+### 独立复用图像预处理工具（可选）
+
+本仓的 `utils/image_processor.py` 沿用 [cann-recipes-infer 的 DeepSeek-V4.1 图像处理接口](https://gitcode.com/cann/cann-recipes-infer/tree/master/models/deepseek_v4_1/utils)。
+独立复用时，从推理仓获取 `executor/core/mm_processor.py` 和 `models/deepseek_v4_1/utils/encoding_dsv4.py`。
+前者提供 `BaseMMProcessor`，后者与 `image_processor.py` 放在同一 Python 包中。
+在已安装 PyTorch、NumPy 和 Pillow 的环境中，从 `cann-recipes-train` 仓根目录执行：
+
+```shell
+image_tools_dir=$(mktemp -d)
+git clone https://gitcode.com/cann/cann-recipes-infer.git "$image_tools_dir/infer"
+git -C "$image_tools_dir/infer" checkout --detach 691bef9ee4063a02d42e21452f2ab23fdada8300
+mkdir -p "$image_tools_dir/executor/core" "$image_tools_dir/utils"
+cp "$image_tools_dir/infer/executor/core/mm_processor.py" "$image_tools_dir/executor/core/"
+cp "$image_tools_dir/infer/models/deepseek_v4_1/utils/encoding_dsv4.py" "$image_tools_dir/utils/"
+cp llm_pretrain/deepseek_v4_1/utils/image_processor.py "$image_tools_dir/utils/"
+(
+  cd "$image_tools_dir"
+  python -c 'from utils.image_processor import DeepseekV41ImageProcessor'
+)
+```
+
 ## 模型权重准备
 
 ### DeepSeek-V4.1-Flash 模型权重准备

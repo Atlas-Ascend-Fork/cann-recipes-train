@@ -63,6 +63,19 @@ NPU 侧实现与训练入口见本目录 `internal/tla/nlp/`。
 
 ---
 
+## SlimPajama 数据准备
+
+默认下载训练集前 63 个 Parquet shard，合计约 354 GiB。分词与样本打包输出需要额外磁盘空间，请为下载缓存和 `--output` 指定的目录分别预留容量。
+
+Hugging Face Hub 缓存默认位于 `~/.cache/huggingface/hub`。设置 `HF_HOME` 后，默认使用 `$HF_HOME/hub`。如需将下载缓存放到空间充足的数据盘，在下载命令前设置 `HF_HUB_CACHE`：
+
+```bash
+export HF_HUB_CACHE=/data/huggingface/hub
+python internal/tla/nlp/tla-nlp-frame/preparation/download_data.py
+```
+
+请根据实际挂载点替换示例路径。从样例根目录执行命令，并将下载脚本返回的快照路径作为分词脚本的 `--dataset` 参数。完整步骤见 [NLP 下游任务 Notebook](internal/quick_start/02_downstream_nlp.ipynb)。
+
 ## 本样例目录结构
 
 ```text
@@ -114,7 +127,7 @@ unzip -o demo_config.zip -d democonfig
 
 建议先阅读 Notebook：
 
-- `internal/quick_start/00_overview.ipynb` 
+- `internal/quick_start/00_overview.ipynb`
 - `internal/quick_start/01_operator_deltanet.ipynb` — DeltaNet 算子实践
 - `internal/quick_start/02_downstream_nlp.ipynb` — NLP 数据、训练与评测流程
 

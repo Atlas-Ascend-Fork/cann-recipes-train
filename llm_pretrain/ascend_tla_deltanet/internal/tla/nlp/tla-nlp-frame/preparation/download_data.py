@@ -6,7 +6,7 @@ from huggingface_hub import snapshot_download
 # 前 1/4 的 train shards: 00000 ~ 00062，共 63 个
 allow_patterns = [
     f"data/train-{i:05d}-of-00250.parquet"
-    for i in range(25)
+    for i in range(63)
 ]
 
 local_path = snapshot_download(

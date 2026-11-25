@@ -28,12 +28,12 @@ apart. The IMAGE slots are filled with aligner rows in reading order.
 
 import base64
 import io
-import math
 import json
+import math
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 from urllib.request import urlopen
-from urllib.parse import unquote, urlparse
+
 import numpy as np
 import torch
 from PIL import Image, ImageOps
