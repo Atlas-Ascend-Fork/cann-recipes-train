@@ -9,6 +9,7 @@
 import argparse
 import json
 import os
+import stat
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -103,6 +104,22 @@ def parquet_to_json(
     if not files:
         print(f"No parquet files found under {input_path}")
         return
+    output = Path(output_path)
+    try:
+        output_stat = output.stat()
+    except FileNotFoundError:
+        output_stat = None
+    if output_stat is not None:
+        if stat.S_ISDIR(output_stat.st_mode):
+            raise ValueError(f"Output path must be a file, not a directory: {output}")
+        for file in files:
+            try:
+                input_stat = file.stat()
+            except OSError:
+                # Leave unreadable inputs to the normal per-file skip/report path.
+                continue
+            if os.path.samestat(output_stat, input_stat):
+                raise ValueError(f"Output path would overwrite an input parquet file: {output}")
     if max_files is not None:
         files = files[:max_files]
 
