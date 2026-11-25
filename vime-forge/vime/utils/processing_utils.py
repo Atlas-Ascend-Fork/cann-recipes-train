@@ -263,6 +263,7 @@ def encode_audio_for_rollout_engine(audio) -> str:
 
 
 def encode_video_for_rollout_engine(video) -> str:
+    """Encode frames with pixel values in 0..255, as returned by Qwen video loading."""
     if isinstance(video, str):
         return video
 
@@ -270,10 +271,15 @@ def encode_video_for_rollout_engine(video) -> str:
     import torch
 
     if isinstance(video, torch.Tensor):
-        frames = video.detach().cpu().float()
+        frames = video.detach().cpu()
         if frames.dim() == 4 and frames.shape[1] in (1, 3):
             frames = frames.permute(0, 2, 3, 1)  # (N, H, W, C)
-        frames = (frames.clamp(0, 1).numpy() * 255).astype(np.uint8)
+        if frames.dtype == torch.uint8:
+            frames = frames.numpy()
+        else:
+            frames = frames.float().clamp(0, 255).numpy().astype(np.uint8)
+        if frames.shape[-1] == 1:
+            frames = frames[..., 0]
         video = [Image.fromarray(frame) for frame in frames]
 
     if isinstance(video, list) and video:
