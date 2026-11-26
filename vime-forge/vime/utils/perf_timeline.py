@@ -374,12 +374,12 @@ def emit_sample_traces(args: Any, samples: list[Any]) -> None:
 
 def _sample_token_lengths(sample: Any) -> tuple[Any, int | None]:
     """Return the response and prompt token counts for span metadata."""
-    response_length = getattr(sample, "effective_response_length", None)
+    response_length = getattr(sample, "response_length", None)
     if response_length is None:
-        response_length = getattr(sample, "response_length", None)
+        return None, None
     tokens = getattr(sample, "tokens", None)
     prompt_length = None
-    if tokens is not None and response_length is not None:
+    if tokens is not None:
         prompt_length = len(tokens) - int(response_length)
     return response_length, prompt_length
 
