@@ -264,7 +264,7 @@ class Sample:
         """
         Append response-side tokens and keep training metadata aligned.
 
-        Model-generated tokens should pass ``trainable=True`` plus VLLM
+        Model-generated tokens should pass ``trainable=True`` plus vLLM
         ``meta_info`` and log probabilities. Tool/environment tokens should pass
         ``trainable=False``; they receive loss-mask zeros and empty top-p spans
         when top-p replay is active.

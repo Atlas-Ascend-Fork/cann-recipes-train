@@ -15,20 +15,17 @@
 
 export VIME_WORKSPACE=/path/to/workspace   # data / ckpt / tb / tmp / caches hang off this
 export VIME_MODEL_ROOT=/path/to/models     # model store, holds Qwen3-4B
+export VIME_DATA_ROOT=/path/to/dataset     # train/eval dataset
 export VIME_SLOT=0                         # which concurrent instance on this host;
                                            # shifts the whole port set so runs never collide
 
 export VIME_CANN_HOME=/usr/local/Ascend/ascend-toolkit
 export VIME_NNAL_HOME=/usr/local/Ascend/nnal/atb
-export VIME_TRAIN_ENV=                     # trainer + vime python env; empty => current interpreter
-export VIME_VLLM_ENV=                      # vllm python env; empty => same as VIME_TRAIN_ENV
+export VIME_TRAIN_ENV=/app/uv-train                    # trainer + vime python env; empty => current interpreter
+export VIME_VLLM_ENV=/app/uv-vllm                      # vllm python env; empty => same as VIME_TRAIN_ENV
 
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7   # host physical IDs accepted by npu-smi -i;
                                                    # how they split is in ../<model>.sh
-
-# Either binary can be named outright instead of being derived from the envs:
-#   export TRAIN_PYTHON=/opt/tt-venv/bin/python
-#   export VIME_VLLM_EXECUTABLE=/opt/infer-venv/bin/vllm
 
 # Derived from VIME_WORKSPACE: VIME_DATA_ROOT, VIME_CKPT_ROOT, VIME_TB_ROOT,
 # TMPDIR, TRITON_CACHE_DIR, HF_HOME, ASCEND_CACHE_PATH.
@@ -36,14 +33,35 @@ export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7   # host physical IDs accepted 
 # Export any of them here to override that one on its own, e.g.
 #   export VIME_CKPT_ROOT=/somewhere/else
 
+# ── Multi-node: run the SAME command on every node ────────────────────
+# NODE_IP_LIST describes the whole run, head first. Set it and launch the script
+# on each listed node: the head submits the job, the others join its ray cluster
+# and stay alive as workers. MASTER_ADDR, the placement counts and the no_proxy
+# exclusions are then derived, so what the model script declares as ACTOR_GPUS /
+# ROLLOUT_GPUS becomes an input rather than a derived value. Leave it unset for a
+# single-node run.
+
+# export NODE_IP_LIST="10.0.0.1 10.0.0.2"  # head first; every node runs this file
+# export NPUS_PER_NODE=8                   # training cards per node
+# export ROLLOUT_NODE_NUM=1                # nodes hosting the rollout; the rest train
+# export GLOO_SOCKET_IFNAME=enp34s0f1      # cluster NIC for the CPU collectives;
+#                                          # only defaulted (to enp34s0f1) on
+#                                          # multi-node, override when named otherwise
+
+# Multi-node needs shared storage: every node must see the same VIME_WORKSPACE /
+# VIME_MODEL_ROOT / VIME_DATA_ROOT -- checkpoints and logs are written there.
+# Timing knobs, if the defaults do not fit the cluster:
+#   export VIME_MULTINODE_WAIT_TIMEOUT=600   # head waits this long for the nodes
+#   export VIME_MULTINODE_JOIN_TIMEOUT=180   # worker retries joining for this long
+
 # ── Switches: defaults live in common/default.sh ──────────────────────
 
 # export COLOCATE=off        # share NPUs between training and rollout; requires vLLM sleep mode
 #                            # and makes the launcher disable expandable allocator segments
 # export MODE=fully-async    # sync | async | fully-async
-# export DET=off             # determinism at all three sites at once
 # export SAVE_ON=off         # periodic checkpoint saving (off by default)
 # export EVAL_ON=off         # skip eval (throughput / smoke runs); follows MODE otherwise
+# Determinism (HCCL_DETERMINISTIC=strict / batch-invariant) is always on.
 
 # ── Training parameters: override individual ones ─────────────────────
 # Appended after every parameter group, so these win (argparse keeps the last

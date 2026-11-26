@@ -228,6 +228,7 @@ class TorchTitanTrainRayActor(TrainRayActor):
     @timer
     def wake_up(self) -> None:
         assert self.args.offload_train
+        clear_memory()
         print_memory("before wake_up TorchTitan model")
         torch_memory_saver.resume()
         clear_memory()

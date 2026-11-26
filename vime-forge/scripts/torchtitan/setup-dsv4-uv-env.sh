@@ -81,7 +81,7 @@ install_vllm_into_python() {
     --trusted-host triton-ascend.osinfra.cn \
     triton-ascend==3.2.1
   VLLM_TARGET_DEVICE=empty \
-  VLLM_VERSION_OVERRIDE=0.23.0 \
+  VLLM_VERSION_OVERRIDE=0.30.0 \
     "$python_bin" -m pip install \
       --no-build-isolation \
       --no-deps \

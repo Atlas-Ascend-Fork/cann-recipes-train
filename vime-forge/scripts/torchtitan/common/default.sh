@@ -28,11 +28,9 @@ COLOCATE="${COLOCATE:-off}"
 # in-flight pool and drops eval (that rollout raises in eval mode).
 MODE="${MODE:-sync}"
 
-# Determinism at all three sites at once: the training seed, vLLM sampling and
-# HCCL. Training and rollout must agree on HCCL or weight transfer deadlocks.
-DET="${DET:-on}"
-
-SAVE_ON="${SAVE_ON:-on}"
+# Checkpoint saving: off by default for local/smoke runs. Set SAVE_ON=on in
+# common/local.sh to enable periodic checkpoint saves.
+SAVE_ON="${SAVE_ON:-off}"
 
 # EVAL_ON is not set here: it follows MODE (on for sync/async, off for
 # fully-async, whose rollout raises in eval mode). Set EVAL_ON=off in local.sh
@@ -47,8 +45,7 @@ VIME_SLOT="${VIME_SLOT:-0}"                          # which concurrent instance
 VIME_CANN_HOME="${VIME_CANN_HOME:-/usr/local/Ascend/ascend-toolkit}"
 VIME_NNAL_HOME="${VIME_NNAL_HOME:-/usr/local/Ascend/nnal/atb}"
 VIME_TRAIN_ENV="${VIME_TRAIN_ENV:-}"                 # trainer + vime python env
-VIME_VLLM_ENV="${VIME_VLLM_ENV:-}"                    # vllm python env; empty => same as train
-VIME_VLLM_PYTHON="${VIME_VLLM_PYTHON:-}"             # rollout interpreter; derived by launcher
+VIME_VLLM_ENV="${VIME_VLLM_ENV:-}"                   # vllm python env; empty => same as train
 ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 VIME_NOFILE_LIMIT="${VIME_NOFILE_LIMIT:-65535}"
 MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
@@ -58,7 +55,9 @@ MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 VIME_DATA_ROOT="${VIME_DATA_ROOT:-${VIME_WORKSPACE}/data}"
 VIME_CKPT_ROOT="${VIME_CKPT_ROOT:-${VIME_WORKSPACE}/ckpt}"
 VIME_TB_ROOT="${VIME_TB_ROOT:-${VIME_WORKSPACE}/tb}"
-TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-${VIME_WORKSPACE}/.triton}"
+TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-${VIME_WORKSPACE}/.cache/triton}"
+VLLM_TORCH_EXTENSIONS_DIR="${VLLM_TORCH_EXTENSIONS_DIR:-${VIME_WORKSPACE}/.cache/torch_extensions/vllm}"
+TORCHTITAN_TORCH_EXTENSIONS_DIR="${VIME_WORKSPACE}/.cache/torch_extensions/torchtitan"
 HF_HOME="${HF_HOME:-${VIME_WORKSPACE}/.cache/huggingface}"
 ASCEND_CACHE_PATH="${ASCEND_CACHE_PATH:-${VIME_WORKSPACE}/.ascend_cache}"
 
@@ -83,21 +82,74 @@ export HCCL_ASYNC_ERROR_HANDLING="${HCCL_ASYNC_ERROR_HANDLING:-0}"
 
 # ── Environment handed to ray workers ─────────────────────────────────
 # The launcher appends the computed ones (TENSORBOARD_DIR, PYTHONPATH,
-# VIME_VLLM_EXECUTABLE, VIME_VLLM_PYTHON) plus the DET-dependent ones.
-
 RT_ENV=(
    RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1  # ray assigns NPUs per worker itself
-   PYTORCH_NPU_ALLOC_CONF=expandable_segments:True     # torchtitan needs it; vLLM sleep-mode is off
+   RAY_memory_usage_threshold="${RAY_memory_usage_threshold:-0.95}"
+   PYTORCH_NPU_ALLOC_CONF=expandable_segments:True     # ⚠ torchtitan needs it; incompatible
+                                                       #   with vLLM sleep-mode, so that stays off
    TORCH_NPU_DEVICE_CAPABILITY=0.0                     # torch_npu returns None; <9 avoids CUDA-only paths
-   VLLM_VERSION="${VLLM_VERSION:-0.23.0}"              # vllm-ascend branches on vllm_version_is()
+   VLLM_VERSION="${VLLM_VERSION:-0.30.0}"              # vllm-ascend branches on vllm_version_is()
    VLLM_ASCEND_ENABLE_NZ=0                             # ⚠ RL weight hot-update needs FRACTAL_NZ off
    VLLM_USE_AOT_COMPILE=0                              # ⚠ torch2.12 <-> torch_npu aot path crashes
    VLLM_ASCEND_NPUGRAPH_CAPTURE_LIMIT=512              # keeps rollout off the eager fallback
    ATB_MATMUL_SHUFFLE_K_ENABLE=0                       # vllm-ascend's official determinism recipe;
-   ATB_LLM_LCOC_ENABLE=0                               #   always on, not gated by DET
+   ATB_LLM_LCOC_ENABLE=0                               # always on
    VIME_DATA_ROOT="${VIME_DATA_ROOT}"                  # --eval-config resolves it via ${oc.env:...}
+   VIME_TORCHTITAN_WEIGHT_SYNC_LEADER_RELAY="${VIME_TORCHTITAN_WEIGHT_SYNC_LEADER_RELAY:-0}"  # 0 = no relay
    PYTHONUNBUFFERED=1
    HYDRA_FULL_ERROR=1
    DISABLE_L2_CACHE=1
-   RAY_memory_usage_threshold="${RAY_memory_usage_threshold:-0.95}"
+   CUDA_DEVICE_MAX_CONNECTIONS=1                       # carried over from the original script;
+                                                       #   no evidence torchtitan depends on it
+   FLA_NPU_DISABLE_PTH="${FLA_NPU_DISABLE_PTH:-1}"     # disable fla_npu pth
+   HCCL_ASYNC_ERROR_HANDLING=0                         # disable HCCL watchdog 
+   HCCL_DETERMINISTIC="strict"
+   LCCL_DETERMINISTIC=1
 )
+
+# ── Launcher/process environment ─────────────────────────────────────
+# RLIMIT_MEMLOCK: the image default (~94 GiB) is below what torchtitan's
+# pinned-host novaswap pool needs, and the failure surfaces as
+# "rtsMallocHost ... driver error:out of memory" / "Pinned pool failed to
+# allocate slab". Raise it here — this file is sourced by the launcher before
+# it starts Ray, so the raylet and every Ray worker inherit the limit.
+ulimit -l unlimited 2>/dev/null || true
+
+# TMPDIR is cleared on reboot (and the Ascend bishengir/hivmc compiler plus
+# triton need it to exist), so recreate it every launch.
+[[ -z "${TMPDIR:-}" ]] || mkdir -p "${TMPDIR}"
+
+# ── Multi-node ────────────────────────────────────────────────────────
+# NODE_IP_LIST: the nodes of the run, head first, space-separated. Empty keeps
+# the single-node path. When set, launcher.sh validates the list, works out
+# which node this process runs on, derives MASTER_ADDR / the placement counts /
+# the no_proxy exclusions, and -- on a non-head node -- joins this node to the
+# head's ray cluster instead of launching the job. Run the SAME command on every
+# node; the placement numbers below are then inputs, not derived.
+NODE_IP_LIST="${NODE_IP_LIST:-}"                  # e.g. "10.0.0.1 10.0.0.2 10.0.0.3"
+NPUS_PER_NODE="${NPUS_PER_NODE:-8}"               # training cards per node
+ROLLOUT_NODE_NUM="${ROLLOUT_NODE_NUM:-1}"         # how many nodes host the rollout
+# GLOO_SOCKET_IFNAME pins the host NIC the CPU collectives use. Only defaulted
+# for a multi-node run: naming an interface that does not exist makes gloo fail
+# to initialise even on a single node, where the loopback is fine. Override it in
+# local.sh when the cluster NIC is named differently.
+if [[ -n "${NODE_IP_LIST:-}" ]]; then
+    GLOO_SOCKET_IFNAME="${GLOO_SOCKET_IFNAME:-enp34s0f1}"
+else
+    GLOO_SOCKET_IFNAME="${GLOO_SOCKET_IFNAME:-}"
+fi
+
+# TorchTitan's cross-process weight-sync relay. 0 is the multi-node-safe setting
+# the old node-list launcher forced; set 1 in local.sh to route the sync through
+# a leader relay.
+VIME_TORCHTITAN_WEIGHT_SYNC_LEADER_RELAY="${VIME_TORCHTITAN_WEIGHT_SYNC_LEADER_RELAY:-0}"
+# The head waits this long for every node in NODE_IP_LIST to join ray before
+# submitting, then submits with a warning instead of hanging silently.
+VIME_MULTINODE_WAIT_TIMEOUT="${VIME_MULTINODE_WAIT_TIMEOUT:-600}"
+# How long a worker node keeps retrying to join the head's ray cluster.
+VIME_MULTINODE_JOIN_TIMEOUT="${VIME_MULTINODE_JOIN_TIMEOUT:-180}"
+
+# Set by launcher.sh for a multi-node run: VIME_MULTINODE=1, NODE_COUNT,
+# HEAD_NODE_IP, LOCAL_NODE_IP, LOCAL_NODE_INDEX, ACTOR_NODE_NUM, ACTOR_GPUS,
+# ROLLOUT_GPUS. Single-node leaves VIME_MULTINODE=0 and the model script's own
+# ACTOR_GPUS / ROLLOUT_GPUS / ACTOR_NODE_NUM defaults in place.

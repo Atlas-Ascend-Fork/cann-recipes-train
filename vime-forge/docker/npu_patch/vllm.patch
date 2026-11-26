@@ -1,0 +1,505 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index 1a77433f9c..fc186462e2 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -7,7 +7,7 @@ requires = [
+     "setuptools>=77.0.3,<81.0.0",
+     "setuptools-scm>=8.0",
+     "setuptools-rust>=1.9.0",
+-    "torch == 2.13.0",
++    "torch==2.13.0+cpu",
+     "wheel",
+     "jinja2",
+ ]
+diff --git a/requirements/common.txt b/requirements/common.txt
+index acfc986c75..67db915d56 100644
+--- a/requirements/common.txt
++++ b/requirements/common.txt
+@@ -33,7 +33,7 @@ jsonschema >= 4.23.0 # required for MiniMax M3 tool schema validation
+ pyzmq >= 25.0.0
+ msgspec
+ mistral_common[image] >= 1.11.6
+-opencv-python-headless >= 4.13.0    # required for video IO
++opencv-python-headless >= 4.11.0,<4.13.0    # 4.13 requires NumPy 2; Vime pins NumPy 1.26.4
+ pyyaml
+ six>=1.16.0; python_version > '3.11' # transitive dependency of pandas that needs to be the latest version for python 3.12
+ setuptools>=77.0.3,<81.0.0; python_version > '3.11' # Setuptools is used by triton, we need to ensure a modern version is installed for 3.12+ so that it does not try to import distutils, which was removed in 3.12
+diff --git a/tests/model_executor/model_loader/test_reload.py b/tests/model_executor/model_loader/test_reload.py
+index b4a544d2fc..5164cf1381 100644
+--- a/tests/model_executor/model_loader/test_reload.py
++++ b/tests/model_executor/model_loader/test_reload.py
+@@ -20,6 +20,8 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+ from vllm.model_executor.layers.linear import QKVParallelLinear
+ from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+ from vllm.model_executor.model_loader.reload.layerwise import (
++    _normalize_loaded_weight_dtype,
++    _validate_kernel_tensor_compatibility,
+     finalize_layerwise_reload,
+     initialize_layerwise_reload,
+     initialize_online_processing,
+@@ -107,6 +109,46 @@ class _NonPersistentBufferLayer(torch.nn.Module):
+         super().__init__()
+         self.weight = torch.nn.Parameter(torch.ones(2, 2))
+         self.register_buffer("scale", torch.tensor(0.25), persistent=False)
++def test_reload_safely_converts_integral_float_to_integer():
++    source = torch.tensor([[0.0, 1.0], [7.0, 3.0]], dtype=torch.float32)
++    result = _normalize_loaded_weight_dtype(source, torch.int32, "router_map")
++
++    assert result.dtype == torch.int32
++    assert torch.equal(result, source.to(torch.int32))
++
++
++@pytest.mark.parametrize(
++    "source",
++    [
++        torch.tensor([0.5], dtype=torch.float32),
++        torch.tensor([torch.nan], dtype=torch.float32),
++        torch.tensor([torch.inf], dtype=torch.float32),
++        torch.tensor([256], dtype=torch.int16),
++    ],
++)
++def test_reload_rejects_unsafe_integer_conversion(source):
++    with pytest.raises(ValueError):
++        _normalize_loaded_weight_dtype(source, torch.uint8, "integer_weight")
++
++
++def test_reload_preserves_float_input_for_quantization_loader():
++    source = torch.ones(2, dtype=torch.float32)
++    result = _normalize_loaded_weight_dtype(source, torch.float8_e4m3fn, "weight")
++
++    assert result is source
++
++
++def test_kernel_restore_rejects_dtype_or_shape_changes():
++    kernel = torch.empty(2, dtype=torch.int32)
++
++    with pytest.raises(TypeError, match="processed dtype"):
++        _validate_kernel_tensor_compatibility(
++            torch.empty(2, dtype=torch.float32), kernel, "router_map"
++        )
++    with pytest.raises(ValueError, match="processed shape"):
++        _validate_kernel_tensor_compatibility(
++            torch.empty(3, dtype=torch.int32), kernel, "router_map"
++        )
+ 
+ 
+ class _ReloadableMMEncoderAttention(MMEncoderAttention):
+diff --git a/vllm/config/vllm.py b/vllm/config/vllm.py
+index 8e0846982b..5fad4a5a25 100644
+--- a/vllm/config/vllm.py
++++ b/vllm/config/vllm.py
+@@ -1294,18 +1294,20 @@ class VllmConfig:
+                     "parallelism (DCP > 1 or PCP > 1)."
+                 )
+ 
+-            # Incompatible with any KV connector — covers both PD disaggregation
+-            # (kv_producer/kv_consumer: routing captured on P can't reach D) and
+-            # single-instance KV offload/sharing (kv_both: slot_mapping semantics
+-            # change when KV blocks live outside local GPU memory, breaking the
+-            # slot-indexed routed_experts buffer).
++            # PD producer/consumer responses can return routing independently
++            # for the router to merge. KV sharing/offload still changes local
++            # slot ownership without preserving the corresponding routing.
+             if (
+-                self.kv_transfer_config is not None
+-                and self.kv_transfer_config.is_kv_transfer_instance
++                self.cache_config.kv_offloading_size is not None
++                or (
++                    self.kv_transfer_config is not None
++                    and self.kv_transfer_config.kv_connector is not None
++                    and self.kv_transfer_config.kv_role == "kv_both"
++                )
+             ):
+                 raise ValueError(
+-                    "--enable-return-routed-experts is incompatible with KV "
+-                    "connectors (PD disaggregation, KV cache offload)."
++                    "--enable-return-routed-experts is incompatible with "
++                    "kv_role='kv_both' KV sharing/offload."
+                 )
+ 
+         if (
+diff --git a/vllm/entrypoints/scale_out/token_in_token_out/serving.py b/vllm/entrypoints/scale_out/token_in_token_out/serving.py
+index a8a2804a06..49a97aa9a2 100644
+--- a/vllm/entrypoints/scale_out/token_in_token_out/serving.py
++++ b/vllm/entrypoints/scale_out/token_in_token_out/serving.py
+@@ -128,6 +128,10 @@ class ServingTokens(GenerateBaseServing):
+             raw_request.state.request_metadata = request_metadata
+ 
+         sampling_params = request.sampling_params
++        if request.kv_transfer_params is not None:
++            extra_args = dict(sampling_params.extra_args or {})
++            extra_args["kv_transfer_params"] = request.kv_transfer_params
++            sampling_params.extra_args = extra_args
+         max_num_seqs = self.engine_client.vllm_config.scheduler_config.max_num_seqs
+         if sampling_params.n > max_num_seqs:
+             return self.create_error_response(
+diff --git a/vllm/model_executor/layers/fused_moe/routed_experts_capturer.py b/vllm/model_executor/layers/fused_moe/routed_experts_capturer.py
+index edd3e3beaa..6f9f9f4736 100644
+--- a/vllm/model_executor/layers/fused_moe/routed_experts_capturer.py
++++ b/vllm/model_executor/layers/fused_moe/routed_experts_capturer.py
+@@ -387,11 +387,31 @@ class RoutedExpertsManager:
+         """
+         self.routed_experts_by_slot[slot_mapping] = data
+ 
++    def update_pending(
++        self,
++        request_id: str,
++        token_start: int,
++        data: np.ndarray,
++        block_ids: list[int] | None = None,
++    ) -> None:
++        """Record transient routing rows for the default batch semantics.
++
++        The base manager has no compressed-block tail; ``store_batch`` already
++        persisted all rows using the worker-provided slot mapping. Platforms
++        with a different physical layout may override this hook.
++        """
++        return None
++
++    def discard_pending(self, request_id: str) -> None:
++        """Discard platform-specific transient routing state."""
++        return None
++
+     def get(
+         self,
+         block_ids: list[int],
+         num_tokens: int,
+         token_start: int = 0,
++        request_id: str | None = None,
+     ) -> np.ndarray:
+         """Read routed experts data for a completed / preempted request.
+ 
+diff --git a/vllm/model_executor/model_loader/reload/layerwise.py b/vllm/model_executor/model_loader/reload/layerwise.py
+index 5a73738e15..ca1d1453ab 100644
+--- a/vllm/model_executor/model_loader/reload/layerwise.py
++++ b/vllm/model_executor/model_loader/reload/layerwise.py
+@@ -183,6 +183,15 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
+         bound_args = loader_signature.bind(*args, **kwargs)
+         bound_args.apply_defaults()
+ 
++        loaded_weight = bound_args.arguments.get("loaded_weight")
++        if isinstance(loaded_weight, torch.Tensor):
++            expected_param = getattr(layer, param_name)
++            bound_args.arguments["loaded_weight"] = _normalize_loaded_weight_dtype(
++                loaded_weight,
++                expected_param.dtype,
++                f"{layer.__class__.__name__}.{param_name}",
++            )
++
+         # Buffer loaded weights, track loading progress
+         info.loaded_weights.append((param_name, bound_args))
+         num_loaded, ret = get_numel_loaded(original_loader, bound_args)
+@@ -225,6 +234,58 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
+     return online_process_loader
+ 
+ 
++def _normalize_loaded_weight_dtype(
++    loaded_weight: torch.Tensor,
++    expected_dtype: torch.dtype,
++    tensor_name: str,
++) -> torch.Tensor:
++    """Safely normalize checkpoint tensors whose target is non-floating point.
++
++    Floating-point targets are left to their original weight loaders because
++    quantization loaders may intentionally accept a different floating dtype.
++    Integer and bool targets must preserve their numeric values during reload;
++    silently reinterpreting floating-point storage as integers can otherwise
++    produce valid-looking tensors with corrupted values.
++    """
++    if loaded_weight.dtype == expected_dtype or expected_dtype.is_floating_point:
++        return loaded_weight
++
++    if loaded_weight.is_complex():
++        raise TypeError(
++            f"Cannot reload {tensor_name}: complex source dtype "
++            f"{loaded_weight.dtype} is incompatible with {expected_dtype}"
++        )
++
++    if loaded_weight.is_floating_point():
++        if not bool(torch.isfinite(loaded_weight).all().item()):
++            raise ValueError(
++                f"Cannot reload {tensor_name}: non-finite values cannot be "
++                f"converted from {loaded_weight.dtype} to {expected_dtype}"
++            )
++        if not bool((loaded_weight == torch.trunc(loaded_weight)).all().item()):
++            raise ValueError(
++                f"Cannot reload {tensor_name}: non-integral values cannot be "
++                f"converted from {loaded_weight.dtype} to {expected_dtype}"
++            )
++
++    if loaded_weight.numel() > 0:
++        min_value = loaded_weight.min().item()
++        max_value = loaded_weight.max().item()
++        if expected_dtype == torch.bool:
++            lower, upper = 0, 1
++        else:
++            dtype_info = torch.iinfo(expected_dtype)
++            lower, upper = dtype_info.min, dtype_info.max
++        if min_value < lower or max_value > upper:
++            raise ValueError(
++                f"Cannot reload {tensor_name}: value range [{min_value}, "
++                f"{max_value}] does not fit {expected_dtype} range "
++                f"[{lower}, {upper}]"
++            )
++
++    return loaded_weight.to(dtype=expected_dtype)
++
++
+ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelConfig):
+     """
+     Apply processing to any layers which were not layerwise processed during loading.
+diff --git a/vllm/platforms/interface.py b/vllm/platforms/interface.py
+index bd5d981912..0da13aeb02 100644
+--- a/vllm/platforms/interface.py
++++ b/vllm/platforms/interface.py
+@@ -236,6 +236,12 @@ class Platform:
+ 
+         return cumem_available
+ 
++    @classmethod
++    def get_routed_experts_manager_cls(cls):
++        """Return the scheduler-side routed-experts manager for this platform."""
++        from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsManager
++        return RoutedExpertsManager
++
+     @classmethod
+     def get_pass_manager_cls(cls) -> str:
+         """
+diff --git a/vllm/v1/core/sched/output.py b/vllm/v1/core/sched/output.py
+index 3a46fa40a7..8fd3dffe36 100644
+--- a/vllm/v1/core/sched/output.py
++++ b/vllm/v1/core/sched/output.py
+@@ -303,6 +303,19 @@ class SchedulerOutput:
+     # Dynamic speculative decoding: optimal K chosen by scheduler.
+     # Number of spec tokens to schedule for the next step.
+     num_spec_tokens_to_schedule: int = 0
++    # req_id -> first token position scheduled for the request in this step
++    # (recorded before num_computed_tokens is advanced). Ground truth for the
++    # exact token range this step's forward processed; consumed by
++    # update_from_output for routed-experts bookkeeping, where deriving the
++    # range from num_computed_tokens is unreliable under async scheduling
++    # (the next step's placeholder advance is already counted there).
++    scheduled_token_start: dict[str, int] | None = None
++
++    # req_id -> KV block IDs owned by this exact scheduled forward. This
++    # must travel with SchedulerOutput because async scheduling can enqueue
++    # another forward for the same request before the previous output is
++    # consumed.
++    routed_experts_block_ids: dict[str, list[int]] | None = None
+ 
+     @classmethod
+     def make_empty(cls) -> "SchedulerOutput":
+diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
+index daf2b316d0..a06bddff20 100644
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -72,6 +72,7 @@ from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
+ from vllm.v1.spec_decode.metrics import SpecDecodingStats
+ from vllm.v1.structured_output import StructuredOutputManager
+ from vllm.v1.utils import record_function_or_nullcontext
++from vllm.platforms import current_platform
+ 
+ logger = init_logger(__name__)
+ 
+@@ -395,15 +396,11 @@ class Scheduler(SchedulerInterface):
+                 "(dcp_world_size > 1 or pcp_world_size > 1)"
+             )
+ 
+-            self.routed_experts_mgr = RoutedExpertsManager(
++            mgr_cls = current_platform.get_routed_experts_manager_cls()
++            self.routed_experts_mgr = mgr_cls(
+                 vllm_config=vllm_config,
+                 kv_cache_config=kv_cache_config,
+             )
+-            # Block-ID snapshot taken at schedule time (before forward),
+-            # so update_from_output can read slot data even if a later
+-            # schedule() frees the blocks (async scheduling race).
+-            self._re_block_ids: dict[str, list[int]] = {}
+-
+         self._pause_state: PauseState = PauseState.UNPAUSED
+ 
+         # In-flight requests still prefilling (prefill chunks + in-progress
+@@ -1530,6 +1527,13 @@ class Scheduler(SchedulerInterface):
+         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+         for req_id, num_scheduled_token in num_scheduled_tokens.items():
+             request = self.requests[req_id]
++            # Record the first scheduled token position BEFORE advancing
++            # num_computed_tokens. Under async scheduling, update_from_output
++            # runs after the NEXT step has already advanced the counter, so
++            # this is the only reliable record of this step's token range.
++            if scheduler_output.scheduled_token_start is None:
++                scheduler_output.scheduled_token_start = {}
++            scheduler_output.scheduled_token_start[req_id] = request.num_computed_tokens
+             request.num_computed_tokens += num_scheduled_token
+             request.num_in_flight_tokens += num_scheduled_token
+             if self.defer_block_free:
+@@ -1545,21 +1549,16 @@ class Scheduler(SchedulerInterface):
+             if not request.is_prefill_chunk:
+                 self._inflight_prefills.discard(request)
+ 
+-        # Snapshot block IDs for routed experts before forward starts.
+-        # A concurrent schedule() may preempt requests and free blocks
+-        # before update_from_output runs; the snapshot survives that.
+-        # Use update() to preserve entries from the previous step that
+-        # have not yet been consumed by update_from_output (async
+-        # scheduling may call _update_after_schedule again before the
+-        # prior update_from_output runs).
++        # Snapshot block IDs for this exact scheduled forward. The snapshot
++        # must be stored on SchedulerOutput, not in one mutable req_id map:
++        # async scheduling may enqueue another forward for the same request
++        # before this forward's output is consumed.
+         if self.enable_return_routed_experts:
+             gid = self.routed_experts_mgr.attn_gid
+-            self._re_block_ids.update(
+-                {
+-                    rid: self.kv_cache_manager.get_blocks(rid).get_block_ids()[gid]
+-                    for rid in num_scheduled_tokens
+-                }
+-            )
++            scheduler_output.routed_experts_block_ids = {
++                rid: self.kv_cache_manager.get_blocks(rid).get_block_ids()[gid].copy()
++                for rid in num_scheduled_tokens
++            }
+ 
+         # Clear the finished and preempted request IDs.
+         # NOTE: We shouldn't just clear() here because it will also affect
+@@ -1567,6 +1566,39 @@ class Scheduler(SchedulerInterface):
+         self.finished_req_ids = set()
+         self.reset_preempted_req_ids = set()
+ 
++    def _get_routed_experts_prompt_start(
++        self, request: Request, scheduler_output: SchedulerOutput
++    ) -> int:
++        """Return the routing row where this request's output starts."""
++        sampling_params = request.sampling_params
++        assert sampling_params is not None
++        prompt_start = sampling_params.routed_experts_prompt_start
++        prompt_limit = request.num_prompt_tokens
++
++        kv_transfer_config = self.vllm_config.kv_transfer_config
++        kv_role = kv_transfer_config.kv_role if kv_transfer_config else None
++        p_side_truncated = kv_role == "kv_producer" and (
++            request.kv_transfer_params or {}
++        ).get("_p_side_truncated", False)
++
++        if p_side_truncated:
++            # Validate against the original prompt length; P stores N - 1 rows.
++            prompt_limit += 1
++        assert 0 <= prompt_start <= prompt_limit
++
++        if kv_role == "kv_consumer":
++            # Transferred KV has no routing rows. Start at the later of the
++            # user's offset and this D forward's first computed token.
++            assert scheduler_output.scheduled_token_start is not None
++            scheduled_start = scheduler_output.scheduled_token_start[request.request_id]
++            prompt_start = max(prompt_start, scheduled_start)
++        elif p_side_truncated:
++            # The original prompt end has no routing row on P.
++            prompt_start = min(prompt_start, request.num_prompt_tokens)
++
++        assert 0 <= prompt_start <= request.num_prompt_tokens
++        return prompt_start
++
+     def _update_request_as_session(
+         self, session: Request, update: StreamingUpdate
+     ) -> None:
+@@ -1915,11 +1947,9 @@ class Scheduler(SchedulerInterface):
+                 )
+             )
+ 
+-        # Persist per-step routed experts into the scheduler-side slot
+-        # buffer (CPU->CPU fancy-index assign; ~few MB per step).
+-        # MUST precede the per-request routing reads below: stopped
+-        # requests may terminate on tokens generated in this very step,
+-        # whose routing was just D2H'd into model_runner_output.
++        # Routing rows are persisted below per request. The request-relative
++        # range is required to separate complete compressed KV blocks from
++        # their transient tail.
+         routing_data = None
+         routing_offsets: dict[str, int] = {}
+         if model_runner_output.routed_experts is not None:
+@@ -1968,7 +1998,6 @@ class Scheduler(SchedulerInterface):
+             # Drop-mode stale output (same-step resume) is discarded entirely.
+             if output_is_stale and request.drop_stale_output:
+                 continue
+-
+             req_index = model_runner_output.req_id_to_index[req_id]
+             generated_token_ids = (
+                 sampled_token_ids[req_index] if sampled_token_ids else []
+@@ -1977,6 +2006,7 @@ class Scheduler(SchedulerInterface):
+             scheduled_spec_token_ids = (
+                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
+             )
++            num_rejected = 0
+             if scheduled_spec_token_ids and (
+                 generated_token_ids or self.num_sampled_tokens_per_step == 0
+             ):
+@@ -2015,6 +2045,24 @@ class Scheduler(SchedulerInterface):
+                         detailed=self.spec_decode_metrics_level == "detailed",
+                     )
+ 
++            # Persist only routing rows that belong to the committed token
++            # sequence. Rejected MTP draft rows must not be replayed later.
++            if routing_data is not None:
++                req_offset = routing_offsets[req_id]
++                block_ids = (scheduler_output.routed_experts_block_ids or {}).get(
++                    req_id, []
++                )
++                token_start = (scheduler_output.scheduled_token_start or {}).get(
++                    req_id, request.num_computed_tokens - num_tokens_scheduled
++                )
++                num_valid_tokens = num_tokens_scheduled - num_rejected
++                self.routed_experts_mgr.update_pending(
++                    req_id,
++                    token_start,
++                    routing_data[req_offset : req_offset + num_valid_tokens],
++                    block_ids=block_ids,
++                )
++
+             # Free encoder inputs only after the step has actually executed.
+             if request.has_encoder_inputs:
+                 self._free_encoder_inputs(request)
+@@ -2072,26 +2120,19 @@ class Scheduler(SchedulerInterface):
+             ):
+                 req_offset = routing_offsets[req_id]
+                 end = req_offset + num_tokens_scheduled
+-                block_ids = self._re_block_ids.pop(req_id, [])
++                block_ids = (scheduler_output.routed_experts_block_ids or {}).get(
++                    req_id, []
++                )
+                 if num_output_tokens_before == 0:
+                     # Prefill completed: read full prompt routing from
+                     # slot buffer using the block-ID snapshot taken at
+                     # schedule time (immune to async preemption).
+-                    if (
+-                        request.sampling_params is not None
+-                        and request.sampling_params.routed_experts_prompt_start
+-                        is not None
+-                    ):
+-                        prompt_start = (
+-                            request.sampling_params.routed_experts_prompt_start
+-                        )
+-                        assert prompt_start <= request.num_prompt_tokens
+-                    else:
+-                        prompt_start = 0
++                    prompt_start = self._get_routed_experts_prompt_start(
++                        request, scheduler_output
++                    )
+                     routed_experts = self.routed_experts_mgr.get(
+-                        block_ids,
+-                        request.num_prompt_tokens,
+-                        token_start=prompt_start,
++                        block_ids, request.num_prompt_tokens, token_start=prompt_start,
++                        request_id=req_id,
+                     )
+                 else:
+                     if scheduled_spec_token_ids:
+@@ -2577,6 +2618,8 @@ class Scheduler(SchedulerInterface):
+ 
+         self.encoder_cache_manager.free(request)
+         request_id = request.request_id
++        if self.enable_return_routed_experts and hasattr(self.routed_experts_mgr, 'discard_pending'):
++            self.routed_experts_mgr.discard_pending(request_id)
+         self.finished_req_ids.add(request_id)
+         if self.finished_req_ids_dict is not None:
+             self.finished_req_ids_dict[request.client_index].add(request_id)

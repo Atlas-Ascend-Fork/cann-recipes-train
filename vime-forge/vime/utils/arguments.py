@@ -221,16 +221,6 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
-                "--custom-update-weight-pre-read-path",
-                type=str,
-                default=None,
-                help=(
-                    "Path to a custom function called on each rollout host before it reads a "
-                    "published disk weight version. Signature: "
-                    "``def hook(source_dir: str, target_version: int) -> None``."
-                ),
-            )
-            parser.add_argument(
                 "--update-weight-local-checkpoint-dir",
                 type=str,
                 default=None,
@@ -242,7 +232,7 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                     "--update-weight-transport=disk; optional for full disk sync (engines then "
                     "pull to local disk instead of reading the shared dir directly). The "
                     "read-side counterpart of --custom-update-weight-post-write-path is "
-                    "--custom-update-weight-pre-read-path."
+                    "--vllm-custom-pull-weights-pre-read-hook."
                 ),
             )
             parser.add_argument(
@@ -501,7 +491,9 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help=(
                     "Only substitue the `def generate(args, sample, sampling_params)` function within the example rollout function. "
-                    "This should be useful if you need to implement some special rollout logic, e.g. multi-turn, function calling."
+                    "This should be useful if you need to implement some special rollout logic, e.g. multi-turn, function calling. "
+                    "Set `abort_mode = 'request'` on the function when cancelling its task aborts only that request; "
+                    "otherwise Vime aborts all in-flight requests on the server."
                 ),
             )
             parser.add_argument(
@@ -2153,8 +2145,8 @@ def vime_validate_args(args):
         "debug_rollout_only and debug_train_only cannot be set at the same time, " "please set only one of them."
     )
 
-    # Colocate normally offloads Megatron between rollout and train. Release-train
-    # destroys Megatron actors instead, so only rollout needs memory-saver offload.
+    # Colocate normally offloads Megatron between rollout and train.  Release-train mode
+    # releases Megatron actors instead, so only rollout needs memory-saver offload.
     if args.colocate:
         if args.release_train:
             if args.offload_train:

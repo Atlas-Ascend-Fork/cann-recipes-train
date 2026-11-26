@@ -12,6 +12,7 @@ from urllib.parse import quote
 
 import cloudpickle
 import requests
+from urllib3.exceptions import NewConnectionError
 from vllm.utils.system_utils import kill_process_tree
 
 from vime.backends.vllm_utils.external import get_server_info
@@ -81,6 +82,24 @@ def _vllm_supports_v2_model_runner() -> bool:
     return release > (0, 23)
 
 
+def _vllm_supports_enable_scale_out() -> bool:
+    """Whether vLLM gates the scale-out endpoints behind ``--enable-scale-out``.
+
+    The rollout token-in-token-out protocol POSTs ``/inference/v1/generate``.
+    Newer vLLM only registers that route when ``enable_scale_out`` is set,
+    while older builds register it unconditionally and would reject the
+    unknown server argument, so probe the arg instead of passing it blindly.
+    """
+    try:
+        from vllm.entrypoints.launchers.cli_args import BaseFrontendArgs
+    except Exception:
+        return False
+    fields = getattr(BaseFrontendArgs, "model_fields", None)
+    if fields is not None:
+        return "enable_scale_out" in fields
+    return "enable_scale_out" in getattr(BaseFrontendArgs, "__annotations__", {})
+
+
 def _build_subprocess_env(server_args_dict: dict[str, Any]) -> dict[str, str]:
     args = server_args_dict["_args"]
     env = os.environ.copy()
@@ -104,7 +123,10 @@ def _build_subprocess_env(server_args_dict: dict[str, Any]) -> dict[str, str]:
     # aclgraph decode deterministically (garbage responses from the first
     # rollout on), while prefill stays correct. "0" also suppresses vllm's own
     # model-based V2 auto-selection, which hits the same broken fallback.
-    env["VLLM_USE_V2_MODEL_RUNNER"] = "1" if _vllm_supports_v2_model_runner() else "0"
+    env.setdefault(
+        "VLLM_USE_V2_MODEL_RUNNER",
+        "1" if _vllm_supports_v2_model_runner() else "0",
+    )
     if getattr(args, "vllm_enable_deterministic_inference", False):
         if accelerator.is_available() and accelerator.device_type() == "npu":
             env["VLLM_ASCEND_BATCH_INVARIANT"] = "1"
@@ -186,6 +208,7 @@ def _interpreter_from_vllm_shebang() -> str | None:
 
 
 def _run_vllm_server(kwargs: dict, env: dict) -> None:
+    logging.basicConfig(level=logging.INFO)
     python = _rollout_interpreter()
     if python is not None:
         # Hand (kwargs, env) to the rollout interpreter and replace this
@@ -197,6 +220,7 @@ def _run_vllm_server(kwargs: dict, env: dict) -> None:
         fd, path = tempfile.mkstemp(prefix="vllm_server_", suffix=".pkl")
         with os.fdopen(fd, "wb") as f:
             pickle.dump((kwargs, env), f)
+        logger.info(f"launching vLLM server with {python} (kwargs pickled to {path})")
         os.execve(
             python,
             [python, "-m", "vime.backends.vllm_utils.vllm_server_entry", path],
@@ -403,10 +427,24 @@ class VLLMEngine(RayActor):
     def flush_cache(self):
         if self.node_rank != 0:
             return
-        params = {"reset_running_requests": False}
-        requests.post(
-            f"http://{self.server_host}:{self.server_port}/reset_prefix_cache", params=params
-        ).raise_for_status()
+        params = {"reset_running_requests": True}
+        for _ in range(60):
+            try:
+                response = requests.post(
+                    f"http://{self.server_host}:{self.server_port}/reset_prefix_cache", params=params
+                )
+                if response.status_code == 200 and response.json()["success"]:
+                    break
+                logger.info(f"Error flushing cache: HTTP {response.status_code} {response.text!r}")
+                time.sleep(1)
+            except NewConnectionError as e:
+                raise e
+            except Exception as e:
+                logger.info(f"Error flushing cache: {e}")
+                time.sleep(1)
+                continue
+        else:
+            raise TimeoutError("Timeout while flushing cache.")
 
     def get_url(self):
         if self.node_rank != 0:
@@ -481,11 +519,9 @@ class VLLMEngine(RayActor):
     def init_weight_transfer_engine(self, payload: dict) -> dict:
         return self._make_request("init_weight_transfer_engine", payload)
 
-    def start_weight_update(self, is_checkpoint_format: bool = True) -> dict:
-        return self._make_request(
-            "start_weight_update",
-            {"is_checkpoint_format": is_checkpoint_format},
-        )
+    def start_weight_update(self) -> dict:
+        # vLLM 0.30 has no format argument; NPU IPC receives weights in place.
+        return self._make_request("start_weight_update", {})
 
     def start_draft_weight_update(self) -> dict:
         return self._make_request("start_draft_weight_update", {})
@@ -508,14 +544,11 @@ class VLLMEngine(RayActor):
                     "local_checkpoint_dir": self.args.update_weight_local_checkpoint_dir,
                     "source_dir": self.args.update_weight_disk_dir,
                     "target_version": target_version,
-                    "pre_read_hook": self.args.custom_update_weight_pre_read_path,
                 },
             },
         )
         response.raise_for_status()
-        result = response.json()
-        self.set_weight_version(str(target_version))
-        return result
+        return response.json()
 
     def update_weights_from_disk(
         self,
@@ -757,8 +790,14 @@ def _compute_server_args(
         "tensor_parallel_size": tp,
         "logprobs_mode": "processed_logprobs",
         "enable_prompt_tokens_details": True,
+        "enable_per_request_metrics": True,
         "enable_server_load_tracking": True,
     }
+
+    if _vllm_supports_enable_scale_out():
+        # vLLM >= the scale-out gate only registers /inference/v1/generate
+        # (used by the rollout protocol) when this is set.
+        kwargs["enable_scale_out"] = True
 
     if pp > 1:
         kwargs["pipeline_parallel_size"] = pp
@@ -812,7 +851,11 @@ def _compute_server_args(
         kwargs["max_model_len"] = args.rollout_max_context_len
 
     if args.colocate:
-        kwargs["weight_transfer_config"] = {"backend": "ipc"}
+        # vLLM's "ipc" backend is the CUDA IPCWeightTransferEngine, which cannot
+        # run on NPU. Use vllm-ascend's NPU IPC engine ("npu_ipc") so the rollout
+        # workers match the trainer-side NPUIPCTrainerWeightTransferEngine.
+        ipc_backend = "npu_ipc" if accelerator.is_available() and accelerator.device_type() == "npu" else "ipc"
+        kwargs["weight_transfer_config"] = {"backend": ipc_backend}
         # The colocate worker extension must go through the server kwargs (the
         # old CLI --worker-extension-cls path). It is NOT a vllm entry-point
         # plugin, so putting its module path in VLLM_PLUGINS both fails to
@@ -824,7 +867,13 @@ def _compute_server_args(
             "vime.backends.vllm_utils.colocate_worker.vLLMColocateWorkerExtension",
         )
     else:
-        kwargs["weight_transfer_config"] = {"backend": "nccl"}
+        # NPU has no NCCL. The trainer side forces HCCLWeightTransferEngine on
+        # NPU (see update_weight_from_distributed._connect), so the rollout
+        # engines must be configured with the matching "hccl" backend, otherwise
+        # they instantiate vLLM's NCCL engine and never join the trainer's HCCL
+        # group (hcclCommInitRank then times out with "HCCL error: internal error").
+        backend = "hccl" if accelerator.is_available() and accelerator.device_type() == "npu" else "nccl"
+        kwargs["weight_transfer_config"] = {"backend": backend}
 
     if worker_type == "encoder":
         # vLLM EPD producers have no language-model KV cache groups. Prefix
@@ -902,5 +951,6 @@ _EXTERNAL_ENGINE_SKIP_CHECK_FIELDS = [
     "tensor_parallel_size",
     "logprobs_mode",
     "enable_prompt_tokens_details",
+    "enable_per_request_metrics",
     "enable_server_load_tracking",
 ]

@@ -37,11 +37,11 @@ npu-smi info   # 检查设备、驱动及固件状态
 
 ### 2.1 获取镜像
 
-使用预置 ARM 镜像，镜像中已包含本实践所需的 PyTorch、torch_npu、torchtitan、torchtitan-npu、vllm、vllm-ascend及所有python依赖 和 CANN 运行环境。从[950DT ARM 镜像地址](https://cann-ai.obs.cn-north-4.myhuaweicloud.com/cann-quantization/DeepSeek/ascend_rl_cann9.3.0_dsv4_aarch_950_image_v0.4.tar)
+使用预置 ARM 镜像，镜像中已包含本实践所需的 PyTorch、torch_npu、torchtitan、torchtitan-npu、vllm、vllm-ascend及所有python依赖 和 CANN 运行环境。从[950DT ARM 镜像地址](https://cann-ai.obs.cn-north-4.myhuaweicloud.com/cann-quantization/DeepSeek/ascend_rl_cann9.3.0_dsv4_aarch_950_image_v0.5.tar)
 下载 docker 镜像，上传到 950 服务器的每个节点，并在每个节点执行：
 
 ```bash
-docker load -i ascend_rl_cann9.3.0_dsv4_aarch_950_image_v0.4.tar
+docker load -i ascend_rl_cann9.3.0_dsv4_aarch_950_image_v0.5.tar
 ```
 
 ### 2.2 启动容器
@@ -104,8 +104,8 @@ cd ${HOME_PATH}/cann-recipes-train/vime-forge
 | 环境 | 运行时路径 | 组件与版本要求 |
 |---|---|---|
 | 训练环境 | `/app/uv-train` | Python、PyTorch、torch_npu、TorchTitan、TorchTitan-NPU、TorchAO-NPU、Ray、Vime；具体版本以镜像提供的版本清单为准 |
-| 推理环境 | `/app/uv-vllm` | Python、vLLM、vLLM-Ascend 及推理侧 PyTorch/torch_npu；当前运行时通过 `VLLM_VERSION` 默认使用 `0.23.0` |
-| CANN | `/usr/local/Ascend/cann` | 训练和推理共同使用，路径需与两个启动脚本中的 `VIME_CANN_HOME` 一致 |
+| 推理环境 | `/app/uv-vllm` | Python、vLLM、vLLM-Ascend 及推理侧 PyTorch/torch_npu；当前运行时通过 `VLLM_VERSION` 默认使用 `0.30.0` |
+| CANN | `/usr/local/Ascend/cann` | 训练和推理共同使用，路径需与 `local.sh` 中的 `VIME_CANN_HOME` 一致 |
 | NNAL / ATB | `/usr/local/Ascend/nnal/atb` | 推理和通信相关运行库，路径需与 `VIME_NNAL_HOME` 一致 |
 
 训练和推理环境中的 PyTorch、torch_npu、vLLM-Ascend 与 CANN 必须相互兼容，不能分别安装未经验证的版本。镜像提供者应补充实际版本号；在版本确定前，README 不假定具体的 PyTorch、torch_npu、TorchTitan 或 vLLM-Ascend 小版本。
@@ -203,7 +203,6 @@ python vime-forge/tools/build_math500_eval_data.py \
 
 本流程保持训练与 rollout 分开分配资源，使用 `COLOCATE=off`。该变量控制训练与推理是否共卡；PD 开关由 `VLLM_CONFIG` 及其 YAML 内容决定。
 
-多机入口为 [run-dsv4-node-list.sh](../../vime-forge/scripts/torchtitan/run-dsv4-node-list.sh)。每台机器都运行该入口，`NODE_IP_LIST` 的第一个 IP 对应节点启动 Ray head 并提交训练，其余节点加入 Ray。脚本不会通过 SSH 自动启动其他机器。
 
 ### 4.2 节点、镜像与存储准备
 
@@ -223,41 +222,72 @@ Ray、Gloo、HCCL 和推理通信所用网络必须互通。在各容器启动 R
 
 **节点角色由实际 IP 排序和资源分配共同决定。** 当前 placement group 按 IPv4 数值和设备 ID 排序，先分配训练所需资源，再分配 rollout 资源。PD 分离时按 YAML 的 server group 顺序分配推理资源。仅调整 `NODE_IP_LIST` 的列表顺序不能任意绑定训练/P/D 角色，应检查实际 placement 日志。
 
-### 4.3 修改启动脚本
+### 4.3 修改 local.sh 和启动参数
 
-部署时直接编辑以下脚本，并将修改同步到全部节点：
+单机、多机统一使用 `scripts/torchtitan/run-dsv4.sh`。机器路径、资源及实验覆盖项集中配置在 `scripts/torchtitan/common/local.sh`。该文件不提交到仓库，需要在各节点分别准备，写法参照`local.sh.example`；首次使用时执行：
 
-- `scripts/torchtitan/run-dsv4-node-list.sh`：节点列表、训练与 rollout 资源、rollout/vLLM 配置、TorchTitan 配方、模型与数据路径、运行环境和输出目录。
-- `scripts/torchtitan/run-dsv4.sh`：GRPO、采样、学习率调度及其他显式启动参数。
-- `vime/backends/torchtitan_utils/models/deepseek_v4/config_registry.py`：优化器配置工厂调用、默认学习率、训练精度和梯度裁剪等 Python 配方参数，详见第 5 节。
+```bash
+cd "${HOME_PATH}/cann-recipes-train/vime-forge"
+cp scripts/torchtitan/common/local.sh.example scripts/torchtitan/common/local.sh
+```
 
-资源相关参数按实际部署填写：
+按实际安装路径、模型及数据目录修改，例如：
+
+```bash
+# scripts/torchtitan/common/local.sh
+export VIME_CANN_HOME=/usr/local/Ascend/cann
+export VIME_NNAL_HOME=/usr/local/Ascend/nnal/atb
+export VIME_TRAIN_ENV=/app/uv-train
+export VIME_VLLM_ENV=/app/uv-vllm
+export VIME_WORKSPACE="${HOME_PATH}/dsv4-rl"
+export VIME_MODEL_ROOT=/models
+export VIME_DATA_ROOT="${VIME_WORKSPACE}/data"
+export VIME_CKPT_ROOT="${VIME_WORKSPACE}/ckpt"
+export VIME_TB_ROOT="${VIME_WORKSPACE}/tb"
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export RUN_NAME=dsv4-flash
+export MODE=sync
+export COLOCATE=off
+export SAVE_ON=off
+export DSV4_RECIPE=vime_dsv4_flash_43layers_256experts
+export NODE_IP_LIST="10.0.0.1 10.0.0.2 10.0.0.3 10.0.0.4 10.0.0.5"
+export NPUS_PER_NODE=8
+export ROLLOUT_NODE_NUM=1
+export EP_DEGREE=32
+export GLOO_SOCKET_IFNAME=enp34s0f1  # 替换为本机实际通信网卡
+export VLLM_CONFIG=""              # PD 分离配置见第 4.5 节
+```
+
+上例默认模型路径为 `${VIME_MODEL_ROOT}/DeepSeek-V4-Flash-MXFP8/`。目录名不同时，在 `local.sh` 中覆盖脚本显式传入的路径：
+
+```bash
+OVERRIDE_ARGS+=(
+    --hf-checkpoint /models/your-converted-model
+    --ref-load /models/your-converted-model
+)
+```
+
+启动器先读取 `local.sh`，再由 `common/default.sh` 补齐未设置项。`OVERRIDE_ARGS` 追加在模型脚本参数之后；命令行 `--` 后的参数最后追加。也可用 `--local local.<experiment>.sh` 选择其他本地配置文件。
+
+上例按 5 个节点、每节点 8 卡配置，其中训练 4 个节点（32 卡）、推理 1 个节点（8 卡）。将示例 IP 替换为实际地址，资源参数统一写在 `local.sh` 中。各节点使用相同的任务配置；`LOCAL_NODE_IP` 和网卡名按本机实际情况填写。
 
 | 参数 | 配置说明 |
 |---|---|
-| `NODE_IP_LIST` | 本次任务全部节点的 IP，以空格分隔；第一个为 Ray head |
-| `NPUS_PER_NODE` | 每个节点实际提供的 NPU 数；当前入口按各节点同卡数计算 |
-| `ROLLOUT_NODE_NUM` | 用户分配给推理的节点数量，不由 PD 模式固定；其余节点用于训练 |
-| `EP_DEGREE` | 按训练资源和模型专家数选择兼容的 expert parallel degree |
-| `VLLM_RANKS_PER_ENGINE` | 按所选模式及每个 engine 的并行布局设置，见下节 |
+| `NODE_IP_LIST` | 全部节点 IP，以空格分隔；第一个为 Ray head；单机时不设置 |
+| `NPUS_PER_NODE` | 每节点提供的 NPU 数；当前入口按各节点同卡数计算 |
+| `ROLLOUT_NODE_NUM` | 推理节点数量；其余节点用于训练，训推分离时需为两侧都保留资源 |
+| `ACTOR_GPUS` | 每个训练节点使用的卡数，多机默认取 `NPUS_PER_NODE`，不是训练总卡数 |
+| `ROLLOUT_GPUS` | 推理总卡数，多机默认取 `ROLLOUT_NODE_NUM × NPUS_PER_NODE` |
+| `EP_DEGREE` | 与训练总卡数、专家数及其他并行维度兼容的 expert parallel degree |
+| `VLLM_RANKS_PER_ENGINE` | PD 混部时每个 engine 的卡数，默认取 `ROLLOUT_GPUS` |
 
-当前 node-list 入口根据 `(节点总数 - ROLLOUT_NODE_NUM) × NPUS_PER_NODE` 计算 `ACTOR_GPUS`，根据 `ROLLOUT_NODE_NUM × NPUS_PER_NODE` 计算 `ROLLOUT_GPUS`。节点列表须满足脚本校验，并为训练与 rollout 都保留资源。完整模型的实际显存和并行约束仍需满足。
+公共 launcher 根据节点总数减去 `ROLLOUT_NODE_NUM` 得到 `ACTOR_NODE_NUM`；训练总卡数为 `ACTOR_NODE_NUM × ACTOR_GPUS`。例如 5 个节点、每节点 8 卡、1 个推理节点，对应训练 32 卡、推理 8 卡。完整模型的显存和并行约束仍需按实际部署验证。
 
-路径与运行名称可在 node-list 脚本的对应位置修改，例如：
-
-```bash
-export DSV4_MODEL=/models/DeepSeek-V4-Flash-MXFP8
-export VIME_DATA_ROOT=${HOME_PATH}/dsv4-rl/data
-export VIME_WORKSPACE="${HOME_PATH}/dsv4-rl"
-export VIME_CKPT_ROOT="${VIME_WORKSPACE}/ckpt"
-export VIME_TB_ROOT="${VIME_WORKSPACE}/tb"
-export RUN_NAME=dsv4-flash
-export DSV4_RECIPE=vime_dsv4_flash_43layers_256experts
-```
+GRPO、采样等参数在 `run-dsv4.sh` 中声明，也可通过 `local.sh` 的 `OVERRIDE_ARGS` 覆盖；优化器、默认学习率、训练精度和梯度裁剪等配方参数位于 `vime/backends/torchtitan_utils/models/deepseek_v4/config_registry.py`，详见第 5 节。
 
 ### 4.4 关闭 PD 分离：PD 混部
 
-在 `run-dsv4-node-list.sh` 中将配置置空：
+在 `scripts/torchtitan/common/local.sh` 中将配置置空：
 
 ```bash
 export VLLM_CONFIG=""
@@ -269,7 +299,7 @@ export VLLM_CONFIG=""
 
 ### 4.5 开启 PD 分离
 
-在 `run-dsv4-node-list.sh` 中指定 PD YAML：
+在 `scripts/torchtitan/common/local.sh` 中指定 PD YAML：
 
 ```bash
 export VLLM_CONFIG="${HOME_PATH}/cann-recipes-train/vime-forge/scripts/configs/pd_dsv4_a5.yaml"
@@ -286,34 +316,32 @@ export VLLM_CONFIG="${HOME_PATH}/cann-recipes-train/vime-forge/scripts/configs/p
 | `kv_connector_extra_config` 中的 P/D `dp_size`、`tp_size` | 与实际 engine 并行布局一致；不能只改资源数而保留旧的 connector 配置 |
 | `update_weights` | 保持 `true`，让 P、D 都接收训练侧的权重更新 |
 
-当前入口在 `VLLM_CONFIG` 非空时，使用 `VLLM_RANKS_PER_ENGINE / 2` 生成全局 `--vllm-data-parallel-size`。因此应将 `VLLM_RANKS_PER_ENGINE` 设置为目标 DP 的两倍，同时满足入口的整除检查。这个变量在 PD 分支中的含义与混部分支不同；实际每个 P/D engine 的卡数以 YAML 为准。调整 DP 时必须同步修改 YAML 中的连接器并行信息，不能仅靠改变节点数完成切换。
+`VLLM_CONFIG` 非空时，当前 `run-dsv4.sh` 仅追加 `--vllm-config`，不再通过 `VLLM_RANKS_PER_ENGINE` 推导全局 DP。各组的 `num_gpus_per_engine`、`overrides.tensor_parallel_size` 和 `overrides.data_parallel_size` 应在 YAML 中设置，并与连接器并行配置一致。模板中 P、D 各 8 卡，合计 16 卡；第 4.3 节示例仅分配 8 张推理卡，不能直接使用该模板。保持 1 个推理节点时，需将 YAML 的 P、D 资源及其 TP/DP、连接器配置调整为总计 8 卡，并满足模型的显存要求。
 
 P/D 分离需要镜像内可用的 Mooncake/HIXL 通信栈，以及目标机器对应的 `/etc/hixlep`、URMA 设备和通信配置；挂载见第 2 节。资源文件须有效，P/D 之间的 KV 传输网络需可达。
 
 ### 4.6 量化参数配置
 
-量化参数需要与模型权重和推理侧配置保持一致。DSV4 当前不通过 `local.sh` 统一拉起；请在实际使用的 DSV4 启动配置中设置下面的变量，并将修改同步到所有相关节点。
+量化参数需要与模型权重和推理侧配置保持一致。在 `scripts/torchtitan/common/local.sh` 中设置下面的变量，由统一入口 `run-dsv4.sh` 读取，并将修改同步到所有相关节点。
 
-#### 场景 1：整网 MXFP8 + LI 非量化
+> DSV4 的 LI 统一采用 C4 量化，推理侧 KV cache 统一使用 FP8（`--vllm-kv-cache-dtype fp8`）；`ENABLE_MXFP4` 只控制 MoE 权重是否使用 MXFP4。下面两个场景的差异仅在 MoE 权重的量化格式。模型权重请使用第 3 节转换得到，并按第 4.3 节通过 `VIME_MODEL_ROOT` 或 `OVERRIDE_ARGS` 指向该目录。
 
-该场景使用整网 MXFP8 权重，MoE 不启用 MXFP4，LI 保持非量化。使用仓库当前的本地 DSV4 拉起脚本默认配置即可，训练侧量化参数对应：
+#### 场景 1：MoE MXFP8 + LI C4
+
+该场景的 MoE 权重使用 MXFP8；LI 使用 C4 量化。使用 DSV4 拉起脚本默认配置即可，训练侧量化参数对应：
 
 ```bash
 --extension.quantization.recipe all_block_fp8
 --extension.quantization.enable-quantized-training
 ```
 
-模型权重请使用第 3 节转换得到的整网 MXFP8 权重，并在 `run-dsv4-node-list.sh` 中将模型路径指向该目录。
+#### 场景 2：MoE MXFP4 + LI C4
 
-#### 场景 2：MXFP8 + MoE MXFP4 + LI A4C4
-
-该场景保留 MXFP8，同时对 MoE权重 启用 MXFP4，并使用 LI A4C4 配置。将以下变量加入当前实际负责量化配置的 DSV4 启动配置：
+该场景对 MoE 权重启用 MXFP4，在 `local.sh` 中设置：
 
 ```bash
-ENABLE_MXFP4=${ENABLE_MXFP4:-1}
+export ENABLE_MXFP4=1
 ```
-
-模型权重请使用第 3 节转换得到的Hybrid MXFP8-MXFP4权重，并在 `run-dsv4-node-list.sh` 中将模型路径指向该目录。
 
 ### 4.7 训练和推理侧 CP 配置
 
@@ -321,30 +349,29 @@ ENABLE_MXFP4=${ENABLE_MXFP4:-1}
 
 #### 训练侧 CP
 
-在 `scripts/torchtitan/run-dsv4.sh` 的训练参数配置中设置 CP 度数和 SPMD 后端，并将对应参数加入训练启动参数：
+在 `local.sh` 中设置训练侧 CP 度数，`run-dsv4.sh` 会生成对应的 `--parallelism.context_parallel_degree` 和 `--parallelism.spmd_backend` 参数：
 
 ```bash
-CP_DEGREE=${CP_DEGREE:-${ACTOR_GPUS}}
-SPMD_BACKEND=${SPMD_BACKEND:-spmd_types}
-
---parallelism.context_parallel_degree "${CP_DEGREE}"
---parallelism.spmd_backend "${SPMD_BACKEND}"
+export CP_DEGREE=2
+export SPMD_BACKEND=spmd_types
 ```
 
 `CP_DEGREE` 应能整除训练侧可用的并行资源；如果同时调整 EP、TP 或训练节点数，需要重新检查各并行维度的乘积和显存占用。
 
 #### 推理侧 CP
 
-在 `run-dsv4-node-list.sh` 或其传递给 vLLM 的参数配置中设置附加配置，并为 rollout engine 指定 TP 大小：
+在 `local.sh` 中为每个推理 engine 设置 TP/DP，例如：
 
 ```bash
-VLLM_ADDITIONAL_CONFIG=${VLLM_ADDITIONAL_CONFIG:-'{"enable_dsa_cp":true,"enable_flashcomm1":true}'}
-
---vllm-additional-config "$VLLM_ADDITIONAL_CONFIG"
---vllm-tensor-parallel-size "${ROLLOUT_GPUS}"
+export VLLM_RANKS_PER_ENGINE=8
+OVERRIDE_ARGS+=(
+    --vllm-additional-config '{"enable_dsa_cp":true,"enable_flashcomm1":true}'
+    --vllm-tensor-parallel-size 8
+    --vllm-data-parallel-size 1
+)
 ```
 
-上面的 JSON 同时开启 DSA CP 和 FlashComm1。`ROLLOUT_GPUS` 必须与实际 rollout 资源和 engine 划分匹配；使用 PD 分离时，还需分别检查 P/D 两侧的 TP、DP 及 YAML 中的并行配置。
+上例为每个 8 卡 engine 使用 TP=8、DP=1。PD 分离时，TP/DP 以各组 YAML 的 `overrides` 为准，并同步检查连接器的并行信息。
 
 ### 4.8 启动与运行检查
 
@@ -352,7 +379,7 @@ VLLM_ADDITIONAL_CONFIG=${VLLM_ADDITIONAL_CONFIG:-'{"enable_dsa_cp":true,"enable_
 
 ```bash
 cd "${HOME_PATH}/cann-recipes-train/vime-forge"
-bash scripts/torchtitan/run-dsv4-node-list.sh
+bash scripts/torchtitan/run-dsv4.sh
 ```
 
 先启动 head，再启动其余节点，或由调度器并行启动。Head 提交任务后等待资源就绪；worker 加入 Ray 后保持运行，需要终端或调度器持续托管。多网卡环境可在本节点启动前设置 `LOCAL_NODE_IP=<本节点在列表中的IP>`。
@@ -363,9 +390,9 @@ bash scripts/torchtitan/run-dsv4-node-list.sh
 
 ## 5. 关键训练参数
 
-默认执行同步 GRPO 训练，共 30 个 rollout；每次采样 32 个 prompt，每个生成 8 个回复，`global-batch-size=256`。vLLM 使用 `dummy` 加载，首次 rollout 前由训练侧推送真实权重。
+默认执行同步 GRPO 训练，共 200 个 rollout；每次采样 128 个 prompt，每个生成 8 个回复，`global-batch-size=1024`。vLLM 使用 `dummy` 加载，首次 rollout 前由训练侧推送真实权重。
 
-`--num-rollout` 是整个任务的目标 rollout 数，恢复训练时也按该总数计算。修改 GRPO、采样及脚本显式传入的参数时编辑 `scripts/torchtitan/run-dsv4.sh`；修改节点、资源或 PD 模式时编辑 `scripts/torchtitan/run-dsv4-node-list.sh`。精度、梯度裁剪和优化器配置由 [config_registry.py](../../vime-forge/vime/backends/torchtitan_utils/models/deepseek_v4/config_registry.py) 中的 `_vime_rl_config()` 提供。开始新实验时修改 node-list 脚本中的 `RUN_NAME` 或指定新的 `--save` 目录，避免从已有 checkpoint 自动续训。
+`--num-rollout` 是整个任务的目标 rollout 数，恢复训练时也按该总数计算。修改 GRPO、采样及脚本显式传入的参数时编辑 `scripts/torchtitan/run-dsv4.sh`；修改节点、资源或 PD 模式时编辑 `scripts/torchtitan/common/local.sh`。精度、梯度裁剪和优化器配置由 [config_registry.py](../../vime-forge/vime/backends/torchtitan_utils/models/deepseek_v4/config_registry.py) 中的 `_vime_rl_config()` 提供。开始新实验时修改 `local.sh` 中的 `RUN_NAME` 或指定新的 `--save` 目录，避免从已有 checkpoint 自动续训。
 
 下表列出当前 shell 启动脚本显式传入的参数。
 
@@ -378,16 +405,16 @@ bash scripts/torchtitan/run-dsv4-node-list.sh
 | `--lr_scheduler.decay_type` / `--lr_scheduler.min_lr_factor` / `--lr_scheduler.warmup_steps` | `linear` / `1.0` / `0`；分别表示线性调度、最低学习率相对初始学习率的比例和预热步数 |
 | `--rollout-temperature` | `1` |
 | `--vllm-gpu-memory-utilization` | `0.7` |
-| `--vllm-server-concurrency` | `64` |
-| `--vllm-kv-cache-dtype` | `bfloat16` |
+| `--vllm-server-concurrency` | `1024` |
+| `--vllm-kv-cache-dtype` | `fp8` |
 | `--vllm-compilation-config` | `{"cudagraph_mode":"FULL_DECODE_ONLY"}` |
 | `--use-dynamic-batch-size` / `--max-tokens-per-gpu` | 开启；token 上限默认等于 `SEQ_LEN` |
 | `--use-rollout-routing-replay` | 开启；支持 rollout 侧 PD 共卡和 PD 分离两种部署方式 |
 | `--fine-grained-memory-cleanup` | 开启，在训练阶段间释放缓存；可用 `--no-fine-grained-memory-cleanup` 关闭 |
 
-`SEQ_LEN` 同时用于训练序列长度、rollout 上下文上限和 vLLM `max-model-len`。修改长度时优先修改本地配置，并保证 `MAX_RESPONSE_LEN < SEQ_LEN`。改变 batch 时需保持采样量与训练 batch 配套，例如默认 `32 × 8 = 256`。
+`SEQ_LEN` 同时用于训练序列长度、rollout 上下文上限和 vLLM `max-model-len`。修改长度时优先修改本地配置，并保证 `MAX_RESPONSE_LEN < SEQ_LEN`。改变 batch 时需保持采样量与训练 batch 配套，例如当前脚本默认 `128 × 8 = 1024`。
 
-入口显式启用训练确定性、vLLM 确定性、rollout seed 和 RL batch invariance；`DET=on` 还会让两侧使用一致的 `HCCL_DETERMINISTIC=strict`。该入口的确定性参数不是全部由 `DET` 控制，不要只将 `DET` 改为 `off` 就视为完整关闭确定性。
+公共 launcher 通过 `enable_batch_invariant()` 统一启用训练确定性、vLLM 确定性、rollout seed 和 RL batch invariance，运行环境固定设置 `HCCL_DETERMINISTIC=strict`、`LCCL_DETERMINISTIC=1`。
 
 ## 6. 日志、保存与恢复
 
@@ -402,7 +429,7 @@ ${HOME_PATH}/dsv4-rl/
     ...                              # TensorBoard 事件及其他运行输出
 ```
 
-默认 `--save-interval 100`、保留最近 2 个 checkpoint。同步训练在最后一个 rollout 也会保存，所以默认 30 个 rollout 结束时会保存 `step-29`，不是因为未到 100 次就不保存。
+在 `local.sh` 设置 `SAVE_ON=on` 后，当前脚本以 `--save-interval 20` 定期保存，并保留最近 2 个 checkpoint；默认 `SAVE_ON=off` 不开启该保存配置。同步训练在最后一个 rollout 也会保存，实际频率可通过 `OVERRIDE_ARGS` 覆盖。
 
 启动 TensorBoard 查看训练指标：
 
@@ -410,10 +437,27 @@ ${HOME_PATH}/dsv4-rl/
 tensorboard --logdir ${HOME_PATH}/dsv4-rl/tb --host 0.0.0.0 --port 6006
 ```
 
-相同保存目录中已有 checkpoint 时，默认从最新 step 恢复。保持所需的节点资源与 PD 模式配置，在全部节点重新运行，明确指定来源和 step：
+相同保存目录中已有 checkpoint 时，默认从最新 step 恢复。保持所需的节点资源与 PD 模式配置，在全部节点重新运行：
 
 ```bash
-# 确认 node-list 脚本中的资源和 PD 配置后，在各节点执行
+# 确认 local.sh 中的资源和 PD 配置后，在各节点执行
 cd ${HOME_PATH}/cann-recipes-train/vime-forge
-bash scripts/torchtitan/run-dsv4-node-list.sh
+bash scripts/torchtitan/run-dsv4.sh
 ```
+
+
+## 7. 多机拉起命令
+
+本例使用 5 个节点、每节点 8 卡，其中训练 4 个节点（32 卡）、推理 1 个节点（8 卡），采用 PD 混部（`VLLM_CONFIG=""`）。先在每个节点的容器中按第 4.3 节配置 `scripts/torchtitan/common/local.sh`：节点列表、卡数、训练配方和环境路径都写在该文件中，启动命令无需重复传入。
+
+确认各节点的任务配置一致，并将示例 IP 和网卡名替换为实际值；模型、数据和共享 checkpoint 路径须在各节点可访问。多网卡环境可在各自的 `local.sh` 中设置 `LOCAL_NODE_IP`，填写本机在节点列表中的 IP。
+
+在 **5 个节点的容器中分别执行相同命令**：
+
+```bash
+export HOME_PATH=/data
+cd "${HOME_PATH}/cann-recipes-train/vime-forge"
+bash scripts/torchtitan/run-dsv4.sh
+```
+
+`local.sh` 中的第一个 IP 对应 Ray head，负责提交任务；其余节点加入 Ray 集群并保持运行。各节点必须都执行，不能只在 head 执行。实际训练和推理角色以第 4.2 节的资源分配规则及 placement 日志为准。

@@ -279,7 +279,7 @@ def create_run_id() -> str:
 _warned_bool_env_var_keys = set()
 
 
-# copied from VLLM
+# copied from SGLang
 def get_bool_env_var(name: str, default: str = "false") -> bool:
     value = os.getenv(name, default)
     value = value.lower()

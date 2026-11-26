@@ -103,45 +103,21 @@ def _patch_npu_colocate_worker() -> None:
 
     original_start = NPUWorker.start_weight_update
     original_finish = NPUWorker.finish_weight_update
+    original_update = NPUWorker.update_weights
 
-    def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
-        original_start(self, is_checkpoint_format=is_checkpoint_format)
-        self._vime_moe_layers_to_post_process = []
+    def start_weight_update(self, *args, **kwargs) -> None:
+        # vLLM 0.30 has no format argument. NPU IPC applies each received
+        # tensor in place, so there is no checkpoint/direct split.
+        del args, kwargs
+        original_start(self)
 
-    def finish_weight_update(self) -> None:
-        try:
-            if not getattr(self, "_is_checkpoint_format", True):
-                with torch.device(self.device):
-                    _post_process_colocate_moe_layers(self._vime_moe_layers_to_post_process)
-            original_finish(self)
-        finally:
-            self._vime_moe_layers_to_post_process = []
+    def finish_weight_update(self, *args, **kwargs) -> None:
+        del args, kwargs
+        original_finish(self)
 
     def update_weights(self, update_info: dict) -> None:
-        self._check_weight_transfer_engine()
-        if not getattr(self, "_weight_update_active", False):
-            raise RuntimeError("start_weight_update must be called before update_weights.")
-        typed_info = self.weight_transfer_engine.parse_update_info(update_info)
-        model = self.model_runner.model
-        with torch.device(self.device):
-            if self._is_checkpoint_format:
-                self.weight_transfer_engine.receive_weights(typed_info, load_weights=model.load_weights)
-            else:
-                from vllm.config import set_current_vllm_config
-
-                tp_rank = self.rank % self.parallel_config.tensor_parallel_size
-
-                def load_direct(weights: list[tuple[str, torch.Tensor]]) -> None:
-                    with torch.no_grad(), set_current_vllm_config(self.vllm_config):
-                        _load_colocate_weights_direct(
-                            model,
-                            weights,
-                            tp_rank=tp_rank,
-                            post_process_layers=self._vime_moe_layers_to_post_process,
-                        )
-
-                self.weight_transfer_engine.receive_weights(typed_info, load_weights=load_direct)
-        torch.npu.synchronize()
+        # Delegate lifecycle checks and synchronization to vLLM 0.30.
+        original_update(self, update_info)
 
     NPUWorker.start_weight_update = start_weight_update
     NPUWorker.finish_weight_update = finish_weight_update

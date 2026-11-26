@@ -185,7 +185,7 @@ class UpdateWeightFromTensor:
             use_distribute=use_distribute,
         )
 
-        if not self._expert_transfer_plan:
+        if not self._expert_transfer_plan or self.args.dspark_enabled:
             if self.rollout_engines:
                 from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
                 from vllm.distributed.weight_transfer.ipc_engine import IPCTrainerInitInfo
@@ -218,7 +218,8 @@ class UpdateWeightFromTensor:
                 )
                 self._native_trainers.append(trainer)
 
-            return
+            if not self._expert_transfer_plan:
+                return
 
         # Rank-local expert routing is the one case the generic IPC API cannot
         # express: each rollout EP rank receives a different expert subset.
@@ -240,7 +241,7 @@ class UpdateWeightFromTensor:
             if start <= dist.get_rank() < start + colocate_gpu_counts[index]:
                 self._ipc_engine = engine
 
-        if dist.get_rank() == 0:
+        if dist.get_rank() == 0 and not self._native_trainers:
             ray.get(
                 [
                     engine.init_weight_transfer_engine.remote({"init_info": {"packed": True}})
@@ -352,25 +353,29 @@ class UpdateWeightFromTensor:
                 )
         dist.barrier(group=get_gloo_group())
 
-        if self._native_trainers:
+        megatron_local_weights = None
+        if self._expert_transfer_plan:
+            megatron_local_weights = self.weights_getter()
+            self._update_rollout_weights(megatron_local_weights, draft=False)
+        else:
             for trainer in self._native_trainers:
                 trainer.client.draft = False
                 trainer.send_weights()
-            update_draft = self.args.dspark_enabled or (
-                self.args.enable_mtp_training and (self.args.vllm_speculative_config or {}).get("method") == "mtp"
-            )
-            if update_draft:
+
+        update_draft = self.args.dspark_enabled or (
+            self.args.enable_mtp_training and (self.args.vllm_speculative_config or {}).get("method") == "mtp"
+        )
+        if update_draft:
+            if self._native_trainers:
                 self._source.draft = self.args.dspark_enabled
                 for trainer in self._native_trainers:
                     trainer.client.draft = True
                     trainer.send_weights()
                     trainer.client.draft = False
                 self._source.draft = False
-        else:
-            megatron_local_weights = self.weights_getter()
-            self._update_rollout_weights(megatron_local_weights, draft=False)
-
-            if self.args.enable_mtp_training and (self.args.vllm_speculative_config or {}).get("method") == "mtp":
+            else:
+                if megatron_local_weights is None:
+                    megatron_local_weights = self.weights_getter()
                 self._update_rollout_weights(megatron_local_weights, draft=True)
 
         # int4/fp4 post_process

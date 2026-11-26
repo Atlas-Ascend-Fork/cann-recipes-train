@@ -282,7 +282,7 @@ Trainer.Config(
 | 13 | 构建 `sd_adapter` 与 `checkpointer`（`dataloader=None`，`states={}`） | 上游 |
 | 14 | 构建 `train_context`；确定计算精度；建立 TP 组与 DP 组 | 上游与 vime |
 
-> **说明**：步骤 3 之后，需将启动时设置的 `HCCL_DETERMINISTIC` 重新写回环境变量，以与 rollout 侧保持一致（torchtitan-npu 会将其改为 `true`，vLLM 侧为 `strict`，不一致会导致权重传输死锁）。
+> **说明**：torchtitan-npu 的确定性设置会把 `HCCL_DETERMINISTIC` 改为 `true`。启动脚本默认始终传入 `--rl-batch-invariant`，此时 engine 会把 `HCCL_DETERMINISTIC` 强制为 `strict`、`LCCL_DETERMINISTIC=1`，与 rollout 侧一致，避免权重传输死锁。
 
 ### 4.5 ckpt 加载
 
@@ -415,7 +415,7 @@ TP 大于 1 时，log_prob 与熵在各 TP rank 的词表分片上计算后归�
 | 文件 | 内容 |
 |---|---|
 | `run-<模型>.sh` | 训练参数，按用途分组后拼成 `train.py` 的命令行；预置配置由其中的 `--module` / `--config` 指定 |
-| `common/default.sh` | 开关（`MODE`、`DET`、`EVAL_ON` 等）与环境（路径、端口、ray worker 环境变量）的默认值，写作 `${VAR:-默认值}` |
+| `common/default.sh` | 开关（`MODE`、`EVAL_ON` 等）与环境（路径、端口、ray worker 环境变量）的默认值，写作 `${VAR:-默认值}` |
 | `common/local.sh` | 本机路径与实验覆盖，不纳入版本库；可保留多份，用 `--local` 选择 |
 
 启动脚本只接受 `--local`、`--dump-dir`、`--replay-dir` 三个参数；`--` 之后的内容追加到训练命令行末尾，用于临时覆盖训练参数。
@@ -436,5 +436,5 @@ TP 大于 1 时，log_prob 与熵在各 TP rank 的词表分片上计算后归�
 - `--save-hf`：额外导出 HF 格式的路径模板。见 4.5 节。
 - `--ref-load`、`--keep-old-actor`、`--update-weights-interval`：决定模型标签的集合与轮换方式。见 3.3 节。
 - `--use-rollout-routing-replay`：MoE 路由重放。见 3.2 节。
-- `--debug.seed`、`--debug.deterministic`：训练侧确定性；启动脚本的 `DET=on` 会同时设置训练侧、rollout 侧与 HCCL 的确定性。
+- `--debug.seed`、`--debug.deterministic`：训练侧确定性。启动脚本现在**始终**开启确定性（`--rl-batch-invariant`、`--vllm-enable-deterministic-inference` 以及 `HCCL_DETERMINISTIC=strict` / `LCCL_DETERMINISTIC=1`），旧的 `DET` 开关已移除。
 - `VIME_TORCHTITAN_WEIGHT_SYNC_LEADER_RELAY=1`（环境变量）：分离部署时，训练 rank 0 与每个引擎分别建立一个 2 成员的通信域，只发给引擎的首个 rank，再由引擎内部转发。

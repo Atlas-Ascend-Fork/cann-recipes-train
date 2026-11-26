@@ -84,12 +84,9 @@ class UpdateWeightFromDistributed:
         if self._is_src:
             ray.get([e.pause_generation.remote() for e in self.rollout_engines])
             ray.get([e.flush_cache.remote() for e in self.rollout_engines])
-        dist.barrier(group=get_gloo_group())
-
-        # Begin the weight update session: the PR#9152 worker is a state machine, so
-        # start_weight_update must be called before update_weights.
-        if self._is_src:
-            ray.get([e.start_weight_update.remote(is_checkpoint_format=True) for e in self.rollout_engines])
+            # Begin the weight update session: the PR#9152 worker is a state machine, so
+            # start_weight_update must be called before update_weights.
+            ray.get([e.start_weight_update.remote() for e in self.rollout_engines])
         dist.barrier(group=get_gloo_group())
 
         try:

@@ -68,6 +68,12 @@ def validate_rollout_routed_experts_for_replay(
     else:
         moe_layers = list(range(num_layers))
 
+    num_experts = getattr(args, "num_experts", None)
+    if num_experts is None:
+        num_experts = getattr(getattr(args, "model_config", None), "num_experts", None)
+    if num_experts is not None:
+        num_experts = int(num_experts)
+
     for sample_idx, experts in enumerate(routed_experts):
         experts = torch.as_tensor(experts)
         if experts.ndim != 3 or tuple(experts.shape[1:]) != (num_layers, topk):
@@ -87,6 +93,52 @@ def validate_rollout_routed_experts_for_replay(
                     "vLLM pipeline stages did not aggregate their disjoint routing "
                     "captures; refusing to replay expert 0 everywhere."
                 )
+
+        # Dense layers only carry placeholders, not routing decisions.
+        if not moe_layers:
+            continue
+        moe_experts = experts[:, moe_layers, :]
+
+        # Every token's top-k experts must be distinct: a token routed to the
+        # same expert twice would make the replayed routing map ambiguous.
+        _validate_unique_experts(sample_idx, moe_experts, topk)
+
+        # ... and every expert id must be in [0, num_experts).
+        _validate_expert_id_range(sample_idx, moe_experts, num_experts)
+
+
+
+def _validate_unique_experts(
+    sample_idx: int,
+    moe_experts: torch.Tensor,
+    topk: int,
+) -> None:
+    """Reject tokens whose top-k expert ids are not distinct."""
+    sorted_topk = torch.sort(moe_experts, dim=-1).values
+    duplicate = (sorted_topk[..., 1:] == sorted_topk[..., :-1]).any(dim=-1)
+    if bool(duplicate.any()):
+        duplicate_tokens = int(duplicate.any(dim=-1).sum())
+        raise ValueError(
+            "R3 rollout routed-experts contain duplicate expert ids within a "
+            f"token: sample={sample_idx}, topk={topk}, "
+            f"duplicate_tokens={duplicate_tokens}."
+        )
+
+
+def _validate_expert_id_range(
+    sample_idx: int,
+    moe_experts: torch.Tensor,
+    num_experts: int | None,
+) -> None:
+    """Reject expert ids outside [0, num_experts)."""
+    min_expert = int(moe_experts.min())
+    max_expert = int(moe_experts.max())
+    if min_expert < 0 or (num_experts is not None and max_expert >= num_experts):
+        raise ValueError(
+            "R3 rollout routed-experts ids out of range: "
+            f"sample={sample_idx}, min={min_expert}, max={max_expert}, "
+            f"num_experts={num_experts}."
+        )
 
 
 def validate_rollout_id_annotated(node, depth=0):

@@ -125,13 +125,17 @@ class UpdateWeightFromTensor:
         dist.barrier(group=get_gloo_group())
 
         if rank == self._ipc_gather_src:
-            # All exports use checkpoint names and layouts.
-            ray.get(self._ipc_engine.start_weight_update.remote(is_checkpoint_format=True))
+            # get_hf_per_tensor emits checkpoint names/layouts, including packed
+            # experts and scales. Let the model loader shard and postprocess them.
+            ray.get(self._ipc_engine.start_weight_update.remote())
         dist.barrier(group=get_gloo_group())
 
         bucket: list[tuple[str, torch.Tensor]] = []
         bucket_bytes = 0
         limit = int(getattr(self.args, "update_weight_buffer_size", 512 * 1024 * 1024))
+        # Buckets are transport chunks and can split a layer. Keep one reload
+        # session until all weights arrive: an intermediate finish/start can
+        # materialize incomplete layers and overwrite already updated weights.
         for name, tensor in self._weights_iter_factory():
             tensor_bytes = tensor.numel() * tensor.element_size()
             bucket.append((name, tensor.contiguous()))
@@ -160,17 +164,104 @@ class UpdateWeightFromTensor:
         del rollout_id
 
     def _send_bucket(self, bucket: list[tuple[str, torch.Tensor]]) -> None:
-        from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
-            NPUIPCTrainerSendWeightsArgs,
-            NPUIPCWeightTransferEngine,
-        )
+        """Send one bucket of tensors via vLLM's trainer-side NPU IPC engine.
+
+        ``NPUIPCWeightTransferEngine.trainer_send_weights`` and
+        ``NPUIPCTrainerSendWeightsArgs`` were removed in vLLM 0.30 in favour of
+        ``NPUIPCTrainerWeightTransferEngine``. VIME still owns the start/finish
+        handshake and the bucketing that bounds memory, so here we only build a
+        throwaway engine for this bucket and drive its non-packed send directly.
+        IPC handles are all-gathered within this slot's group
+        (``_ipc_gather_group``); packed mode is intentionally not used because it
+        caps each tensor at the buffer size.
+        """
+        from vllm.distributed.weight_transfer.base import WeightSource
+        from vllm.distributed.weight_transfer.clients import HTTPVLLMWeightSyncClient
+        from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import NPUIPCTrainerWeightTransferEngine
 
         url = ray.get(self._ipc_engine.get_url.remote())
         if url is None:
             raise RuntimeError("NPU IPC colocate requires a vLLM engine HTTP URL")
-        logger.debug("Sending %d TorchTitan tensors to colocated vLLM engine", len(bucket))
-        NPUIPCWeightTransferEngine.trainer_send_weights(
-            iter(bucket),
-            NPUIPCTrainerSendWeightsArgs(send_mode="http", url=url, packed=False),
-            process_group=self._ipc_gather_group,
+
+        process_group = self._ipc_gather_group
+        is_sender = dist.get_rank() == self._ipc_gather_src
+
+        class _BucketSource(WeightSource):
+            def __iter__(self):
+                return iter(bucket)
+
+            def metadata(self) -> list:
+                # The NPU IPC engine only iterates the source on the send path.
+                return []
+
+        class _SlotScopedNPUIPCTrainerEngine(NPUIPCTrainerWeightTransferEngine):
+            """NPU IPC trainer engine scoped to one colocation slot's group.
+
+            The stock engine all-gathers IPC handles over the default process
+            group and treats global rank 0 as the sender. VIME's colocated layout
+            groups each engine slot's co-located ranks (``_ipc_gather_group``) and
+            lets that slot's source rank ship, so thread the slot group through
+            the collectives.
+            """
+
+            def __init__(self, *, process_group=None, **kwargs):
+                super().__init__(**kwargs)
+                self._process_group = process_group
+
+            @staticmethod
+            def _merge_gathered_handles(handles, gathered):
+                merged = []
+                for param_idx in range(len(handles)):
+                    merged_handle = {}
+                    for rank_handles in gathered:
+                        if rank_handles is not None:
+                            merged_handle.update(rank_handles[param_idx])
+                    merged.append(merged_handle)
+                return merged
+
+            def send(self, source):
+                return self._send(source)
+
+            def post_send_sync(self) -> None:
+                self._post_send_sync()
+
+            def _all_gather_and_merge_handles(self, handles):
+                pg = self._process_group
+                if not torch.distributed.is_initialized() or torch.distributed.get_world_size(group=pg) == 1:
+                    return handles
+                world_size = torch.distributed.get_world_size(group=pg)
+                gathered = [None] * world_size
+                torch.distributed.all_gather_object(gathered, handles, group=pg)
+                torch.distributed.barrier(group=pg)
+                torch.npu.synchronize()
+                if self.is_sender:
+                    return self._merge_gathered_handles(handles, gathered)
+                return [{} for _ in handles]
+
+            def _post_send_sync(self) -> None:
+                pg = self._process_group
+                if torch.distributed.is_initialized() and torch.distributed.get_world_size(group=pg) > 1:
+                    torch.distributed.barrier(group=pg)
+                torch.npu.synchronize()
+
+        engine = _SlotScopedNPUIPCTrainerEngine(
+            client=HTTPVLLMWeightSyncClient(url),
+            source=_BucketSource(),
+            is_sender=is_sender,
+            packed=False,
+            process_group=process_group,
         )
+        logger.debug("Sending %d TorchTitan tensors to colocated vLLM engine", len(bucket))
+        weight_refs = None
+        try:
+            weight_refs = engine.send(engine.source)
+            engine.post_send_sync()
+        finally:
+            # IPC rebuild handles do not own the sender storage. Keep the
+            # contiguous tensors alive through the slot barrier, then break
+            # every source/closure reference before the next bucket/update.
+            del weight_refs
+            engine.source = None
+            engine.client = None
+            bucket.clear()
+            del engine

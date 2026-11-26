@@ -123,11 +123,12 @@ preflight_cli() {
         die "VIME_RAY_TEMP_DIR is too long (${#VIME_RAY_TEMP_DIR} chars): ray's AF_UNIX socket path caps at 107 bytes. Shorten it, or use a shallower VIME_WORKSPACE."
 
     [[ -z "$REPLAY_DIR" || -d "$REPLAY_DIR" ]] || die "--replay-dir does not exist: ${REPLAY_DIR}"
+    # --dump-dir writes one file per rollout into it, so it has to exist.
+    [[ -z "$DUMP_DIR" ]] || mkdir -p "$DUMP_DIR"
 }
 
 # Relations that can only be checked once the model script has run.
 preflight_params() {
-    [[ "${DET:-}" == on || "${DET:-}" == off ]] || die "DET must be on or off, got: ${DET:-<unset>}"
     (( MAX_RESPONSE_LEN < SEQ_LEN )) || \
         die "MAX_RESPONSE_LEN(${MAX_RESPONSE_LEN}) must be below SEQ_LEN(${SEQ_LEN}), which bounds prompt+response together."
     (( ROLLOUT_GPUS % VLLM_RANKS_PER_ENGINE == 0 )) || \
@@ -141,8 +142,6 @@ preflight_env() {
         die "no ${VIME_NNAL_HOME}/set_env.sh. Point VIME_NNAL_HOME at the nnal/atb directory."
     [[ -z "$VIME_TRAIN_ENV" || -f "${VIME_TRAIN_ENV}/bin/activate" ]] || \
         die "VIME_TRAIN_ENV=${VIME_TRAIN_ENV} has no bin/activate, so it is not a venv."
-    [[ -z "$VIME_VLLM_ENV" || -x "${VIME_VLLM_ENV}/bin/vllm" ]] || \
-        die "VIME_VLLM_ENV=${VIME_VLLM_ENV} has no executable bin/vllm."
 }
 
 # ── Declarative helpers for the model script ──────────────────────────
@@ -192,6 +191,35 @@ configure_colocation() {
     fi
 }
 
+merge_weight_nz_mode() {
+    # vLLM no longer reads VLLM_ASCEND_ENABLE_NZ; when the recipe asks for
+    # FRACTAL_NZ off (VLLM_ASCEND_ENABLE_NZ=0), merge weight_nz_mode=0 into the
+    # model script's --vllm-additional-config JSON (keeping its other keys).
+    # Mutates the global TRAIN_ARGS set by the model script.
+    # Requires jq (present in the image); //= fills an unset/null value and keeps
+    # an explicit user-provided weight_nz_mode.
+    [[ "${VLLM_ASCEND_ENABLE_NZ:-0}" == "0" ]] || return 0
+    local i seen=
+    for i in "${!TRAIN_ARGS[@]}"; do
+        case "${TRAIN_ARGS[$i]}" in
+        --vllm-additional-config)
+            TRAIN_ARGS[$((i + 1))]=$(jq -c '.weight_nz_mode //= 0' <<<"${TRAIN_ARGS[$((i + 1))]}")
+            seen=1 ;;
+        --vllm-additional-config=*)
+            TRAIN_ARGS[$i]="--vllm-additional-config=$(jq -c '.weight_nz_mode //= 0' <<<"${TRAIN_ARGS[$i]#--vllm-additional-config=}")"
+            seen=1 ;;
+        esac
+    done
+    [[ -n "$seen" ]] || TRAIN_ARGS+=(--vllm-additional-config '{"weight_nz_mode":0}')
+}
+
+enable_batch_invariant() {
+    TRAIN_ARGS+=(--debug.seed 1234 --debug.deterministic
+                 --vllm-enable-deterministic-inference --rollout-seed 1234
+                 --rl-batch-invariant
+    )
+}
+
 rt_env_finalize() {
     local i
     for i in "${!RT_ENV_KEYS[@]}"; do export "${RT_ENV_KEYS[i]}=${RT_ENV_VALS[i]}"; done
@@ -212,6 +240,24 @@ parts = sys.stdin.buffer.read().split(b"\0")[:-1]
 env = {parts[i].decode(): parts[i + 1].decode() for i in range(0, len(parts), 2)}
 sys.stdout.write(json.dumps({"env_vars": env}))
 '
+}
+
+proxy_configure() {
+    local csv=
+    local -a proxy_nodes=()
+    # Multi-node uses the whole NODE_IP_LIST; single-node reuses LOCAL_NODE_IP
+    # (set by multinode_configure). MULTINODE_NODES itself is left untouched.
+    if [[ -n "${MULTINODE_NODES[*]:-}" ]]; then
+        proxy_nodes=("${MULTINODE_NODES[@]}")
+    elif [[ -n "${LOCAL_NODE_IP:-}" ]]; then
+        proxy_nodes=("${LOCAL_NODE_IP}")
+    fi
+    if (( ${#proxy_nodes[@]} > 0 )); then
+        csv=$(IFS=,; printf '%s' "${proxy_nodes[*]}")
+    fi
+    no_proxy="127.0.0.1,localhost${csv:+,$csv}${no_proxy:+,$no_proxy}"
+    NO_PROXY="127.0.0.1,localhost${csv:+,$csv}${NO_PROXY:+,$NO_PROXY}"
+    export no_proxy NO_PROXY
 }
 
 # The three sourced files are vendor scripts that routinely reference undefined
@@ -244,12 +290,129 @@ platform_resolve_interpreters() {
         else RAY_CLI="${TRAIN_PYTHON} $(command -v ray || true)"; fi
     fi
     if [[ -z "${VIME_VLLM_EXECUTABLE:-}" ]]; then
-        if [[ -n "$rollout_env" ]]; then VIME_VLLM_EXECUTABLE="${rollout_env}/bin/vllm"
+        if [[ -n "$rollout_env" && -x "${rollout_env}/bin/vllm" ]]; then VIME_VLLM_EXECUTABLE="${rollout_env}/bin/vllm"
         else VIME_VLLM_EXECUTABLE="$(command -v vllm || echo vllm)"; fi
     fi
     if [[ -z "${VIME_VLLM_PYTHON:-}" && -n "$rollout_env" ]]; then
         VIME_VLLM_PYTHON="${rollout_env}/bin/python"
     fi
+}
+
+# ── Multi-node ────────────────────────────────────────────────────────
+# Driven by NODE_IP_LIST (common/default.sh). The same command runs on every
+# node: index 0 (the head) launches the job, the others join the head's ray
+# cluster and stay alive as workers. Empty NODE_IP_LIST leaves the single-node
+# path untouched, including MASTER_ADDR=127.0.0.1.
+
+multinode_configure() {
+    VIME_MULTINODE=0
+    read -r -a MULTINODE_NODES <<< "${NODE_IP_LIST:-}"
+    if (( ${#MULTINODE_NODES[@]} == 0 )); then
+        # Single-node: remember the primary local address so proxy_configure can
+        # reuse it. LOCAL_NODE_IP is also the multi-node override.
+        if [[ -z "${LOCAL_NODE_IP:-}" ]]; then
+            LOCAL_NODE_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+        fi
+        export LOCAL_NODE_IP
+        return 0
+    fi
+
+    (( ${#MULTINODE_NODES[@]} >= 2 )) || \
+        die "NODE_IP_LIST must contain at least two IPs, got: ${NODE_IP_LIST}"
+    [[ "$NPUS_PER_NODE" =~ ^[1-9][0-9]*$ ]] || die "NPUS_PER_NODE must be a positive integer"
+    [[ "$ROLLOUT_NODE_NUM" =~ ^[0-9]+$ ]] || die "ROLLOUT_NODE_NUM must be an integer"
+
+    NODE_COUNT=${#MULTINODE_NODES[@]}
+    (( ROLLOUT_NODE_NUM >= 0 && ROLLOUT_NODE_NUM <= NODE_COUNT )) || \
+        die "ROLLOUT_NODE_NUM must be between 0 and node_count (node_count=${NODE_COUNT})"
+
+    local node; local -A seen=()
+    for node in "${MULTINODE_NODES[@]}"; do
+        [[ -n "$node" ]] || die "NODE_IP_LIST contains an empty address"
+        [[ -z "${seen[${node}]:-}" ]] || die "NODE_IP_LIST contains duplicate address: ${node}"
+        seen["${node}"]=1
+    done
+
+    HEAD_NODE_IP=${MULTINODE_NODES[0]}
+    ACTOR_NODE_NUM=$(( NODE_COUNT - ROLLOUT_NODE_NUM ))
+    # ACTOR_GPUS is per node -- it feeds --actor-num-gpus-per-node; the trainer's
+    # total is ACTOR_NODE_NUM * ACTOR_GPUS. ROLLOUT_GPUS is a total, matching
+    # --rollout-num-gpus.
+    ACTOR_GPUS="${ACTOR_GPUS:-$NPUS_PER_NODE}"
+    ROLLOUT_GPUS="${ROLLOUT_GPUS:-$(( ROLLOUT_NODE_NUM * NPUS_PER_NODE ))}"
+
+    # The head owns MASTER_ADDR and the ray GCS; workers join by that address.
+    MASTER_ADDR="${HEAD_NODE_IP}"
+
+    # LOCAL_NODE_IP overrides the detected address (multi-homed hosts, or a
+    # container whose hostname -I does not list the cluster NIC).
+    local addresses=" ${LOCAL_NODE_IP:-} $(hostname -I 2>/dev/null || true) "
+    local index
+    for index in "${!MULTINODE_NODES[@]}"; do
+        if [[ "$addresses" == *" ${MULTINODE_NODES[$index]} "* ]]; then
+            LOCAL_NODE_IP=${MULTINODE_NODES[$index]}
+            LOCAL_NODE_INDEX=$index
+            VIME_MULTINODE=1
+            export NODE_COUNT HEAD_NODE_IP LOCAL_NODE_IP LOCAL_NODE_INDEX \
+                   ACTOR_NODE_NUM ACTOR_GPUS ROLLOUT_GPUS VIME_MULTINODE
+            echo "multi-node: node ${LOCAL_NODE_INDEX}/${NODE_COUNT} ip=${LOCAL_NODE_IP} head=${HEAD_NODE_IP} actor=${ACTOR_NODE_NUM}x${ACTOR_GPUS} gpus (total $(( ACTOR_NODE_NUM * ACTOR_GPUS ))) rollout_gpus=${ROLLOUT_GPUS}"
+            return 0
+        fi
+    done
+    die "no local address matches NODE_IP_LIST. Set LOCAL_NODE_IP to this node's address (local addresses:${addresses})"
+}
+
+# Number of alive ray nodes the head can see. ray status prints the nodes under
+# a "Node status" heading, one "node_<id>" line each; anything unparsable counts
+# as 0 and just makes the wait below time out.
+multinode_alive_nodes() {
+    # The gcs address, not the dashboard one: "http://..." is only for job submit.
+    # shellcheck disable=SC2086  # RAY_CLI may hold two words ("<python> <ray>")
+    ${RAY_CLI} status --address="${HEAD_NODE_IP}:${VIME_RAY_PORT}" 2>/dev/null |
+        awk '/^Active:/{f=1;next} f&&(/^[[:space:]]*$/ || /^Pending:/){exit} f&&/node_/{c++} END{print c+0}'
+}
+
+# The head submits only once every node in NODE_IP_LIST has joined, so a node
+# that failed to start is visible here instead of showing up as a placement
+# group stuck pending. Timing out still submits, with a warning.
+multinode_wait_for_nodes() {
+    local deadline=$(( SECONDS + VIME_MULTINODE_WAIT_TIMEOUT ))
+    local alive
+    while :; do
+        alive=$(multinode_alive_nodes)
+        if (( alive >= NODE_COUNT )); then
+            echo "multi-node: ${alive}/${NODE_COUNT} ray nodes joined"
+            return 0
+        fi
+        if (( SECONDS >= deadline )); then
+            echo "⚠ multi-node: only ${alive}/${NODE_COUNT} ray nodes joined after ${VIME_MULTINODE_WAIT_TIMEOUT}s; submitting anyway" >&2
+            return 0
+        fi
+        sleep 5
+    done
+}
+
+# Non-head nodes: join the head's cluster and keep this process alive so the node
+# stays in the cluster for the whole run. The node's own ray temp dir keeps its
+# sockets apart from the head's.
+multinode_worker_main() {
+    local worker_temp_dir="${VIME_RAY_TEMP_DIR}/worker-${LOCAL_NODE_INDEX}"
+    mkdir -p "$worker_temp_dir"
+    local deadline=$(( SECONDS + ${VIME_MULTINODE_JOIN_TIMEOUT:-180} ))
+    until ${RAY_CLI} start \
+        --address="${HEAD_NODE_IP}:${VIME_RAY_PORT}" \
+        --node-ip-address="${LOCAL_NODE_IP}" \
+        --temp-dir="${worker_temp_dir}" \
+        --min-worker-port="${RAY_MIN_WORKER_PORT}" \
+        --max-worker-port="${RAY_MAX_WORKER_PORT}" \
+        --dashboard-agent-listen-port="${VIME_RAY_DASHBOARD_AGENT_PORT}" \
+        --disable-usage-stats; do
+        (( SECONDS < deadline )) || die "unable to join ray head ${HEAD_NODE_IP}:${VIME_RAY_PORT}"
+        sleep 2
+    done
+    echo "multi-node: worker ${LOCAL_NODE_IP} joined ${HEAD_NODE_IP}:${VIME_RAY_PORT}; keeping the node alive."
+    while ${RAY_CLI} status --address="${HEAD_NODE_IP}:${VIME_RAY_PORT}" >/dev/null 2>&1; do sleep 10; done
+    die "lost connection to the ray head ${HEAD_NODE_IP}"
 }
 
 # ── Launch and archive ────────────────────────────────────────────────
@@ -350,6 +513,8 @@ configure_run() {
         preflight_env
         platform_activate
     fi
+    multinode_configure
+    proxy_configure
 
     CKPT_DIR="${VIME_CKPT_ROOT}/${RUN_NAME}-${MODE}"
     RUN_STAMP="$(date +%Y%m%d-%H%M%S)"
@@ -375,31 +540,77 @@ configure_run() {
 # After the parameters: check the relations between them, assemble, submit.
 start_run() {
     [[ "${RUN_CONFIGURED:-0}" == 1 ]] || die "call configure_run before start_run"
-    preflight_params
-    [[ -z "$DUMP_DIR" ]] || mkdir -p "$DUMP_DIR"
 
+    # The base worker environment (RT_ENV, common/default.sh) reaches every node's
+    # ray tree, single- or multi-node. It is added before the branch below so the
+    # workers, which never return from it, get it too.
     rt_env_add "${RT_ENV[@]}"
+
+    preflight_params
+
     configure_colocation
     rt_env_add "TENSORBOARD_DIR=${ARCHIVE_DIR}" \
+               "MASTER_ADDR=${MASTER_ADDR}" \
                "PYTHONPATH=${REPO_ROOT}:${PYTHONPATH:-}" \
                "VIME_VLLM_EXECUTABLE=${VIME_VLLM_EXECUTABLE}" \
                "VIME_VLLM_PYTHON=${VIME_VLLM_PYTHON}" \
                "VIME_LAUNCHER_RUN_ID=${VIME_LAUNCHER_RUN_ID}" \
+               "HCCL_HOST_SOCKET_PORT_RANGE=${HCCL_HOST_SOCKET_PORT_RANGE}" \
+               "HCCL_NPU_SOCKET_PORT_RANGE=${HCCL_NPU_SOCKET_PORT_RANGE}" \
+               "TRITON_CACHE_DIR=${TRITON_CACHE_DIR}" \
+               "TORCH_EXTENSIONS_DIR=${VLLM_TORCH_EXTENSIONS_DIR}" \
+               "HF_HOME=${HF_HOME}" \
+               "ASCEND_CACHE_PATH=${ASCEND_CACHE_PATH}" \
+               "no_proxy=${no_proxy}" \
+               "NO_PROXY=${NO_PROXY}"
+               
     # ⚠ Must match the rollout side: vllm_ascend's batch-invariant path forces the
     # rollout worker to strict, and a training side left at "true" deadlocks the
     # HCCL collective used for cross-process weight transfer.
-    [[ "$DET" != on ]] || rt_env_add HCCL_DETERMINISTIC=strict LCCL_DETERMINISTIC=1
     [[ -z "${LD_PRELOAD:-}" ]] || rt_env_add "LD_PRELOAD=${LD_PRELOAD}"
+
+    # Add the multi-node network interface before finalizing the runtime env.
+    if [[ "${VIME_MULTINODE:-0}" == 1 ]]; then
+        [[ -z "${GLOO_SOCKET_IFNAME:-}" ]] || rt_env_add "GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME}"
+    fi
     rt_env_finalize
+    export ASCEND_RT_VISIBLE_DEVICES
 
-    export MASTER_ADDR ASCEND_RT_VISIBLE_DEVICES
-    export HCCL_HOST_SOCKET_PORT_RANGE HCCL_NPU_SOCKET_PORT_RANGE
-    export TRITON_CACHE_DIR HF_HOME ASCEND_CACHE_PATH
+    # Multi-node: the head goes on to submit the job, a non-head node joins the
+    # head's cluster and keeps the node alive instead. Empty NODE_IP_LIST skips it.
+    if [[ "${VIME_MULTINODE:-0}" == 1 ]]; then
+        # Exported before `ray start`, so this node's ray tree carries the
+        # ownership marker that the next run's reclaim matches on.
+        export VIME_LAUNCHER_RUN_ID
+        local _env_i
+        for _env_i in "${!RT_ENV_KEYS[@]}"; do
+            export "${RT_ENV_KEYS[_env_i]}=${RT_ENV_VALS[_env_i]}"
+        done
 
-    # TRAIN_ARGS comes from the model script. The two overrides land after it, so
-    # they win: argparse keeps the last value.
+        if [[ "${LOCAL_NODE_INDEX:-0}" != 0 ]]; then
+            # Disarm the reclaim trap -- on exit it would kill this node's own
+            # raylet -- and reclaim the slot once instead, before joining: a ray
+            # left behind by an earlier run of this node holds the ports and
+            # makes `ray start` fail until it is stopped.
+            trap - EXIT
+            RUN_CONFIGURED=0
+            reclaim_slot || true
+            multinode_worker_main
+        fi
+    fi
+
+    enable_batch_invariant  # update TRAIN_ARGS
+    TRAIN_ARGS+=(
+        --train-env-vars "{\"TORCH_EXTENSIONS_DIR\":\"${TORCHTITAN_TORCH_EXTENSIONS_DIR}\"}"
+    )
+    # Append user overrides before merging NZ: --vllm-additional-config is
+    # last-wins, so a JSON in OVERRIDE_ARGS/EXTRA_ARGS would otherwise replace
+    # the injected weight_nz_mode=0.
+    TRAIN_ARGS+=("${OVERRIDE_ARGS[@]}" "${EXTRA_ARGS[@]}")
+    merge_weight_nz_mode  # update TRAIN_ARGS (now includes overrides/extras)
+
     TRAIN_CMD=("${TRAIN_PYTHON}" "${REPO_ROOT}/${TRAIN_ENTRY}" --train-backend torchtitan "${COLOCATE_ARGS[@]}"
-               "${TRAIN_ARGS[@]}" "${OVERRIDE_ARGS[@]}" "${EXTRA_ARGS[@]}")
+               "${TRAIN_ARGS[@]}")
 
     # An earlier run of this slot may have left ray or vLLM behind; a busy ray port stays fatal.
     reclaim_slot || die "could not reclaim slot ${VIME_SLOT}"
@@ -409,6 +620,7 @@ start_run() {
     quoted_train_cmd
     launch_archive "${ARCHIVE_DIR}"
     launch_ray_head
+    [[ "${VIME_MULTINODE:-0}" != 1 ]] || multinode_wait_for_nodes
     ${RAY_CLI} job submit \
         --address="http://127.0.0.1:${VIME_RAY_DASHBOARD_PORT}" \
         --runtime-env-json="${RUNTIME_ENV_JSON}" \

@@ -87,20 +87,15 @@ class RolloutDataSource(DataSource):
         else:
             self.dataset = None
 
+    def __len__(self) -> int:
+        if self.dataset is None:
+            return 0
+        return len(self.dataset)
+
     def get_samples(self, num_samples):
         # TODO further improve code
         if self.dataset is not None:
-            if self.sample_offset + num_samples <= len(self.dataset):
-                prompt_samples = self.dataset.samples[self.sample_offset : self.sample_offset + num_samples]
-                self.sample_offset += num_samples
-            else:
-                prompt_samples = self.dataset.samples[self.sample_offset :]
-                num_samples -= len(prompt_samples)
-                self.epoch_id += 1
-                if self.args.rollout_shuffle:
-                    self.dataset.shuffle(self.epoch_id)
-                prompt_samples += self.dataset.samples[:num_samples]
-                self.sample_offset = num_samples
+            prompt_samples = self._next_prompt_samples(num_samples)
         else:
             prompt_samples = [Sample() for _ in range(num_samples)]
 
@@ -159,10 +154,23 @@ class RolloutDataSource(DataSource):
         if self.args.rollout_global_dataset and self.args.rollout_shuffle and self.dataset is not None:
             self.dataset.shuffle(self.epoch_id)
 
-    def __len__(self) -> int:
-        if self.dataset is None:
-            return 0
-        return len(self.dataset)
+    def _next_prompt_samples(self, num_samples):
+        prompt_samples = []
+        while num_samples > 0 and len(self.dataset) > 0:
+            if self.sample_offset >= len(self.dataset):
+                self._start_new_epoch()
+            count = min(num_samples, len(self.dataset) - self.sample_offset)
+            next_offset = self.sample_offset + count
+            prompt_samples.extend(self.dataset.samples[self.sample_offset:next_offset])
+            self.sample_offset += count
+            num_samples -= count
+        return prompt_samples
+
+    def _start_new_epoch(self):
+        self.epoch_id += 1
+        if self.args.rollout_shuffle:
+            self.dataset.shuffle(self.epoch_id)
+        self.sample_offset = 0
 
 
 class RolloutDataSourceWithBuffer(RolloutDataSource):

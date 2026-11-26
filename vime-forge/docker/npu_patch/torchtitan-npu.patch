@@ -1,0 +1,24 @@
+diff --git a/torchtitan_npu/models/deepseek_v4/__init__.py b/torchtitan_npu/models/deepseek_v4/__init__.py
+index b92d060f83e9ec7244349b6c88b5086b71512504..4703e20699f096765508d1b4b02fc95013c5c39b 100644
+--- a/torchtitan_npu/models/deepseek_v4/__init__.py
++++ b/torchtitan_npu/models/deepseek_v4/__init__.py
+@@ -346,6 +346,7 @@ def _make_v4_moe_config(
+             route_norm=route_norm,
+             hash=layer_id < n_hash_layers,  # pyrefly: ignore [unexpected-keyword]
+             vocab_size=vocab_size,  # pyrefly: ignore [unexpected-keyword]
++            sorted_topk=True,
+         ),
+         routed_experts=make_routed_experts_config(
+             dim=dim,
+diff --git a/torchtitan_npu/override/deepseek_v4/mhc/ascendc.py b/torchtitan_npu/override/deepseek_v4/mhc/ascendc.py
+index 595ca6e7fc48b23cc12feb61bb3a287a96b5fc23..aff03419f74e6229a6162df793ec49f36746b758 100644
+--- a/torchtitan_npu/override/deepseek_v4/mhc/ascendc.py
++++ b/torchtitan_npu/override/deepseek_v4/mhc/ascendc.py
+@@ -63,7 +63,6 @@ class AscHcPre(HcPre):
+             norm_eps=self.norm_eps,
+             hc_eps=self.eps,
+             out_flag=1,
+-            inner_precise=1,
+         )
+         h_res, _, _ = torch_npu.npu_mhc_sinkhorn(
+             h_res,

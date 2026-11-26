@@ -24,6 +24,8 @@ _VLLM_REQUEST_PERF_FIELDS = (
     ("decode/throughput", "decode_throughput"),
 )
 _VLLM_PREFILL_PERF_FIELDS = (
+    ("prefill/queue_duration", "pd_prefill_queue_duration"),
+    ("prefill/ttft_duration", "pd_prefill_ttft_duration"),
     ("prefill/bootstrap_queue_duration", "pd_prefill_bootstrap_queue_duration"),
     ("prefill/bootstrap_duration", "pd_prefill_bootstrap_duration"),
     ("prefill/alloc_wait_duration", "pd_prefill_alloc_wait_duration"),
@@ -34,6 +36,11 @@ _VLLM_PREFILL_PERF_FIELDS = (
     ("prefill/retry_count", "pd_prefill_retry_count"),
 )
 _VLLM_DECODE_PERF_FIELDS = (
+    ("decode/remote_kv_wait_duration", "pd_decode_remote_kv_wait_duration"),
+    ("decode/allocation_wait_duration", "pd_decode_allocation_wait_duration"),
+    ("decode/transfer_worker_duration", "pd_transfer_worker_duration"),
+    ("decode/handshake_wait_worker_duration", "pd_handshake_wait_worker_duration"),
+    ("decode/transfer_post_worker_duration", "pd_transfer_post_worker_duration"),
     ("decode/prealloc_duration", "pd_decode_prealloc_duration"),
     ("decode/bootstrap_duration", "pd_decode_bootstrap_duration"),
     ("decode/alloc_wait_duration", "pd_decode_alloc_wait_duration"),
@@ -264,7 +271,7 @@ def _compute_top_p_kept_vocab_metrics(all_samples: list[Sample]):
 
 
 def _compute_spec_metrics(args, all_samples: list[Sample]):
-    if getattr(args, "vllm_speculative_algorithm", None) is None:
+    if getattr(args, "vllm_speculative_config", None) is None:
         return {}
     num_samples = len(all_samples)
     metrics = {}

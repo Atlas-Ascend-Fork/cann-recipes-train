@@ -173,6 +173,8 @@ export VIME_VLLM_ENV=/path/to/vllm/env
 OVERRIDE_ARGS=(--num-rollout 3000 --max-tokens-per-gpu 4096)
 ```
 
+`--vllm-additional-config` 按整份 JSON 覆盖，不会按 key 合并；需要同时设置多个键时请写在同一份 JSON 中。launcher 会在合并 `OVERRIDE_ARGS`/`EXTRA_ARGS` 之后注入 `weight_nz_mode=0`，避免新增 JSON 覆盖该设置。
+
 ---
 
 ## 3. launcher 派生的内容

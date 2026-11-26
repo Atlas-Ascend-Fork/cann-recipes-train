@@ -1,118 +1,174 @@
 # Vime
 
-[English](./README.md) · [代码仓库](https://github.com/vllm-project/vime)
+[中文版](./README_zh.md) · [Repository](https://github.com/vllm-project/vime)
 
-[![文档](https://img.shields.io/badge/docs-latest-brightgreen.svg?style=flat)](https://docs.vllm.ai/projects/vime/zh-cn/latest/)
+[![Documentation](https://img.shields.io/badge/docs-latest-brightgreen.svg?style=flat)](https://docs.vllm.ai/projects/vime/en/latest/)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/vllm-project/vime)
 
-**Vime** 是基于 [slime](https://github.com/THUDM/slime) 的 RL scaling 用 LLM post-training 框架，以 [**vLLM**](https://github.com/vllm-project/vllm)（配合 [vllm-router](https://github.com/vllm-project/router)）作为 rollout 后端。本仓库在Vime基础之上面向 Ascend NPU，以 [**torchtitan**](https://github.com/pytorch/torchtitan) 作为训练后端，提供两大核心能力：
+**Vime** is an LLM post-training framework for RL scaling, built on [slime](https://github.com/THUDM/slime). It keeps slime's training stack and data-generation design while using [**vLLM**](https://github.com/vllm-project/vllm) (with [vllm-router](https://github.com/vllm-project/router)) as the default rollout backend. Built on top of Vime, this repository targets Ascend NPU and uses [**torchtitan**](https://github.com/pytorch/torchtitan) as the training backend, providing two core capabilities:
 
-1. **高性能训练**：通过连接 torchtitan 与 vLLM，支持共卡与分离部署、同步与异步等模式的训练；
-2. **灵活的数据生成**：通过自定义数据生成接口以及 server based engine，实现任意的训练数据生成流程。
+1. **High-performance training**: Efficient training in various modes by connecting torchtitan with vLLM;
+2. **Flexible data generation**: Arbitrary training data generation workflows through custom data generation interfaces and server-based engines.
 
-> **维护说明**：torchtitan 是本仓库的主力训练后端。megatron 后端当前支持 Qwen3 系列部分模型，后续不再维护。
+> **Maintenance note**: torchtitan is the primary training backend of this repository. The megatron backend currently supports a subset of the Qwen3 series and will no longer be maintained.
 
-## 定位
+## Positioning
 
-本仓库是 [Vime](https://github.com/vllm-project/vime) 面向 Ascend NPU 的版本：rollout 侧沿用 Vime 的 vLLM 集成，训练侧以 torchtitan 替代 megatron，模型定义、FSDP2 并行与 DCP 检查点均来自 torchtitan 上游，训练流程与接口和 Vime 保持一致。
+The vLLM community horizontally supports many LLM post-training frameworks, including (in alphabetical order) [NeMo RL](https://github.com/NVIDIA-NeMo/RL), [OpenRLHF](https://github.com/openrlhf/openrlhf), [prime-rl](https://github.com/PrimeIntellect-ai/prime-rl), [SkyRL](https://github.com/NovaSky-AI/SkyRL), [verl](https://github.com/verl-project/verl), and so on. We built the Vime project to seamlessly bring slime's proven training paradigm into the vLLM ecosystem, offering a production-ready bridge that aligns both projects' rapid release cycles. We hope that users with different needs can find the right vLLM-ecosystem choice for their workflows. The vLLM community will continue to support the vLLM integration in these post-training frameworks. This repository is the Ascend NPU version: the rollout side reuses Vime's vLLM integration, while the training side replaces megatron with torchtitan — model definitions, FSDP2 parallelism, and DCP checkpoints all come from upstream torchtitan, and the training workflow and interfaces stay consistent with Vime.
 
-## 目录
+## Table of Contents
 
 - [Vime](#vime)
-  - [定位](#定位)
-  - [目录](#目录)
-  - [支持的模型与硬件](#支持的模型与硬件)
-  - [架构总览](#架构总览)
-  - [快速开始](#快速开始)
-    - [单轮 AscendC 算子生成](#单轮-ascendc-算子生成)
-    - [Agentic RL 示例](#agentic-rl-示例)
-  - [参数说明](#参数说明)
-  - [代码阅读路径](#代码阅读路径)
-  - [开发指南](#开发指南)
+  - [Positioning](#positioning)
+  - [Table of Contents](#table-of-contents)
+  - [Supported Models and Hardware](#supported-models-and-hardware)
+  - [Architecture Overview](#architecture-overview)
+  - [Quick Start](#quick-start)
+    - [Single-turn AscendC operator generation](#single-turn-ascendc-operator-generation)
+    - [Agentic RL examples](#agentic-rl-examples)
+  - [Arguments Walkthrough](#arguments-walkthrough)
+  - [Engine Deployment](#engine-deployment)
+  - [Correctness, Stability, and CI](#correctness-stability-and-ci)
+  - [Code Reading Path](#code-reading-path)
+  - [Developer Guide](#developer-guide)
   - [slime doc](#slime-doc)
+  - [FAQ](#faq)
+  - [Acknowledgements](#acknowledgements)
+  - [Citation](#citation)
 
-## 支持的模型与硬件
+## Supported Models and Hardware
 
-| 模型 | torchtitan 预置配置函数 | 硬件 |
+| Model | torchtitan preset config function | Hardware |
 |---|---|---|
-| Qwen3-4B | `vime_qwen3_4b` | Atlas 800T A3、A5 |
-| Qwen3-30B-A3B | `vime_qwen3_30b_a3b` | Atlas 800T A3、A5 |
+| Qwen3-4B | `vime_qwen3_4b` | Atlas 800T A3, A5 |
+| Qwen3-30B-A3B | `vime_qwen3_30b_a3b` | Atlas 800T A3, A5 |
 | DeepSeek V4 Flash | `vime_dsv4_flash` | A5 |
 
-预置配置位于 `vime/backends/torchtitan_utils/models/<模型族>/config_registry.py`。
+Preset configs live in `vime/backends/torchtitan_utils/models/<model family>/config_registry.py`.
 
-## 架构总览
+## Architecture Overview
 
 ![arch](./imgs/arch_torchtitan.svg)
 
-**模块说明**：
+**Module Descriptions**:
 
-- **training (torchtitan)**：负责主训练流程，从 Data Buffer 读取数据，训练完后将权重同步至 rollout 模块；
-- **rollout (vLLM + router)**：启动 vLLM 推理引擎并路由生成请求；自定义生成函数可以在其上封装多轮循环、工具调用、环境/沙盒交互和基于 verifier 的奖励；
-- **data buffer**：桥梁模块，管理 prompt 初始化、自定义数据与 rollout 生成方法，包括通过同一接口产出样本的 agent 工作流。
+- **training (torchtitan)**: Runs the main training loop, reads data from the Data Buffer, and synchronizes parameters to the rollout module after training.
+- **rollout (vLLM + router)**: Launches vLLM inference engines and routes generation requests; custom generate functions can wrap them with multi-turn loops, tool calls, environment/sandbox interaction, and verifier-based rewards.
+- **data buffer**: A bridge module that manages prompt initialization, custom data, and rollout generation methods, including agentic workflows that produce samples through the same interface.
 
-## 快速开始
+## Quick Start
 
-有关训练启动、配置覆盖与日志排障，请参考 [torchtitan 启动器](scripts/torchtitan/README.md)。训练后端的运行模式、配置和数据处理流程请参考 [torchtitan 训练后端](docs/torchtitan-backend.md)。
+For training startup, config overrides, and log troubleshooting, see the [torchtitan launcher](scripts/torchtitan/README.md). For the training backend's run modes, configuration, and data processing flow, see the [torchtitan training backend](docs/torchtitan-backend.md).
 
-### 单轮 AscendC 算子生成
+We also provide examples for some use cases not covered in the quick start guide; please check [examples](examples/).
 
-[`examples/cann_bench_single_turn`](examples/cann_bench_single_turn/README.md) 提供 Qwen3.5-4B/9B、Qwen3.6-27B 的 TorchTitan NPU 启动配置，使用原生单轮生成和 online reward 接入 CANN-Bench v1 评测。数据准备、运行步骤及各模型的验证边界见样例文档；不依赖 agent 沙箱。独立的 [评测客户端](examples/cann_bench_evaluator/README.md) 可供其他任务复用。
+### Single-turn AscendC operator generation
 
-### Agentic RL 示例
+[`examples/cann_bench_single_turn`](examples/cann_bench_single_turn/README.md) provides TorchTitan NPU launch configs for Qwen3.5-4B/9B and Qwen3.6-27B, using native single-turn generation and an online reward to plug into CANN-Bench v1 evaluation. See the example docs for data preparation, run steps, and each model's validation boundary; it does not depend on the agent sandbox. The standalone [evaluation client](examples/cann_bench_evaluator/README.md) can be reused by other tasks.
 
-Agent 工作负载通过 Vime 的定制接口接入标准 rollout / Data Buffer 循环，并不是独立框架：
+### Agentic RL examples
 
-- [`examples/coding_agent_rl`](examples/coding_agent_rl/README.md)：使用 Claude Code 或 Codex、沙盒工具、测试奖励和 token 精确轨迹片段的端到端 coding-agent RL；
+Agentic workloads use the standard rollout / Data Buffer loop through Vime's customization interfaces; they are not a separate framework:
 
+- [`examples/coding_agent_rl`](examples/coding_agent_rl/README.md): End-to-end coding-agent RL with Claude Code or Codex, sandboxed tool use, test-based rewards, and token-correct trajectory segments.
 
-## 参数说明
+See the [Agentic RL Training Roadmap](docs/en/get_started/agent.md) and [Customization Guide](docs/en/get_started/customization.md). The coding-agent example ships an E2B-compatible backend, while the shared `vime.agent.sandbox.Sandbox` contract can be implemented for Docker, Modal, or local VMs.
 
-Vime 的参数分为三类：
+## Arguments Walkthrough
 
-1. **torchtitan 配置**：`--module` / `--config` 指定 `config_registry` 中的预置配置函数，由它返回预置配置，给出模型规格、优化器、精度等基线；`--<字段>.<子字段>` 形式的点分参数覆盖预置配置中的字段，例如 `--parallelism.tensor_parallel_degree 4`。详见 [torchtitan 训练后端](docs/torchtitan-backend.md) 第 6 章；
-2. **vLLM 参数**：vLLM server 与 engine 相关选项以 `--vllm-` 为前缀（例如 `--vllm-gpu-memory-utilization`）。vllm-router 自身的选项以 `--router-` 传入（例如 `--router-policy round_robin`）；Vime 侧的 router 编排参数使用 `--vllm-router-` 前缀，包括 `--vllm-router-ip`、`--vllm-router-port` 和实际生效的 `--vllm-router-request-timeout-secs`。完整参数见 [vime/backends/vllm_utils/arguments.py](vime/backends/vllm_utils/arguments.py)。
-3. **框架参数**：与 Vime 编排相关的开关（rollout 卡数、数据路径、RL 算法等），见 [vime/utils/arguments.py](vime/utils/arguments.py)。
+Arguments in Vime are divided into three categories:
 
-`--rollout-num-gpus-per-engine` 对应每个 vLLM engine 的 tensor parallel size。默认 rollout 入口为 `vime.rollout.vllm_rollout.generate_rollout`。
+1. **torchtitan arguments**: `--module` / `--config` selects a preset config function from `config_registry`, which returns a preset config providing baselines such as model specification, optimizer, and precision; dotted arguments of the form `--<field>.<subfield>` override fields in the preset config, for example `--parallelism.tensor_parallel_degree 4`. See Chapter 6 of the [torchtitan training backend](docs/zh/advanced/torchtitan-backend.md).
+2. **vLLM arguments**: vLLM server and engine options are exposed with a `--vllm-` prefix (for example, `--vllm-gpu-memory-utilization`). vllm-router's own options are passed with `--router-` (for example, `--router-policy round_robin`); Vime-side router orchestration arguments use the `--vllm-router-` prefix, including `--vllm-router-ip`, `--vllm-router-port`, and the effective `--vllm-router-request-timeout-secs`. See [vime/backends/vllm_utils/arguments.py](vime/backends/vllm_utils/arguments.py) for the full surface.
+3. **Framework arguments**: Flags related to Vime orchestration (rollout GPUs, data paths, RL algorithms, etc.), see [vime/utils/arguments.py](vime/utils/arguments.py).
 
-## 代码阅读路径
+`--rollout-num-gpus-per-engine` sets the tensor parallel size of each vLLM engine. The default rollout entry is `vime.rollout.vllm_rollout.generate_rollout`.
 
-建议从训练主循环开始，只在需要时继续深入：
+For complete usage instructions, please refer to the [Usage Documentation](docs/en/get_started/usage.md).
+
+## Engine Deployment
+
+Vime organizes the RL dataflow on top of the native torchtitan and vLLM control surfaces. Beyond the argument pass-through described above, see:
+
+- [vLLM Config](docs/en/advanced/vllm-config.md): Optional YAML topology configuration, heterogeneous server groups, multi-model serving, and per-group overrides;
+- [PD Disaggregation](docs/en/advanced/pd-disaggregation.md): For multi-turn and agentic workloads with different prefill/decode resource needs;
+- Router policies such as session affinity for multi-turn agents (see [vLLM Config](docs/en/advanced/vllm-config.md));
+- [Delta Weight Sync](docs/en/advanced/delta-weight-sync.md): Disk-based incremental updates for disaggregated rollout engines;
+- [External Rollout Engines](docs/en/advanced/external-rollout-engines.md): Serving managed outside the training job. Serving can use an independent environment; disk transport avoids an NCCL group between training and serving. Different GPU models or vendors still require compatible model formats, precision, and vLLM hardware support.
+
+## Correctness, Stability, and CI
+
+RL bugs can be silent. Vime keeps the dataflow explicit and supports separate rollout-only and train-only debugging paths. CPU unit tests, customization-hook contract tests, and GPU end-to-end suites protect different parts of this workflow. Buildkite runs always-on CPU checks; GPU suites require the manual gate, so a green CPU build is not GPU validation.
+
+Useful engineering docs:
+
+- [CI](docs/en/developer_guide/ci.md)
+- [Debugging](docs/en/developer_guide/debug.md)
+- [Reproducibility](docs/en/advanced/reproducibility.md)
+- [Fault Tolerance](docs/en/advanced/fault-tolerance.md)
+- [Trace Viewer](docs/en/developer_guide/trace.md)
+- [Profiling](docs/en/developer_guide/profiling.md)
+
+## Code Reading Path
+
+Start from the training loop and follow the calls only as deep as needed:
 
 ```text
 train.py: train
-├─ vime/ray/placement_group.py       Ray 资源与 worker 初始化
-├─ vime/ray/rollout.py              RolloutManager.generate：rollout 编排
-│  └─ vime/rollout/vllm_rollout.py  样本生成与奖励计算
-└─ vime/ray/actor_group.py          RayTrainGroup.async_train：训练调度
+├─ vime/ray/placement_group.py       Ray resource and worker initialization
+├─ vime/ray/rollout.py              RolloutManager.generate: rollout orchestration
+│  └─ vime/rollout/vllm_rollout.py  Sample generation and reward computation
+└─ vime/ray/actor_group.py          RayTrainGroup.async_train: training dispatch
    └─ vime/backends/torchtitan_utils/actor.py
-      ├─ engine.py                   torchtitan 模型执行
-      └─ loss.py                     RL loss 与 advantage
+      ├─ engine.py                   torchtitan model execution
+      └─ loss.py                     RL losses and advantages
 ```
 
-第一次阅读时，可以把 `vime/utils/arguments.py` 当作配置入口。只有需要修改相关区域时，再深入 `vime/backends/vllm_utils/` 的部署细节和 `vime/backends/torchtitan_utils/update_weight/` 下的权重同步实现。
+On a first pass, treat `vime/utils/arguments.py` as the configuration entry point. The deployment details in `vime/backends/vllm_utils/` and the weight-sync implementations under `vime/backends/torchtitan_utils/update_weight/` can wait until you need to change those areas.
 
-## 开发指南
+## Developer Guide
 
-- **欢迎贡献！** 若有功能建议、性能调优或使用体验反馈，欢迎提交 Issue / PR。
+- **Contributions are welcome!** If you have suggestions for new features, performance tuning, or feedback on user experience, feel free to submit an Issue or PR.
 
-- 使用 [pre-commit](https://pre-commit.com/) 保证提交代码风格：
+- Use [pre-commit](https://pre-commit.com/) to ensure code style consistency for your commits:
 
   ```bash
   apt install pre-commit -y
   pre-commit install
 
-  # 运行 pre-commit 保证代码风格
+  # run pre-commit to ensure code style consistency
   pre-commit run --all-files --show-diff-on-failure --color=always
   ```
 
+- For debugging tips, please refer to the [Debugging Guide](docs/en/developer_guide/debug.md)
 
 ## slime doc
 
-Vime 由 slime 衍生而来。以下上游资源与本仓库文档仍沿用 slime 命名，可作为共享概念（数据生成、定制化、高级主题）的参考；其中与 megatron 相关的内容仅适用于 megatron 后端：
+Vime is derived from slime. The following upstream resources and in-repo guides still use the slime naming and remain the reference for shared concepts (torchtitan integration, customization, advanced topics):
 
-[![Documentation](https://img.shields.io/badge/slime_文档-latest-brightgreen.svg?style=flat)](https://thudm.github.io/slime/)
+[![Documentation](https://img.shields.io/badge/slime_docs-latest-brightgreen.svg?style=flat)](https://thudm.github.io/slime/)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/THUDM/slime)
 
-- 上游仓库：[THUDM/slime](https://github.com/THUDM/slime)
+- Upstream repository: [THUDM/slime](https://github.com/THUDM/slime)
+- English docs in this repo: [docs/en/](docs/en/)
+- Chinese docs in this repo: [docs/zh/](docs/zh/)
+
+## FAQ
+
+For frequently asked questions, please see the [Q&A](docs/en/get_started/qa.md)
+
+## Acknowledgements
+
+Vime builds on ideas and infrastructure from the open-source RL ecosystem. We especially thank the [slime](https://github.com/THUDM/slime) community, whose great work Vime is directly built on. We also thank [SkyRL](https://github.com/NovaSky-AI/SkyRL) and [verl](https://github.com/verl-project/verl), whose excellent work we referenced. Vime is maintained by the vLLM community.
+
+## Citation
+
+```bibtex
+@misc{vime,
+  author       = {Vime Contributors},
+  title        = {Vime: An LLM post-training framework with vLLM for RL Scaling},
+  year         = {2026},
+  howpublished = {\url{https://github.com/vllm-project/vime}},
+  urldate      = {2026-06}
+}
+```

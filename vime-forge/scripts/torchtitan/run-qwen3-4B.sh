@@ -97,7 +97,6 @@ ROLLOUT_ARGS=(
    --rollout-max-response-len ${MAX_RESPONSE_LEN}
    --rollout-max-context-len  ${SEQ_LEN}
 )
-add_when DET on ROLLOUT_ARGS -- --debug.seed 1234 --debug.deterministic
 add_when DUMP_DIR nonempty ROLLOUT_ARGS -- --save-debug-rollout-data "${DUMP_DIR}/{rollout_id}.pt"
 # --load-debug-rollout-data forces debug_train_only: no vLLM, no eval,
 # update_weights becomes a no-op, and the placement group only gets actor cards.
@@ -114,7 +113,6 @@ VLLM_ARGS=(
    #                                misbehaves on NPU, this is the first line to restore.
    # --vllm-data-parallel-size ${VLLM_RANKS_PER_ENGINE}
 )
-add_when DET on VLLM_ARGS -- --vllm-enable-deterministic-inference --rollout-seed 1234
 
 EVAL_ARGS=(
    --eval-interval 20

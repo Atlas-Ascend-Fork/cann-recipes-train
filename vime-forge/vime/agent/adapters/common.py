@@ -710,6 +710,21 @@ def _vllm_sampling_body(sp: dict) -> dict:
     }
     if "temperature" in sp:
         body["temperature"] = sp["temperature"]
+    if sp.get("min_new_tokens") is not None:
+        body["min_tokens"] = sp["min_new_tokens"]
+    if sp.get("repetition_penalty") is not None:
+        body["repetition_penalty"] = sp["repetition_penalty"]
+    for key in (
+        "seed",
+        "min_p",
+        "presence_penalty",
+        "frequency_penalty",
+        "ignore_eos",
+        "logit_bias",
+        "spaces_between_special_tokens",
+    ):
+        if sp.get(key) is not None:
+            body[key] = sp[key]
     if "top_p" in sp:
         body["top_p"] = sp["top_p"]
     tk = sp.get("top_k")
@@ -717,6 +732,8 @@ def _vllm_sampling_body(sp: dict) -> dict:
         body["top_k"] = tk
     if sp.get("stop"):
         body["stop"] = sp["stop"]
+        if sp.get("no_stop_trim") is not None:
+            body["include_stop_str_in_output"] = sp["no_stop_trim"]
     if sp.get("stop_token_ids"):
         body["stop_token_ids"] = sp["stop_token_ids"]
     if sp.get("skip_special_tokens") is not None:

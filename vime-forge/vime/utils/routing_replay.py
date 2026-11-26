@@ -35,7 +35,7 @@ def consume_ordered_topk(module):
 
 
 def register_ordered_topk_capture(module):
-    """Capture one forward's VLLM-compatible top-k order without R3."""
+    """Capture one forward's vLLM-compatible top-k order without R3."""
     if getattr(module, "_vime_ordered_topk_capture_registered", False):
         return
 
@@ -61,7 +61,8 @@ def _compute_topk_for_current_router(
     group_topk=None,
 ):
     # vLLM's biased top-k uses sorted=False while Megatron's uses sorted=True; the expert
-    # set matches, but the order changes BF16 accumulation. Override only the DeepEP
+    # set matches, but the order changes BF16 accumulation (the low-latency-compatible
+    # owner reduction consumes experts in top-k column order). Override only the DeepEP
     # bridge's non-grouped path; other paths keep Megatron semantics.
     if ORDERED_TOPK_CAPTURE_ROUTER is not None and not group_topk:
         return torch.topk(scores, k=topk, dim=1, sorted=False)

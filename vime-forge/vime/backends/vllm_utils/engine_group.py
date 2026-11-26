@@ -195,7 +195,7 @@ class ServerGroup:
         ]
         return init_handles, port_cursors
 
-    def offload(self):
+    def offload(self, level: int = 2):
         """Fire release_memory_occupation on all engines (non-blocking).
 
         Returns a list of Ray ObjectRefs.  Skipped for groups that do not
@@ -203,7 +203,7 @@ class ServerGroup:
         """
         if not self.needs_offload:
             return []
-        return [engine.release_memory_occupation.remote() for engine in self.engines if engine is not None]
+        return [engine.release_memory_occupation.remote(level=level) for engine in self.engines if engine is not None]
 
     def onload(self, tags: list[str] | None = None):
         """Fire resume_memory_occupation on all engines (non-blocking).
@@ -304,7 +304,10 @@ class RolloutServer:
             assert g.num_new_engines == len(dead_indices), "num_new_engines does not match dead_indices length"
             if g.needs_offload and dead_indices:
                 new_engines = [g.all_engines[i] for i in dead_indices]
-                release_handles.extend(engine.release_memory_occupation.remote() for engine in new_engines)
+                release_handles.extend(
+                    engine.release_memory_occupation.remote(level=2 if self.update_weights else 1)
+                    for engine in new_engines
+                )
                 if self.update_weights:
                     updatable_new_engines.extend(new_engines)
                 elif g.model_path:
@@ -328,7 +331,7 @@ class RolloutServer:
         """Release memory occupation across all groups (concurrent)."""
         handles = []
         for g in self.server_groups:
-            handles.extend(g.offload())
+            handles.extend(g.offload(level=2 if self.update_weights else 1))
         return ray.get(handles) if handles else []
 
     def onload(self, tags: list[str] | None = None):
@@ -339,13 +342,7 @@ class RolloutServer:
         return ray.get(handles) if handles else []
 
     def onload_weights(self):
-        """Restore weights for offloaded groups.
-
-        All groups resume from CPU cache via ``resume_memory_occupation``.
-        For updatable servers, weights will be overwritten by
-        ``update_weights`` shortly after.  For non-updatable servers the
-        CPU backup already contains the correct (unchanged) weights.
-        """
+        """Restore weights for offloaded groups."""
         handles = []
         for g in self.server_groups:
             if not g.needs_offload:
