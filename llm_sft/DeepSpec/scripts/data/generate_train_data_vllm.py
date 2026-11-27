@@ -26,6 +26,7 @@ from tqdm import tqdm
 DEFAULT_MODEL = "dsv4"
 DEFAULT_SERVER_ADDRESS = ["127.0.0.1:8900"]
 DEFAULT_CONCURRENCY = 16
+REASONING_FIELDS = ("reasoning", "reasoning_content")
 
 
 def parse_args():
@@ -45,12 +46,33 @@ def parse_args():
     parser.add_argument("--max-tokens", type=int, default=2048)
     parser.add_argument("--num-samples", type=int, default=None)
     parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--is-reasoning-model", action="store_true")
-
-    thinking_group = parser.add_mutually_exclusive_group()
-    thinking_group.add_argument("--enable-thinking", action="store_true")
-    thinking_group.add_argument("--disable-thinking", action="store_true", default=True)
+    parser.add_argument(
+        "--is-reasoning-model",
+        action="store_true",
+        help="Treat the current model as a reasoning model: extract reasoning content "
+            "from the response and write it to the thinking field",
+    )
+    parser.add_argument(
+        "--enable-thinking",
+        action="store_true",
+        help="Enable model thinking/reasoning output",
+    )
     return parser.parse_args()
+
+
+def extract_thinking(message):
+    extra = getattr(message, "model_extra", None)
+    if not isinstance(extra, dict):
+        extra = {}
+
+    for field in REASONING_FIELDS:
+        value = getattr(message, field, None)
+        if value is not None:
+            return value
+        value = extra.get(field)
+        if value is not None:
+            return value
+    return None
 
 
 def validate_args(args):
@@ -99,10 +121,7 @@ def build_query_kwargs(args, messages, max_tokens=None):
         extra_body["top_k"] = args.top_k
     if args.min_p is not None:
         extra_body["min_p"] = args.min_p
-    if args.enable_thinking:
-        extra_body.setdefault("chat_template_kwargs", {})["enable_thinking"] = True
-    if args.disable_thinking:
-        extra_body.setdefault("chat_template_kwargs", {})["enable_thinking"] = False
+    extra_body.setdefault("chat_template_kwargs", {})["enable_thinking"] = args.enable_thinking
     if extra_body:
         query_kwargs["extra_body"] = extra_body
 
@@ -143,12 +162,13 @@ def call_server(args, server_address, sample, max_tokens=None):
         except Exception as exc:
             return error_sample(sample, str(exc))
 
+        choice_message = response.choices[0].message
         response_message = {
             "role": "assistant",
-            "content": response.choices[0].message.content,
+            "content": choice_message.content,
         }
         if args.is_reasoning_model:
-            response_message["thinking"] = response.choices[0].message.reasoning_content
+            response_message["thinking"] = extract_thinking(choice_message)
         regenerated.append(response_message)
 
     sample["conversations"] = regenerated
