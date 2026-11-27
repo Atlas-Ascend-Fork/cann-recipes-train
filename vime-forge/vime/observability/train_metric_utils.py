@@ -173,6 +173,7 @@ def log_rollout_data(
             "global_batch_sizes",
             "num_microbatches",
             "micro_batch_indices",
+            "kl_cov_selected",
             "source_names",
             "local_raw_reward",
         }

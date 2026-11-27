@@ -39,6 +39,8 @@ from vime.utils.misc import load_function
 from vime.utils.ppo_utils import (
     compute_approx_kl,
     compute_entropy_from_logits,
+    compute_kl_cov_loss,
+    compute_kl_cov_penalty,
     compute_policy_loss,
     get_grpo_returns,
 )
@@ -607,8 +609,23 @@ def policy_loss_function(args, logits, batch, tp_group, *, vocab_parallel):
 
     # todo: gspo not yet supported (it needs gspo_kl + full_log_probs here)
     ppo_kl = old - new
-    pg, clipfrac = compute_policy_loss(
-        ppo_kl, adv, args.eps_clip, getattr(args, "eps_clip_high", args.eps_clip))
+    kl_cov_penalty = None
+    if args.use_kl_cov:
+        selected = batch.get("kl_cov_selected")
+        if selected is not None:
+            pg, selected_mask, kl_cov_penalty = compute_kl_cov_penalty(
+                new, old, adv, torch.cat(selected).to(new.device), args.kl_cov_coef
+            )
+        else:
+            pg, selected_mask, kl_cov_penalty = compute_kl_cov_loss(
+                new, old, adv, torch.cat(loss_masks).to(new.device),
+                args.kl_cov_ratio, args.kl_cov_coef,
+            )
+        # Selection uses the original valid tokens, before any custom TIS rejection.
+        kl_cov_selected_ratio = reducer(selected_mask).detach()
+    else:
+        pg, clipfrac = compute_policy_loss(
+            ppo_kl, adv, args.eps_clip, getattr(args, "eps_clip_high", args.eps_clip))
 
     # todo: opsm not yet supported
 
@@ -639,7 +656,7 @@ def policy_loss_function(args, logits, batch, tp_group, *, vocab_parallel):
         def reducer(v):
             return _sum_of_sample_mean(v, response_lengths, modified_masks, denoms)
     pg_loss = reducer(pg)
-    pg_clipfrac = reducer(clipfrac)
+    pg_clipfrac = pg_loss.new_zeros(()) if kl_cov_penalty is not None else reducer(clipfrac)
     ppo_kl_reduced = reducer(ppo_kl)
     entropy_loss = reducer(torch.cat(lp["entropy"]))
     loss = pg_loss - ent_coef * entropy_loss
@@ -677,6 +694,10 @@ def policy_loss_function(args, logits, batch, tp_group, *, vocab_parallel):
         metrics["train_rollout_logprob_abs_diff"] = train_rollout_logprob_abs_diff.detach()
     if getattr(args, "use_kl_loss", False) and batch.get("ref_log_probs") is not None:
         metrics["kl_loss"] = kl_loss.detach()
+    if kl_cov_penalty is not None:
+        metrics["kl_cov_selected_ratio"] = kl_cov_selected_ratio
+        # Report the unweighted penalty; TIS above reweights the full PG loss.
+        metrics["kl_cov"] = reducer(kl_cov_penalty).detach()
 
     # ois / tis / tis_clipfrac / tis_abs (when use_tis or get_mismatch_metrics).
     if tis_extra_metrics:

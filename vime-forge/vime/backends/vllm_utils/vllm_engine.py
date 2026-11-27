@@ -115,6 +115,14 @@ def _build_subprocess_env(server_args_dict: dict[str, Any]) -> dict[str, str]:
         # ROCm: keep HIP visibility in sync with CUDA (no-op on CUDA).
         env["HIP_VISIBLE_DEVICES"] = visible_devices
     env.setdefault("VLLM_SERVER_DEV_MODE", "1")
+    # UniProcExecutor ignores master_port and otherwise probes an ephemeral
+    # port, closes it, then binds TCPStore later. Reuse the coordinator's
+    # distinct port block for each single-rank engine instead.
+    dist_init_addr = server_args_dict.get("_dist_init_addr")
+    if dist_init_addr and server_args_dict.get("nnodes", 1) == 1 and all(
+        server_args_dict.get(key, 1) == 1 for key in ("_tp_size", "_pp_size", "_pcp_size", "_dp_size")
+    ):
+        env["VLLM_PORT"] = dist_init_addr.rsplit(":", 1)[1]
     # V2 model runner needs a vllm newer than 0.23.0. On 0.23.x, vllm's config
     # layer honors an explicit VLLM_USE_V2_MODEL_RUNNER=1 without a version
     # check, while vllm-ascend's worker falls back to the V1 runner locally
@@ -923,6 +931,7 @@ def _compute_server_args(
     kwargs["_pp_size"] = pp
     kwargs["_pcp_size"] = pcp
     kwargs["_dp_size"] = dp
+    kwargs["_dist_init_addr"] = dist_init_addr
     kwargs["_disaggregation_bootstrap_port"] = disaggregation_bootstrap_port
 
     return kwargs, external_engine_need_check_fields

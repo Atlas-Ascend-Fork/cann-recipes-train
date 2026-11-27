@@ -1,11 +1,15 @@
 # Adapt from https://github.com/OpenRLHF/OpenRLHF/blob/10c733694ed9fbb78a0a2ff6a05efc7401584d46/openrlhf/models/utils.py
 # and https://github.com/OpenRLHF/OpenRLHF/blob/10c733694ed9fbb78a0a2ff6a05efc7401584d46/openrlhf/trainer/ppo_utils/experience_maker.py
 
+import bisect
+import logging
 from argparse import Namespace
 
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+
+logger = logging.getLogger(__name__)
 
 
 @torch.compile(dynamic=True)
@@ -146,6 +150,137 @@ def compute_policy_loss(
         pg_losses = clip_pg_losses1
 
     return pg_losses, clipfrac
+
+
+# KL-Cov port: junfeng commits 3f8ebf3a and 6c32d0d3 (verl KL-Cov).
+def compute_kl_cov_penalty(
+    log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    advantages: torch.Tensor,
+    selected_mask: torch.Tensor,
+    kl_cov_coef: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """KL-Cov loss given a precomputed 0/1 selected mask (shared by the
+    batch-level selection path and the per-microbatch fallback).
+
+    Returns (pg_losses, selected, kl_cov_penalty): unclipped ``-A*ratio`` plus
+    ``kl_cov_coef * |log pi - log pi_old|`` on masked tokens; ``selected`` and
+    ``kl_cov_penalty`` are for the kl_cov_selected_ratio / kl_cov metrics.
+    """
+    negative_approx_kl = log_probs - old_log_probs
+    abs_kl = negative_approx_kl.abs()
+    ratio = torch.exp(negative_approx_kl)
+    pg_losses = -advantages * ratio
+    kl_cov_penalty = kl_cov_coef * abs_kl * selected_mask
+    pg_losses = pg_losses + kl_cov_penalty
+    return pg_losses, selected_mask, kl_cov_penalty
+
+
+def compute_kl_cov_loss(
+    log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    advantages: torch.Tensor,
+    loss_masks: torch.Tensor,
+    kl_cov_ratio: float,
+    kl_cov_coef: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """KL-Cov policy loss, per-microbatch FALLBACK selection.
+
+    Prefer the batch-level masks (``compute_kl_cov_selection`` + the
+    ``kl_cov_selected`` batch key): at a 32768-token packing budget with
+    ~20k-token responses a microbatch holds 1-2 GRPO responses, and GRPO
+    assigns ONE advantage per response — a single-response microbatch has
+    centered advantage == 0, every covariance == 0, and top-k resolves ties
+    arbitrarily instead of ranking meaningful covariance. This fallback only
+    behaves correctly when the microbatch pools many responses (verl's
+    256-response mini-batches).
+    """
+    selected = torch.zeros_like(log_probs)
+    valid = loss_masks > 0
+    n_valid = int(valid.sum().item())
+    if n_valid > 0:
+        with torch.no_grad():
+            valid_idx = torch.nonzero(valid, as_tuple=True)[0]
+            valid_adv = advantages[valid]
+            valid_logp = log_probs[valid].detach()
+            covs = (valid_adv - valid_adv.mean()) * (valid_logp - valid_logp.mean())
+            k = min(n_valid, max(1, int(n_valid * kl_cov_ratio)))
+            top_local = torch.topk(covs, k).indices
+            selected[valid_idx[top_local]] = 1.0
+
+    return compute_kl_cov_penalty(log_probs, old_log_probs, advantages, selected, kl_cov_coef)
+
+
+def compute_kl_cov_selection(
+    log_probs: list[torch.Tensor | None] | None,
+    advantages: list[torch.Tensor | None] | None,
+    loss_masks: list[torch.Tensor],
+    kl_cov_ratio: float,
+) -> list[torch.Tensor]:
+    """Batch-level KL-Cov token selection — paper Eq.10 centering over the
+    actor's rollout-data partition, computed once before microbatching.
+    Selection is local to each DP partition; there is no cross-DP top-k.
+    With DP=1 and one optimizer step per rollout this is the whole step batch.
+
+    Ranks tokens by ``(logp - mean) * (A - mean)`` over all valid tokens of the
+    step and marks the top ``kl_cov_ratio`` fraction. Uses the pre-pass
+    log_probs — under ``--keep-old-actor`` these are the old/rollout policy's,
+    i.e. the same reference the penalty measures drift against.
+
+    Returns per-sample 0/1 float masks aligned with (and on the device of)
+    ``loss_masks``. Samples with missing log_probs or advantages, or whose
+    lengths differ from the loss mask, are excluded from selection.
+    """
+    masks = [torch.zeros_like(m, dtype=torch.float32) for m in loss_masks]
+    log_probs = log_probs or []
+    advantages = advantages or []
+    missing = 0
+    device = None
+    valid_slices: list[tuple[int, torch.Tensor]] = []  # (sample i, valid positions)
+    adv_parts: list[torch.Tensor] = []
+    logp_parts: list[torch.Tensor] = []
+    for i, m in enumerate(loss_masks):
+        lp = log_probs[i] if i < len(log_probs) else None
+        adv = advantages[i] if i < len(advantages) else None
+        if lp is None or adv is None:
+            missing += 1
+            continue
+        if lp.numel() != m.numel() or adv.numel() != m.numel():
+            continue
+        sel = m > 0
+        if bool(sel.any()):
+            if device is None:
+                device = adv.device
+            valid_slices.append((i, sel.nonzero(as_tuple=True)[0]))
+            adv_parts.append(adv[sel].to(device=device, dtype=torch.float32))
+            logp_parts.append(lp[sel].detach().to(device=device, dtype=torch.float32))
+    if missing:
+        logger.warning(
+            "KL-Cov selection skipped %d/%d samples with missing log_probs or advantages", missing, len(masks)
+        )
+    if not valid_slices:
+        return masks
+
+    adv_all = torch.cat(adv_parts)
+    logp_all = torch.cat(logp_parts)
+    covs = (adv_all - adv_all.mean()) * (logp_all - logp_all.mean())
+    n = int(covs.numel())
+    k = min(n, max(1, int(n * kl_cov_ratio)))
+    top_positions = torch.topk(covs, k).indices.tolist()
+
+    starts: list[int] = []
+    total = 0
+    for _, idxs in valid_slices:
+        starts.append(total)
+        total += int(idxs.numel())
+    tops_by_sample: dict[int, list[int]] = {}
+    for p in top_positions:
+        s = bisect.bisect_right(starts, p) - 1
+        i, idxs = valid_slices[s]
+        tops_by_sample.setdefault(i, []).append(int(idxs[p - starts[s]]))
+    for i, positions in tops_by_sample.items():
+        masks[i][torch.tensor(positions, device=masks[i].device, dtype=torch.long)] = 1.0
+    return masks
 
 
 @torch.compile(dynamic=True)

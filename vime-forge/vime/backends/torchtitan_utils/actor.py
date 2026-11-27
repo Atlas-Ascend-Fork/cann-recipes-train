@@ -382,6 +382,9 @@ class TorchTitanTrainRayActor(TrainRayActor):
         -> engine.train -> _log_train_metrics -> backup("actor") -> periodic backup("ref") -> log_perf_data.
         teacher / critic values branches are kept as todos.
         """
+        if self.args.use_kl_cov and self.engine.parallel_dims.cp != 1:
+            raise ValueError("KL-Cov currently requires context parallel size 1")
+
         # get_data_iterator / log_* / compute_advantages_and_returns are module-level imports
         # (no circular dependencies); the training step itself runs on self.engine.
 
@@ -470,6 +473,25 @@ class TorchTitanTrainRayActor(TrainRayActor):
 
                 span = ptl.start_perf_span("actor_compute_advantages", self.args)
                 compute_advantages_and_returns(self.args, rollout_data, dp_group)
+
+                # Select once across this actor's DP partition before microbatching.
+                # A single GRPO response has constant advantage, so microbatch-local
+                # covariance can be zero everywhere. Reuse the old-policy pre-pass.
+                if self.args.use_kl_cov and rollout_data.get("log_probs"):
+                    from vime.utils.ppo_utils import compute_kl_cov_selection
+
+                    rollout_data["kl_cov_selected"] = compute_kl_cov_selection(
+                        rollout_data["log_probs"],
+                        rollout_data["advantages"],
+                        rollout_data["loss_masks"],
+                        self.args.kl_cov_ratio,
+                    )
+                    n_sel = sum(int(m.sum().item()) for m in rollout_data["kl_cov_selected"])
+                    n_valid = sum(int((m > 0).sum().item()) for m in rollout_data["loss_masks"])
+                    logger.info(
+                        f"kl_cov batch selection (DP-local): {n_sel}/{n_valid} valid tokens "
+                        f"(ratio={self.args.kl_cov_ratio})"
+                    )
                 ptl.end_perf_span(span)
 
             # Externally injected postprocess hook (agnostic; configured via rollout_data_postprocess_path).

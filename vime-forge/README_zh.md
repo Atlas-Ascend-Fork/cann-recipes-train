@@ -71,7 +71,8 @@ vLLM 社区横向支持许多 LLM post-training 框架，包括（按字母顺�
 
 Agent 工作负载通过 Vime 的定制接口接入标准 rollout / Data Buffer 循环，并不是独立框架：
 
-- [`examples/coding_agent_rl`](examples/coding_agent_rl/README.md)：使用 Claude Code 或 Codex、沙盒工具、测试奖励和 token 精确轨迹片段的端到端 coding-agent RL；
+- [SWE-Gym AgenticRL 训练](docs/agentic-rl/swe-agentic-rl/training.md)：使用 Claude Code 或 Codex 在沙箱中执行工具命令，根据测试结果计算奖励。
+- [Terminal／TMax AgenticRL 训练](docs/agentic-rl/terminal-agentic-rl/training.md)：使用准备好的任务 bundle，在 Harbor 或 AgentENV 沙箱中训练终端智能体。
 
 请参阅 [Agentic RL 训练路线图](docs/zh/get_started/agent.md)和[定制化指南](docs/zh/get_started/customization.md)。Coding-agent 示例内置 E2B 兼容后端；共享的 `vime.agent.sandbox.Sandbox` 协议也可以由 Docker、Modal 或本地虚拟机实现。
 

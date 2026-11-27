@@ -1166,9 +1166,9 @@ async def _qualify_instances(
     instance_ids: set[str] | None = None,
     limit: int | None = None,
 ) -> dict[str, int]:
-    from examples.coding_agent_rl import swe
-    from examples.coding_agent_rl.template_mapping import apply_template_mapping, load_template_mapping
-    from examples.coding_agent_rl.verifier_spec import apply_verifier_spec, load_verifier_specs
+    from examples.swe_agent_rl import swe
+    from examples.swe_agent_rl.template_mapping import apply_template_mapping, load_template_mapping
+    from examples.swe_agent_rl.verifier_spec import apply_verifier_spec, load_verifier_specs
     from vime.utils.types import Sample
 
     paths = _bundle_paths(bundle)

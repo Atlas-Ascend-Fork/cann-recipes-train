@@ -410,15 +410,7 @@ TP 大于 1 时，log_prob 与熵在各 TP rank 的词表分片上计算后归�
 
 ### 6.2 启动脚本
 
-`scripts/torchtitan/` 下的启动脚本把参数分为三层，详见 `scripts/torchtitan/README.md`：
-
-| 文件 | 内容 |
-|---|---|
-| `run-<模型>.sh` | 训练参数，按用途分组后拼成 `train.py` 的命令行；预置配置由其中的 `--module` / `--config` 指定 |
-| `common/default.sh` | 开关（`MODE`、`EVAL_ON` 等）与环境（路径、端口、ray worker 环境变量）的默认值，写作 `${VAR:-默认值}` |
-| `common/local.sh` | 本机路径与实验覆盖，不纳入版本库；可保留多份，用 `--local` 选择 |
-
-启动脚本只接受 `--local`、`--dump-dir`、`--replay-dir` 三个参数；`--` 之后的内容追加到训练命令行末尾，用于临时覆盖训练参数。
+模型启动脚本通过 `--module` 和 `--config` 选择后端预置配置。启动命令、本机配置及参数覆盖顺序见 [TorchTitan 启动器](torchtitan-launcher.md)。
 
 ### 6.3 关键参数
 

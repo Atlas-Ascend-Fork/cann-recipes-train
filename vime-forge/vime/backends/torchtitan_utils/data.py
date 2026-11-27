@@ -348,7 +348,7 @@ def get_batch(
         keys = [
             "tokens", "loss_masks", "total_lengths", "response_lengths",
             "log_probs", "advantages", "rollout_mask_sums", "ref_log_probs",
-            "rollout_log_probs",
+            "rollout_log_probs", "kl_cov_selected",
             "multimodal_train_inputs",
             # Global sample indices name the per-sample quantities the precision guard
             # records.
@@ -508,6 +508,7 @@ def log_rollout_data(
                 "global_batch_sizes",
                 "num_microbatches",
                 "micro_batch_indices",
+                "kl_cov_selected",
             ]:
                 continue
             # Emit (sum, count) so _gather_log_data can do a weighted average across DP ranks.

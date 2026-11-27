@@ -420,6 +420,9 @@ class MegatronTrainRayActor(TrainRayActor):
 
     @ptl.perf_timer("actor_train")
     def train_actor(self, rollout_id: int, rollout_data: RolloutBatch, external_data=None) -> None:
+        if getattr(self.args, "use_kl_cov", False) and mpu.get_context_parallel_world_size() != 1:
+            raise ValueError("KL-Cov currently requires context parallel size 1")
+
         # Create data iterator for log_probs and train.
         data_iterator = get_data_iterator(rollout_data)
         num_microbatches = rollout_data["num_microbatches"]
@@ -500,6 +503,25 @@ class MegatronTrainRayActor(TrainRayActor):
                 # because we may need normalize the whole rollout.
                 span = ptl.start_perf_span("actor_compute_advantages", self.args)
                 compute_advantages_and_returns(self.args, rollout_data)
+
+                # Select once across this actor's DP partition before microbatching.
+                # A single GRPO response has constant advantage, so microbatch-local
+                # covariance can be zero everywhere. Reuse the old-policy pre-pass.
+                if getattr(self.args, "use_kl_cov", False) and rollout_data.get("log_probs"):
+                    from vime.utils.ppo_utils import compute_kl_cov_selection
+
+                    rollout_data["kl_cov_selected"] = compute_kl_cov_selection(
+                        rollout_data["log_probs"],
+                        rollout_data["advantages"],
+                        rollout_data["loss_masks"],
+                        self.args.kl_cov_ratio,
+                    )
+                    n_sel = sum(int(m.sum().item()) for m in rollout_data["kl_cov_selected"])
+                    n_valid = sum(int((m > 0).sum().item()) for m in rollout_data["loss_masks"])
+                    logger.info(
+                        f"kl_cov batch selection (DP-local): {n_sel}/{n_valid} valid tokens "
+                        f"(ratio={self.args.kl_cov_ratio})"
+                    )
                 ptl.end_perf_span(span)
 
             if self.rollout_data_postprocess is not None:

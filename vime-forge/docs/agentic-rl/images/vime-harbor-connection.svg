@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1220" viewBox="0 0 1080 1220" role="img" aria-labelledby="title description">
+  <title id="title">Vime 与 Harbor 的连接关系</title>
+  <desc id="description">NPU 服务器上的 Vime 读取任务 bundle，通过 SSH 控制两台 CPU 服务器上的 Harbor worker，创建沙箱、执行命令并收集结果。沙箱中的 Agent 通过 HTTP 直连或 SSH 反向隧道访问共用的模型适配器，经路由器调用推理引擎并接收回复。适配器将 token 轨迹交给 Vime，TorchTitan 训练后同步推理权重。CPU 上可选的安装包服务向任务沙箱提供 Node 和 Codex 离线包。</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 Z" fill="#303744"/>
+    </marker>
+    <style>
+      text { font-family: 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', sans-serif; fill: #242b35; text-anchor: middle; }
+      .heading { font-size: 32px; font-weight: 600; text-anchor: start; }
+      .name { font-size: 28px; font-weight: 600; }
+      .body { font-size: 24px; fill: #515966; }
+      .label { font-size: 24px; }
+      .node { fill: white; stroke: #303744; stroke-width: 2; }
+      .cpu-node { fill: white; stroke: #537a70; stroke-width: 2; }
+      .line { fill: none; stroke: #303744; stroke-width: 1.8; marker-end: url(#arrow); }
+    </style>
+  </defs>
+  <rect width="1080" height="1220" fill="#fff"/>
+  <rect x="24" y="24" width="1032" height="650" fill="none" stroke="#667bb0" stroke-width="1.5" stroke-dasharray="6 5"/>
+  <text class="heading" x="60" y="77" style="fill:#526590">NPU 服务器 · 模型推理与训练</text>
+  <rect x="24" y="846" width="1032" height="350" fill="none" stroke="#537a70" stroke-width="1.5" stroke-dasharray="6 5"/>
+  <text class="heading" x="100" y="895" style="fill:#3f655b">两台 x86 CPU 服务器 · Harbor 沙箱</text>
+
+  <!-- NPU 内部的数据与模型更新路径。 -->
+  <path class="line" d="M 270 180 V 230"/>
+  <path class="line" d="M 270 330 V 480"/>
+  <rect x="185" y="377" width="170" height="40" fill="white"/>
+  <text class="body" x="270" y="405">轨迹与奖励</text>
+  <path class="line" d="M 650 280 H 440"/>
+  <text class="label" x="545" y="259">token 轨迹</text>
+  <path class="line" d="M 815 330 V 390"/>
+  <path class="line" d="M 815 460 V 540"/>
+  <path class="line" d="M 440 530 H 555 V 595 H 650"/>
+  <text class="label" x="530" y="505">同步模型权重</text>
+
+  <rect class="node" x="100" y="110" width="340" height="70"/>
+  <text class="name" x="270" y="155">任务 bundle</text>
+  <rect class="node" x="100" y="230" width="340" height="100"/>
+  <text class="name" x="270" y="270">Vime</text>
+  <text class="body" x="270" y="307">分配任务、收集轨迹与奖励</text>
+  <rect class="node" style="stroke:#aa6656" x="100" y="480" width="340" height="100"/>
+  <text class="name" x="270" y="520">TorchTitan</text>
+  <text class="body" x="270" y="557">训练更新</text>
+  <rect class="node" x="650" y="230" width="330" height="100"/>
+  <text class="name" x="815" y="271">模型适配器</text>
+  <text class="body" x="815" y="308">两台 CPU 共用</text>
+  <rect class="node" style="stroke:#667bb0" x="650" y="390" width="330" height="70"/>
+  <text class="name" x="815" y="435">vLLM Router</text>
+  <rect class="node" style="stroke:#667bb0" x="650" y="540" width="330" height="110"/>
+  <text class="name" x="815" y="583">推理引擎</text>
+  <text class="body" x="815" y="623">通过路由器共享使用</text>
+
+  <!-- 两条跨机器路径均为双向；各自标注请求和返回内容。 -->
+  <path class="line" d="M 100 280 H 64 V 970 H 100" marker-start="url(#arrow)"/>
+  <text class="label" x="290" y="727">SSH 控制连接</text>
+  <text class="body" x="290" y="765">创建沙箱、执行命令</text>
+  <text class="body" x="290" y="801">返回命令输出与评测结果</text>
+  <path class="line" d="M 980 990 H 1016 V 280 H 980" marker-start="url(#arrow)"/>
+  <text class="label" x="785" y="727">HTTP 模型回调</text>
+  <text class="body" x="785" y="765">模型请求与回复</text>
+  <text class="body" x="785" y="801">直连或经 SSH 反向隧道</text>
+
+  <!-- CPU 上的生命周期管理和可选安装包分发。 -->
+  <path class="line" d="M 440 970 H 650"/>
+  <text class="label" x="545" y="930">Docker</text>
+  <text class="body" x="545" y="1030">创建与释放</text>
+  <path class="line" d="M 440 1120 H 500 V 1140 H 815 V 1060"/>
+  <text class="body" x="685" y="1180">Node / Codex 离线包</text>
+  <rect class="cpu-node" x="100" y="930" width="340" height="80"/>
+  <text class="name" x="270" y="980">Harbor worker</text>
+  <rect class="cpu-node" x="650" y="930" width="330" height="130"/>
+  <text class="name" x="815" y="969">任务沙箱</text>
+  <text class="body" x="815" y="1006">Codex 与工具</text>
+  <text class="body" x="815" y="1041">任务环境与测试</text>
+  <rect class="cpu-node" x="100" y="1080" width="340" height="80"/>
+  <text class="name" x="270" y="1130">安装包服务（可选）</text>
+</svg>

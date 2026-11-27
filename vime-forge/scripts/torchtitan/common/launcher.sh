@@ -33,6 +33,8 @@ cli_defaults() {
     ROLLOUT_FN=''
     IS_ASYNC=0
 
+    # Task arguments: empty for a single-turn run, filled in by a task entry.
+    AGENTIC_ARGS=()
     EXTRA_ARGS=()
 }
 
@@ -123,8 +125,6 @@ preflight_cli() {
         die "VIME_RAY_TEMP_DIR is too long (${#VIME_RAY_TEMP_DIR} chars): ray's AF_UNIX socket path caps at 107 bytes. Shorten it, or use a shallower VIME_WORKSPACE."
 
     [[ -z "$REPLAY_DIR" || -d "$REPLAY_DIR" ]] || die "--replay-dir does not exist: ${REPLAY_DIR}"
-    # --dump-dir writes one file per rollout into it, so it has to exist.
-    [[ -z "$DUMP_DIR" ]] || mkdir -p "$DUMP_DIR"
 }
 
 # Relations that can only be checked once the model script has run.
@@ -497,6 +497,15 @@ configure_run() {
         LOCAL_NOTE="no local.sh; built-in defaults throughout"
     fi
 
+    # Resolve the task after loading local.sh so it can override the entry's default.
+    export VIME_RL_TASK="${VIME_RL_TASK:-singleturn}"
+    if declare -F configure_task_options >/dev/null; then
+        configure_task_options "$@"
+        set -- "${TASK_LAUNCH_ARGS[@]}"
+    elif [[ "$VIME_RL_TASK" != singleturn ]]; then
+        die "VIME_RL_TASK=${VIME_RL_TASK} needs its AgenticRL entry under examples/; this model entry runs single-turn."
+    fi
+
     cli_defaults
     source "${LAUNCHER_DIR}/default.sh"
     VIME_LAUNCHER_RUN_ID="${LAUNCHER_SCRIPT}:${VIME_RAY_TEMP_DIR}"
@@ -547,6 +556,7 @@ start_run() {
     rt_env_add "${RT_ENV[@]}"
 
     preflight_params
+    if declare -F prepare_agentic_run >/dev/null; then prepare_agentic_run; fi
 
     configure_colocation
     rt_env_add "TENSORBOARD_DIR=${ARCHIVE_DIR}" \
@@ -599,6 +609,7 @@ start_run() {
         fi
     fi
 
+    [[ -z "$DUMP_DIR" ]] || mkdir -p "$DUMP_DIR"
     enable_batch_invariant  # update TRAIN_ARGS
     TRAIN_ARGS+=(
         --train-env-vars "{\"TORCH_EXTENSIONS_DIR\":\"${TORCHTITAN_TORCH_EXTENSIONS_DIR}\"}"
@@ -606,7 +617,7 @@ start_run() {
     # Append user overrides before merging NZ: --vllm-additional-config is
     # last-wins, so a JSON in OVERRIDE_ARGS/EXTRA_ARGS would otherwise replace
     # the injected weight_nz_mode=0.
-    TRAIN_ARGS+=("${OVERRIDE_ARGS[@]}" "${EXTRA_ARGS[@]}")
+    TRAIN_ARGS+=("${AGENTIC_ARGS[@]}" "${OVERRIDE_ARGS[@]}" "${EXTRA_ARGS[@]}")
     merge_weight_nz_mode  # update TRAIN_ARGS (now includes overrides/extras)
 
     TRAIN_CMD=("${TRAIN_PYTHON}" "${REPO_ROOT}/${TRAIN_ENTRY}" --train-backend torchtitan "${COLOCATE_ARGS[@]}"

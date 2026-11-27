@@ -16,6 +16,8 @@ from vime.utils.ppo_utils import (
     compute_cispo_loss,
     compute_gspo_kl,
     compute_opsm_mask,
+    compute_kl_cov_loss,
+    compute_kl_cov_penalty,
     compute_policy_loss,
     get_advantages_and_returns_batch,
     get_grpo_returns,
@@ -1037,7 +1039,23 @@ def policy_loss_function(
         log_probs = torch.cat(log_probs, dim=0)
         ppo_kl = old_log_probs - log_probs
 
-    if args.advantage_estimator == "cispo":
+    kl_cov_penalty = None
+    if getattr(args, "use_kl_cov", False):
+        selected = batch.get("kl_cov_selected")
+        if selected is not None:
+            pg_loss, selected_mask, kl_cov_penalty = compute_kl_cov_penalty(
+                log_probs, old_log_probs, advantages,
+                torch.cat(selected).to(log_probs.device), args.kl_cov_coef,
+            )
+        else:
+            pg_loss, selected_mask, kl_cov_penalty = compute_kl_cov_loss(
+                log_probs, old_log_probs, advantages,
+                torch.cat(batch["loss_masks"]).to(log_probs.device),
+                args.kl_cov_ratio, args.kl_cov_coef,
+            )
+        # Selection uses the original valid tokens, before any custom TIS rejection.
+        kl_cov_selected_ratio = sum_of_sample_mean(selected_mask).detach()
+    elif args.advantage_estimator == "cispo":
         pg_loss, pg_clipfrac = compute_cispo_loss(ppo_kl, log_probs, advantages, args.eps_clip, args.eps_clip_high)
     else:
         pg_loss, pg_clipfrac = compute_policy_loss(
@@ -1108,7 +1126,7 @@ def policy_loss_function(
         pg_loss_reducer = sum_of_sample_mean
 
     pg_loss = pg_loss_reducer(pg_loss)
-    pg_clipfrac = sum_of_sample_mean(pg_clipfrac)
+    pg_clipfrac = pg_loss.new_zeros(()) if kl_cov_penalty is not None else sum_of_sample_mean(pg_clipfrac)
     ppo_kl = sum_of_sample_mean(ppo_kl)
 
     # entropy loss
@@ -1157,6 +1175,9 @@ def policy_loss_function(
 
     if args.use_kl_loss:
         reported_loss["kl_loss"] = kl_loss.clone().detach()
+    if kl_cov_penalty is not None:
+        reported_loss["kl_cov_selected_ratio"] = kl_cov_selected_ratio
+        reported_loss["kl_cov"] = sum_of_sample_mean(kl_cov_penalty).clone().detach()
 
     if args.get_mismatch_metrics or args.use_tis:
         # Aggregate mismatch/TIS/RS related metrics with the *pre-RS* masks.

@@ -47,8 +47,8 @@ def load_checkpoint_model_type(checkpoint: str) -> str | None:
 
 
 def uses_qwen3_apply_patch_policy(model_type: str | None) -> bool:
-    """Select the shared JSON patch contract for dense and MoE Qwen3 checkpoints."""
-    return model_type in {"qwen3", "qwen3_moe"}
+    """Select the shared JSON patch contract for Qwen3 and dense Qwen3.5 checkpoints."""
+    return model_type in {"qwen3", "qwen3_moe", "qwen3_5"}
 
 
 def uses_single_system_message_policy(model_type: str | None) -> bool:

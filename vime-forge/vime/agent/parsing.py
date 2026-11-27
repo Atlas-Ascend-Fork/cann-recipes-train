@@ -6,10 +6,32 @@ import dataclasses
 import json
 import logging
 import re
+import threading
+from collections import OrderedDict
 from typing import Any
 
 
 logger = logging.getLogger(__name__)
+
+# Non-streaming parsers reset state per extraction. Keep the cache thread-local
+# so independent adapter event loops never share mutable parser state.
+_PARSER_LOCAL = threading.local()
+
+
+def _cached_parser(key: tuple, tokenizer, build):
+    cache = getattr(_PARSER_LOCAL, "cache", None)
+    if cache is None:
+        cache = _PARSER_LOCAL.cache = OrderedDict()
+    key = (id(tokenizer), *key)
+    hit = cache.get(key)
+    if hit is not None and hit[0] is tokenizer:
+        cache.move_to_end(key)
+        return hit[1]
+    parser = build()
+    cache[key] = (tokenizer, parser)
+    if len(cache) > 32:
+        cache.popitem(last=False)
+    return parser
 
 
 @dataclasses.dataclass(frozen=True)
@@ -41,7 +63,11 @@ def parse_model_output(
         from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
         from vllm.reasoning import ReasoningParserManager
 
-        parser = ReasoningParserManager.get_reasoning_parser(reasoning_parser_name)(tokenizer)
+        parser = _cached_parser(
+            ("reasoning", reasoning_parser_name),
+            tokenizer,
+            lambda: ReasoningParserManager.get_reasoning_parser(reasoning_parser_name)(tokenizer),
+        )
         r, b = parser.extract_reasoning(raw_output, ChatCompletionRequest(messages=[]))
         reasoning, body_text = r or "", b or ""
         if not reasoning and "</think>" in body_text:
@@ -70,7 +96,12 @@ def parse_tool_uses(
         from vllm.tool_parsers import ToolParserManager
 
         request = ChatCompletionRequest(messages=[], tools=tools_schema)
-        parser = ToolParserManager.get_tool_parser(tool_parser_name)(tokenizer, tools=request.tools)
+        tools_sig = json.dumps(tools_schema, sort_keys=True, default=str)
+        parser = _cached_parser(
+            ("tool", tool_parser_name, tools_sig),
+            tokenizer,
+            lambda: ToolParserManager.get_tool_parser(tool_parser_name)(tokenizer, tools=request.tools),
+        )
         info = None
         try:
             info = parser.extract_tool_calls(body_text, request)

@@ -1,3 +1,17 @@
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """SWE task layer: dataset parsing, workspace prep, diff capture, fresh-sandbox eval.
 
 One module, two grading protocols selected per-call (never an import-time side
@@ -28,9 +42,9 @@ import asyncio
 import json
 import logging
 import os
+import shlex
 import sys
 import tempfile
-from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,9 +52,12 @@ from typing import Any
 
 from vime.agent import sandbox as agent_sandbox
 from vime.agent.adapters.common import flatten_content
-from vime.agent.sandbox import E2BSandbox, Sandbox, exec_and_wait
-from vime.observability.trace_utils import trace_event, trace_span
+from vime.agent.config import bundle_path, rl_value
+from vime.agent.sandbox import Sandbox, exec_and_wait
+from vime.observability.trace_utils import TraceHandle
 from vime.utils.types import Sample
+
+from .sandbox import create_sandbox
 
 try:
     from swebench.harness.grading import get_eval_report  # type: ignore
@@ -79,8 +96,8 @@ _PRE = "/workspace/__cagent_pre__.sh"
 _F2P = "/workspace/__cagent_f2p__.py"
 _SWEPRO_DIR = "/workspace/swepro_eval"
 
-SWE_PROMPT = os.environ.get(
-    "SWE_CC_PROMPT",
+SWE_PROMPT = rl_value(
+    "swegym", "PROMPT",
     "Read PROBLEM_STATEMENT.md in the current directory and resolve the issue. "
     "Edit source files only (do NOT touch tests). After editing, run the relevant "
     "tests to verify your fix passes. Do NOT modify PROBLEM_STATEMENT.md and do "
@@ -212,7 +229,7 @@ def _resolve_verifier_spec(md: dict) -> VerifierSpec | None:
         if not isinstance(spec, VerifierSpec):
             raise ValueError("invalid_verifier_spec")
         return spec
-    if md.get("verifier_spec_id") or os.environ.get("SWE_VERIFIER_SPEC_MAP", "").strip():
+    if md.get("verifier_spec_id") or (bundle_path("swegym", "verifier") or "").strip():
         raise ValueError("missing_verifier_spec")
     return None
 
@@ -277,7 +294,7 @@ async def apply_before_repo_set_cmd(sb: Sandbox, workdir: str, swepro: dict) -> 
     before = swepro.get("before_repo_set_cmd")
     if not before:
         return
-    payload = f"set -e\ncd {workdir}\n{before}\n"
+    payload = f"set -e\ncd {shlex.quote(workdir)}\n{before}\n"
     await sb.exec(
         "mkdir -p /workspace/swepro_setup && chown agent:agent /workspace/swepro_setup", user="root", check=True
     )
@@ -295,14 +312,19 @@ async def apply_pre_commands(sb: Sandbox, workdir: str, pre: list[str] | str) ->
     else:
         body = "\n".join(c for c in (pre or []) if c)
     await sb.write_file(_PRE, "set -e\n" + body, user="agent")
-    await sb.exec(f"chmod 755 {_PRE} && cd {workdir} && bash {_PRE}", user="agent", check=False, timeout=600)
+    await sb.exec(
+        f"chmod 755 {_PRE} && cd {shlex.quote(workdir)} && bash {_PRE}", user="agent", check=False, timeout=600
+    )
 
 
 # ---------------------------------------------------------------------------
 # Diff capture (agent sandbox, after harness.run)
 # ---------------------------------------------------------------------------
 async def git_diff(sb: Sandbox, workdir: str) -> str:
-    cmd = f"cd {workdir} && git add -N . && git diff -- . ':(exclude)PROBLEM_STATEMENT.md' ':(exclude).harness/'"
+    cmd = (
+        f"cd {shlex.quote(workdir)} && git add -N . && "
+        "git diff -- . ':(exclude)PROBLEM_STATEMENT.md' ':(exclude).harness/'"
+    )
     _, out, _ = await sb.exec(cmd, user="agent", timeout=120)
     return out
 
@@ -310,47 +332,21 @@ async def git_diff(sb: Sandbox, workdir: str) -> str:
 # ---------------------------------------------------------------------------
 # Eval dispatch (fresh sandbox, apply diff, run dataset tests)
 # ---------------------------------------------------------------------------
-@asynccontextmanager
-async def _evaluation_sandbox(image: str, trace):
-    sandbox = E2BSandbox(image, observation_role="verifier", trace=trace)
-    with trace_span(trace or [], "evaluation_sandbox_create", record_error=False):
-        evaluator = await sandbox.__aenter__()
-    try:
-        yield evaluator
-    finally:
-        with trace_span(trace or [], "evaluation_sandbox_cleanup", record_error=False):
-            await sandbox.__aexit__(*sys.exc_info())
-
-
-async def run_evaluation(md: dict, *, diff_text: str, timeout_sec: int, trace=None) -> EvalResult:
-    """Uniform entry point: dispatch to the protocol's grader.
-
-    No-test-cheating guarantee (both grading protocols): the eval sandbox is built from
-    the same image but starts CLEAN, so only the model-produced diff affects
-    reward.
-    """
+async def run_evaluation(
+    md: dict, *, diff_text: str, timeout_sec: int, trace: TraceHandle | None = None
+) -> EvalResult:
+    """Grade the model patch in a fresh sandbox using the task's evaluation protocol."""
     if md.get("protocol") == PROTOCOL_SWEBENCH:
-        result = await _grade_swebench(md, diff_text, timeout_sec, trace=trace)
-    else:
-        result = await _grade_scaleswe(md, diff_text, timeout_sec, trace=trace)
-    if trace is not None and result.report is not None:
-        try:
-            tests = result.report.get("tests_status") or {}
-            for bucket in ("FAIL_TO_PASS", "PASS_TO_PASS"):
-                _ratio(tests.get(bucket, {}))
-        except Exception as exc:
-            trace_event(
-                trace,
-                "agentic.verifier_diagnostic_error",
-                attrs={"error_type": type(exc).__name__},
-            )
-    return result
+        return await _grade_swebench(md, diff_text, timeout_sec, trace=trace)
+    return await _grade_scaleswe(md, diff_text, timeout_sec, trace=trace)
 
 
 # ---------------------------------------------------------------------------
 # scaleswe grader
 # ---------------------------------------------------------------------------
-async def _grade_scaleswe(md: dict, diff_text: str, timeout_sec: int, *, trace=None) -> EvalResult:
+async def _grade_scaleswe(
+    md: dict, diff_text: str, timeout_sec: int, *, trace: TraceHandle | None = None
+) -> EvalResult:
     """Three mutually-exclusive grading paths, in priority order: swepro test
     harness, a shell ``eval_cmd``, or a self-contained ``f2p_script`` pytest
     file. All resolve to "exit 0 == solved", reward is 1.0 iff solved."""
@@ -366,26 +362,24 @@ async def _grade_scaleswe(md: dict, diff_text: str, timeout_sec: int, *, trace=N
         logger.warning("[swe.scaleswe] no swepro/eval_cmd/f2p_script; reward=0")
         return EvalResult(0.0, True, "configuration_error", reason="missing_scaleswe_grader")
 
-    async with _evaluation_sandbox(image, trace) as ev:
-        with trace_span(trace or [], "evaluation_prepare", record_error=False):
-            await agent_sandbox.ensure_agent_user(ev, workdir)
-            if swepro:
-                await _setup_swepro_assets(ev, swepro)
-                await apply_before_repo_set_cmd(ev, workdir, swepro)
-            if pre_commands:
-                await apply_pre_commands(ev, workdir, pre_commands)
+    async with create_sandbox(image, trace=trace, observation_role="verifier") as ev:
+        await agent_sandbox.ensure_agent_user(ev, workdir)
+        if swepro:
+            await _setup_swepro_assets(ev, swepro)
+            await apply_before_repo_set_cmd(ev, workdir, swepro)
+        if pre_commands:
+            await apply_pre_commands(ev, workdir, pre_commands)
 
-            applied = await _apply_diff(ev, workdir, diff_text)
-            if not applied:
-                return EvalResult(0.0, False, "invalid_patch", reason="model_patch_apply_failed")
+        applied = await _apply_diff(ev, workdir, diff_text)
+        if not applied:
+            return EvalResult(0.0, False, "invalid_patch", reason="model_patch_apply_failed")
 
-        with trace_span(trace or [], "evaluation_tests", record_error=False):
-            if swepro:
-                r = await _run_swepro(ev, workdir, swepro, timeout_sec)
-            elif eval_cmd:
-                r = await _run_eval_cmd(ev, workdir, eval_cmd, timeout_sec)
-            else:
-                r = await _run_f2p_script(ev, workdir, f2p_script, timeout_sec)
+        if swepro:
+            r = await _run_swepro(ev, workdir, swepro, timeout_sec)
+        elif eval_cmd:
+            r = await _run_eval_cmd(ev, workdir, eval_cmd, timeout_sec)
+        else:
+            r = await _run_f2p_script(ev, workdir, f2p_script, timeout_sec)
         return EvalResult(r, True, "resolved" if r == 1.0 else "unresolved")
 
 
@@ -411,7 +405,7 @@ async def _apply_diff(ev: Sandbox, workdir: str, diff_text: str) -> bool:
             f"patch -p1 --no-backup-if-mismatch < {_PATCH}",
         )
     )
-    ec, _, _ = await ev.exec(f"cd {workdir} && ({ladder})", user="agent", check=False, timeout=120)
+    ec, _, _ = await ev.exec(f"cd {shlex.quote(workdir)} && ({ladder})", user="agent", check=False, timeout=120)
     return ec == 0
 
 
@@ -421,7 +415,8 @@ async def _run_swepro(ev: Sandbox, workdir: str, swepro: dict, timeout: int) -> 
     stderr_f = f"{_SWEPRO_DIR}/stderr.log"
     result_f = f"{_SWEPRO_DIR}/result.json"
     await ev.exec(
-        f"cd {workdir} && bash {_SWEPRO_DIR}/run_script.sh {json.dumps(test_arg)} > {stdout_f} 2> {stderr_f} || true",
+        f"cd {shlex.quote(workdir)} && bash {_SWEPRO_DIR}/run_script.sh {shlex.quote(test_arg)} "
+        f"> {stdout_f} 2> {stderr_f} || true",
         user="agent",
         check=False,
         timeout=timeout,
@@ -441,7 +436,7 @@ async def _run_swepro(ev: Sandbox, workdir: str, swepro: dict, timeout: int) -> 
 
 
 async def _run_eval_cmd(ev: Sandbox, workdir: str, cmd: str, timeout: int) -> float:
-    ec, _, _ = await ev.exec(f"cd {workdir} && {cmd}", user="agent", check=False, timeout=timeout)
+    ec, _, _ = await ev.exec(f"cd {shlex.quote(workdir)} && {cmd}", user="agent", check=False, timeout=timeout)
     return 1.0 if ec == 0 else 0.0
 
 
@@ -450,7 +445,7 @@ async def _run_f2p_script(ev: Sandbox, workdir: str, script: str, timeout: int) 
     # `sys.exit(pytest.main([...]))`; write it verbatim (no shell quoting) and
     # let python's exit code carry the pass/fail signal.
     await ev.write_file(_F2P, script, user="agent")
-    ec, _, _ = await ev.exec(f"cd {workdir} && python {_F2P}", user="agent", check=False, timeout=timeout)
+    ec, _, _ = await ev.exec(f"cd {shlex.quote(workdir)} && python {_F2P}", user="agent", check=False, timeout=timeout)
     return 1.0 if ec == 0 else 0.0
 
 
@@ -468,8 +463,9 @@ async def _apply_model_patch(ev: Sandbox, workdir: str) -> bool:
     (or empty). Empty patch is a no-op success -- eval then scores it 0 on its
     own (no source change -> tests still fail)."""
     ladder = " || ".join(f"{cmd} {_PATCH}" for cmd in _GIT_APPLY_CMDS)
+    quoted_workdir = shlex.quote(workdir)
     cmd = (
-        f"cd {workdir} && git config --global --add safe.directory {workdir} "
+        f"cd {quoted_workdir} && git config --global --add safe.directory {quoted_workdir} "
         f"&& if [ -s {_PATCH} ]; then {ladder}; fi"
     )
     ec, _, _ = await ev.exec(cmd, user="root", check=False, timeout=120)
@@ -497,7 +493,7 @@ def _build_test_spec(spec: VerifierSpec | dict):
 async def _apply_test_patch(ev: Sandbox, workdir: str) -> bool:
     """Apply the authoritative hidden tests; a conflict is a model-patch failure."""
     ec, _, _ = await ev.exec(
-        f"cd {workdir} && git apply --verbose {_TEST_PATCH}",
+        f"cd {shlex.quote(workdir)} && git apply --verbose {_TEST_PATCH}",
         user="root",
         check=False,
         timeout=120,
@@ -583,92 +579,39 @@ def _log_swebench_result(instance_id: str, exit_code, info: dict, log: str) -> N
     )
 
 
-async def _grade_swebench(md: dict, diff_text: str, timeout_sec: int, *, trace=None) -> EvalResult:
-    """reward=1.0 iff sweb's get_eval_report declares the instance ``resolved``."""
+def _swebench_import_error(spec: VerifierSpec | None) -> Exception | None:
+    if spec is None:
+        return _SWEBENCH_IMPORT_ERROR
+    if spec.evaluator == "swegym":
+        return _SWEGYM_IMPORT_ERROR
+    return _SWEBENCH_VERIFIER_IMPORT_ERROR
+
+
+async def _prepare_swebench_patches(
+    ev: Sandbox, md: dict, diff_text: str, eval_sh: str, spec: VerifierSpec | None
+) -> EvalResult | None:
     instance_id = md["instance_id"]
-    try:
-        spec = _resolve_verifier_spec(md)
-    except ValueError as exc:
-        return EvalResult(
-            0.0,
-            True,
-            "infra_error",
-            infra_failure=True,
-            reason=str(exc),
-        )
+    verifier_owns_tests = spec is not None and spec.test_patch_owner == "verifier"
+    writes = [
+        ev.write_file(_PATCH, diff_text or "", user="root"),
+        ev.write_file(_EVAL_SCRIPT, eval_sh, user="root"),
+    ]
+    if verifier_owns_tests:
+        writes.append(ev.write_file(_TEST_PATCH, spec.test_patch, user="root"))
+    await asyncio.gather(*writes)
 
-    evaluator = spec.evaluator if spec is not None else "swebench"
-    if evaluator == "swegym":
-        import_error = _SWEGYM_IMPORT_ERROR
-    elif spec is not None:
-        import_error = _SWEBENCH_VERIFIER_IMPORT_ERROR
-    else:
-        import_error = _SWEBENCH_IMPORT_ERROR
-    if import_error is not None:
-        logger.error(
-            "[swe.swebench] %s: %s evaluator import failed: %r; reward=0",
-            instance_id,
-            evaluator,
-            import_error,
-        )
-        return EvalResult(
-            0.0,
-            True,
-            "infra_error",
-            infra_failure=True,
-            reason=f"{evaluator}_import_failed:{type(import_error).__name__}",
-        )
+    if not await _apply_model_patch(ev, md["workdir"]):
+        logger.warning("[swe.swebench] %s: model patch failed to apply; reward=0", instance_id)
+        return EvalResult(0.0, False, "invalid_patch", reason="model_patch_apply_failed")
+    if verifier_owns_tests and not await _apply_test_patch(ev, md["workdir"]):
+        logger.warning("[swe.swebench] %s: hidden test patch failed to apply; reward=0", instance_id)
+        return EvalResult(0.0, False, "invalid_patch", reason="test_patch_conflict")
+    return None
 
-    try:
-        ts = _build_test_spec(spec if spec is not None else md["grading"]["sweb_instance"])
-        eval_sh = ts.eval_script
-    except Exception as e:
-        logger.warning("[swe.swebench] %s: VerifierSpec/TestSpec failed: %s", instance_id, e)
-        return EvalResult(
-            0.0,
-            True,
-            "infra_error",
-            infra_failure=True,
-            reason=f"make_test_spec_failed:{type(e).__name__}",
-        )
 
-    image = md["image"]
-    if not image:
-        logger.warning("[swe.swebench] %s: missing template selector", instance_id)
-        return EvalResult(0.0, True, "infra_error", infra_failure=True, reason="missing_template")
-
-    async with _evaluation_sandbox(image, trace) as ev:
-        with trace_span(trace or [], "evaluation_prepare", record_error=False):
-            writes = [
-                ev.write_file(_PATCH, diff_text or "", user="root"),
-                ev.write_file(_EVAL_SCRIPT, eval_sh, user="root"),
-            ]
-            if spec is not None and spec.test_patch_owner == "verifier":
-                writes.append(ev.write_file(_TEST_PATCH, spec.test_patch, user="root"))
-            await asyncio.gather(*writes)
-            if not await _apply_model_patch(ev, md["workdir"]):
-                logger.warning("[swe.swebench] %s: model patch failed to apply; reward=0", instance_id)
-                return EvalResult(0.0, False, "invalid_patch", reason="model_patch_apply_failed")
-            if (
-                spec is not None
-                and spec.test_patch_owner == "verifier"
-                and not await _apply_test_patch(ev, md["workdir"])
-            ):
-                logger.warning(
-                    "[swe.swebench] %s: hidden test patch failed to apply; reward=0",
-                    instance_id,
-                )
-                return EvalResult(0.0, False, "invalid_patch", reason="test_patch_conflict")
-        with trace_span(trace or [], "evaluation_tests", record_error=False):
-            exit_code, log = await exec_and_wait(
-                ev,
-                cmd=f"bash {_EVAL_SCRIPT}",
-                user="root",
-                time_budget_sec=min(timeout_sec, spec.timeout_sec) if spec is not None else timeout_sec,
-                tag="eval",
-                want_output=True,
-            )
-
+def _swebench_result_from_log(
+    ts, instance_id: str, diff_text: str, exit_code: int, log: str, spec: VerifierSpec | None
+) -> EvalResult:
     if exit_code < 0:
         return EvalResult(0.0, True, "infra_error", infra_failure=True, reason="verifier_timeout")
 
@@ -691,19 +634,11 @@ async def _grade_swebench(md: dict, diff_text: str, timeout_sec: int, *, trace=N
 
     info = report.get(instance_id, {})
     _log_swebench_result(instance_id, exit_code, info, log)
-    if not info.get("patch_successfully_applied"):
+    applied = bool(info.get("patch_successfully_applied"))
+    if not applied or info.get("infra_failure"):
         return EvalResult(
             0.0,
-            False,
-            "infra_error",
-            infra_failure=True,
-            reason=info.get("infra_failure_reason") or "unparseable_test_output",
-            report=info,
-        )
-    if info.get("infra_failure"):
-        return EvalResult(
-            0.0,
-            bool(info.get("patch_successfully_applied")),
+            applied,
             "infra_error",
             infra_failure=True,
             reason=info.get("infra_failure_reason") or "unparseable_test_output",
@@ -712,7 +647,58 @@ async def _grade_swebench(md: dict, diff_text: str, timeout_sec: int, *, trace=N
     resolved = bool(info.get("resolved"))
     return EvalResult(
         1.0 if resolved else 0.0,
-        bool(info.get("patch_successfully_applied")),
+        applied,
         "resolved" if resolved else "unresolved",
         report=info,
     )
+
+
+async def _grade_swebench(
+    md: dict, diff_text: str, timeout_sec: int, *, trace: TraceHandle | None = None
+) -> EvalResult:
+    """reward=1.0 iff sweb's get_eval_report declares the instance ``resolved``."""
+    instance_id = md["instance_id"]
+    try:
+        spec = _resolve_verifier_spec(md)
+    except ValueError as exc:
+        return EvalResult(0.0, True, "infra_error", infra_failure=True, reason=str(exc))
+
+    import_error = _swebench_import_error(spec)
+    if import_error is not None:
+        evaluator = spec.evaluator if spec is not None else "swebench"
+        logger.error(
+            "[swe.swebench] %s: %s evaluator import failed: %r; reward=0",
+            instance_id,
+            evaluator,
+            import_error,
+        )
+        reason = f"{evaluator}_import_failed:{type(import_error).__name__}"
+        return EvalResult(0.0, True, "infra_error", infra_failure=True, reason=reason)
+
+    try:
+        ts = _build_test_spec(spec if spec is not None else md["grading"]["sweb_instance"])
+        eval_sh = ts.eval_script
+    except Exception as e:
+        logger.warning("[swe.swebench] %s: VerifierSpec/TestSpec failed: %s", instance_id, e)
+        reason = f"make_test_spec_failed:{type(e).__name__}"
+        return EvalResult(0.0, True, "infra_error", infra_failure=True, reason=reason)
+
+    image = md["image"]
+    if not image:
+        logger.warning("[swe.swebench] %s: missing template selector", instance_id)
+        return EvalResult(0.0, True, "infra_error", infra_failure=True, reason="missing_template")
+
+    async with create_sandbox(image, trace=trace, observation_role="verifier") as ev:
+        patch_error = await _prepare_swebench_patches(ev, md, diff_text, eval_sh, spec)
+        if patch_error is not None:
+            return patch_error
+        exit_code, log = await exec_and_wait(
+            ev,
+            cmd=f"bash {_EVAL_SCRIPT}",
+            user="root",
+            time_budget_sec=min(timeout_sec, spec.timeout_sec) if spec is not None else timeout_sec,
+            tag="eval",
+            want_output=True,
+        )
+
+    return _swebench_result_from_log(ts, instance_id, diff_text, exit_code, log, spec)

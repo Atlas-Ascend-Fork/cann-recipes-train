@@ -2,6 +2,7 @@ import argparse
 import copy
 import json
 import logging
+import math
 import os
 from typing import Any
 
@@ -1013,6 +1014,31 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help="Interval (in rollout steps) to update ref model from actor. If None, ref model is not updated.",
             )
+            parser.add_argument(
+                "--use-kl-cov",
+                action="store_true",
+                default=False,
+                help=(
+                    "Use unclipped policy loss with a KL-Cov penalty on high-covariance tokens. "
+                    "Automatically enables --use-tis; incompatible with --use-rollout-logprobs. "
+                    "Requires CP=1; ignores PPO clipping thresholds."
+                ),
+            )
+            parser.add_argument(
+                "--kl-cov-ratio",
+                type=float,
+                default=2e-4,
+                help=(
+                    "Fraction of valid tokens that receive the KL-Cov penalty (verl policy_loss.kl_cov_ratio). "
+                    "Paper: 2e-3 for Qwen2.5-7B, 2e-4 for Qwen2.5-32B; larger models need sparser selection."
+                ),
+            )
+            parser.add_argument(
+                "--kl-cov-coef",
+                type=float,
+                default=1.0,
+                help="KL-Cov penalty coefficient beta (verl ppo_kl_coef).",
+            )
             parser.add_argument("--entropy-coef", type=float, default=0.0, help="Entropy loss coef")
             parser.add_argument("--gamma", type=float, default=1.0, help="PPO GAE gamma")
             parser.add_argument("--lambd", type=float, default=1.0, help="PPO GAE lambd")
@@ -1959,7 +1985,29 @@ def _resolve_eval_datasets(args) -> list[EvalDatasetConfig]:
     return eval_datasets
 
 
+def validate_kl_cov_args(args):
+    """Validate the opt-in loss before checkpoint or backend initialization."""
+    if not getattr(args, "use_kl_cov", False):
+        return
+    if args.loss_type != "policy_loss":
+        raise ValueError("--use-kl-cov requires --loss-type policy_loss")
+    if args.use_kl_loss or args.kl_coef != 0:
+        raise ValueError("--use-kl-cov cannot be combined with reference or reward-shaping KL")
+    if args.advantage_estimator in {"gspo", "cispo"}:
+        raise ValueError("--use-kl-cov cannot be combined with GSPO or CISPO")
+    if args.use_opsm:
+        raise ValueError("--use-kl-cov cannot be combined with --use-opsm")
+    if not math.isfinite(args.kl_cov_ratio) or not 0 < args.kl_cov_ratio <= 1:
+        raise ValueError("--kl-cov-ratio must be finite and in (0, 1]")
+    if not math.isfinite(args.kl_cov_coef) or args.kl_cov_coef < 0:
+        raise ValueError("--kl-cov-coef must be finite and nonnegative")
+    if (getattr(args, "context_parallel_size", 1) or 1) != 1:
+        raise ValueError("--use-kl-cov currently requires context parallel size 1")
+    args.use_tis = True
+
+
 def vime_validate_args(args):
+    validate_kl_cov_args(args)
     args.eval_datasets = _resolve_eval_datasets(args)
     args.dspark_enabled = (getattr(args, "vllm_speculative_config", None) or {}).get("method") == "dspark"
 

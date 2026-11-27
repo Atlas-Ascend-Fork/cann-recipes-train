@@ -94,10 +94,7 @@ def _qwen35_config(
     spec.model.enable_weight_tying = tie_word_embeddings
     config = _vime_rl_config(
         spec,
-        lr=1e-6 if context_parallel else 3e-6,
-        # TorchTitan supports exactly three values here:
-        # "partial_dtensor", "full_dtensor", and "spmd_types".  This recipe
-        # uses partial-DTensor for both CP=1 and context-parallel training.
+        lr=1e-6,
         spmd_backend="partial_dtensor",
     )
     if context_parallel:

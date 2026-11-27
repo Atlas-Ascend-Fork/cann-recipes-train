@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Sample external AgenticRL configuration for SWE-Gym and Terminal Agent (including TMax).
+# Copy it outside the repository as agenticrl.local.sh, replace the placeholder paths
+# and addresses, and load it with --local. It needs no second env file to be sourced:
+# this file only declares configuration, it does not activate environments or start services.
+
+# Load it from the SWE or Terminal AgenticRL entry; the entry declares its task.
+# Single-turn training uses the model entry directly, where the task is singleturn
+# and no AgenticRL arguments are added.
+# Set VIME_RL_TASK to run a different task, either here or on the command line.
+# export VIME_RL_PREPARED_BUNDLE=/path/to/prepared/bundle
+
+# Training host environment: fill in the real installation directories rather than
+# relying on the machine-path defaults of a task entry. When training and rollout
+# share one Python environment, point both variables at the same path.
+export VIME_TRAIN_ENV=/path/to/envs/train
+export VIME_VLLM_ENV=/path/to/envs/rollout
+
+# Executable paths are usually derived; an explicit override must match the
+# corresponding environment above.
+# export TRAIN_PYTHON="$VIME_TRAIN_ENV/bin/python3"
+# export VIME_VLLM_EXECUTABLE="$VIME_VLLM_ENV/bin/vllm"
+export VIME_CANN_HOME=/path/to/cann
+export VIME_NNAL_HOME=/path/to/atb  # ATB install directory, activated by the shared launcher
+export MODEL_PATH=/path/to/models/Qwen3.5-4B
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export MASTER_ADDR=192.0.2.1  # an address the Ray processes can reach on this host
+
+# Device placement and the training recipe are shell variables of the model entry;
+# they do not use VIME_RL_* names. To reproduce training TP=4, DP=1 with four TP=1
+# inference engines at CP=1, set the group below explicitly. The device count has to agree
+# with ASCEND_RT_VISIBLE_DEVICES.
+# export TRAIN_TP=4 TRAIN_DP=1 TRAIN_CP=1 ROLLOUT_GPUS=4 VLLM_RANKS_PER_ENGINE=1
+# export MAX_TOKENS_PER_GPU=32768
+# Qwen3.5 CP=4 alternative, still using four training devices:
+# export TRAIN_TP=1 TRAIN_DP=1 TRAIN_CP=4
+# Leave TITAN_CONFIG unset to select the recipe from TRAIN_CP automatically.
+# An explicit recipe must match CP; KL-Cov uses CP=1.
+# See docs/rl/qwen35.md for CP configuration and the single-turn validation example.
+
+# Sandbox deployment: both tasks share this entry. To switch to AgentENV, change the
+# backend here and fill in the agentenv section of the JSON file.
+export VIME_AGENT_SANDBOX_BACKEND=harbor
+
+# Path to VIME_AGENT_SANDBOX_CONFIG; see examples/common/sandboxes.json.example.
+export VIME_AGENT_SANDBOX_CONFIG="$HOME/.config/vime/sandboxes.json"
+# Host addresses, slots, prepare_concurrency and boot_concurrency live only in that JSON.
+
+# Model callback: the example below has the sandboxes reach port 18001 on the training
+# host directly. PUBLIC_HOST must be an address the sandbox containers can reach; with a
+# tunnel, use the forwarded address and port instead. Both the control and the callback
+# connection must already be configured, as the launcher does not create tunnels.
+export ADAPTER_PUBLIC_HOST=model-callback.example
+export ADAPTER_PORT=18001
+export ADAPTER_PUBLIC_PORT=18001
+# export ADAPTER_BIND_HOST=127.0.0.1  # only when the chosen forwarding needs a local listener
+
+# Codex offline packages: paths on the training host. The package architecture has to
+# match the CPU sandboxes.
+export VIME_AGENT_NODE_TARBALL=/path/to/artifacts/node-linux-x64.tar.xz
+export VIME_AGENT_CODEX_TARBALL=/path/to/artifacts/vime-codex-offline.tgz
+# With an artifact service the sandboxes can reach, give its URL instead; this setting
+# does not start that service.
+# export VIME_AGENT_ARTIFACT_BASE_URL=http://artifacts.example:18123
+# With --agent claude_code, point at the matching offline package.
+# export VIME_AGENT_CC_TARBALL=/path/to/artifacts/claude-code.tgz
+
+# SWE-Gym only: uncomment before running the SWE entry and give the evaluator source
+# directory. The training environment must already have the evaluator's Python
+# dependencies installed; this variable only locates the sources.
+# export VIME_SWEGYM_SOURCE_PATH=/path/to/SWE-Gym-evaluator
+
+# Output directory and saving are optional; by default a new output directory is derived
+# from the task and a timestamp.
+# export RUN_NAME=my-agenticrl-run
+# export OUTPUT_DIR=/path/to/outputs/my-agenticrl-run
+# export VIME_RL_SAVE_INTERVAL=off  # skip checkpoint saving when verifying a single update
+# export VIME_RL_DUMP_MODE=off      # trajectories are dumped by default; turn it off here
+
+# Batch size, sample count, training length and temperature are shared with single-turn
+# RL. Prefer passing them after -- on the launch command; their defaults come from the
+# chosen model entry (see examples/README.md). The retired VIME_RL_ROLLOUT_BATCH_SIZE,
+# VIME_RL_NUM_EPOCHS and VIME_RL_LEARNING_RATE variables fail at startup with the
+# replacement to use. Frequently used arguments can also be kept here; the same argument
+# on the command line wins.
+# OVERRIDE_ARGS=(--router-policy consistent_hash --vllm-server-concurrency 8)
+# For example, override the learning rate through the Qwen3.5 recipe's argument path,
+# and set the training length directly:
+# OVERRIDE_ARGS+=(--optimizer.param-groups.0.optimizer-kwargs.lr 2e-6 --num-rollout 18)
+# Final precedence: model TRAIN_ARGS < AGENTIC_ARGS < OVERRIDE_ARGS here < arguments after --.
+
+# The shared launcher reads this file and derives the execution paths; explicit
+# executable settings follow the upstream rules. Python, Ray and vLLM are derived by the
+# shared launcher, and Python/CANN/ATB are activated by the upstream flow. When the
+# environment already resolves shared-library and compiler compatibility, no CC wrapper
+# or extra Python library path is needed. Do not replace the whole PATH, and do not
+# expect the login environment to be cleaned up; verify any compatibility workaround
+# against the environment you selected. Cache directories are derived from
+# VIME_WORKSPACE by default, while TMPDIR is inherited and not set by the launcher.
+# Configure port isolation, proxies and resource limits for the actual deployment
+# instead of copying values from another server.

@@ -127,7 +127,6 @@ gate_when EVAL_ON on EVAL_ARGS
 PERF_ARGS=(
    --max-tokens-per-gpu 9216       # matches megatron; also torchtitan's per-micro-batch budget
    --use-dynamic-batch-size
-   # --log-probs-chunk-size 8192
 
    # tp/pp/cp/ep all default to 1 in torchtitan, so they need no explicit flags.
    # compile stays off: NPU forbids torch.compile, and tyro's bool has no "False" form.

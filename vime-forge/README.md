@@ -70,7 +70,8 @@ We also provide examples for some use cases not covered in the quick start guide
 
 Agentic workloads use the standard rollout / Data Buffer loop through Vime's customization interfaces; they are not a separate framework:
 
-- [`examples/coding_agent_rl`](examples/coding_agent_rl/README.md): End-to-end coding-agent RL with Claude Code or Codex, sandboxed tool use, test-based rewards, and token-correct trajectory segments.
+- [SWE-Gym Agentic RL training](docs/agentic-rl/swe-agentic-rl/training.md): Train a coding agent with Claude Code or Codex using sandboxed tools and test-based rewards.
+- [Terminal / TMax Agentic RL training](docs/agentic-rl/terminal-agentic-rl/training.md): Train a terminal agent on a prepared task bundle using Harbor or AgentENV sandboxes.
 
 See the [Agentic RL Training Roadmap](docs/en/get_started/agent.md) and [Customization Guide](docs/en/get_started/customization.md). The coding-agent example ships an E2B-compatible backend, while the shared `vime.agent.sandbox.Sandbox` contract can be implemented for Docker, Modal, or local VMs.
 

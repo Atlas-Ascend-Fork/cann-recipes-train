@@ -1,14 +1,28 @@
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Coding-Agent RL: per-sample generate() function for vime.
 
-    --custom-generate-function-path examples.coding_agent_rl.generate.generate
+    --custom-generate-function-path examples.swe_agent_rl.generate.generate
 
 generate() is a four-stage orchestrator: swe.prepare_workspace + harness.run
 -> swe.git_diff -> swe.run_evaluation -> adapter.finish_session. The (harness,
-adapter) pair is chosen by the SWE_AGENT env var (claude_code | codex); see
+adapter) pair is chosen by VIME_RL_AGENT (legacy: SWE_AGENT; claude_code | codex); see
 _AGENTS below.
 Sandbox-side work is split across three layers: the provider-agnostic sandbox
 contract (vime.agent.sandbox), the swappable harness lifecycle
-(vime.agent.harness), and the SWE task layer (examples.coding_agent_rl.swe --
+(vime.agent.harness), and the SWE task layer (examples.swe_agent_rl.swe --
 dataset parsing, workspace prep, diff, eval). LLM plumbing (Anthropic / Responses
 <-> vLLM ``/inference/v1/generate``, token capture, segment split) is the
 matching vime.agent.adapters adapter. swe.get_metadata documents the dataset row
@@ -25,12 +39,14 @@ import secrets
 import time
 import traceback
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, nullcontext
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
+
 from vime.agent.adapters import AnthropicAdapter, ResponsesAdapter
 from vime.agent.aiohttp_threaded import FilteredAccessLogger, run_app_in_thread
+from vime.agent.config import bundle_path, effective_sandbox_env, rl_value, sandbox_backend, validate_sandbox_config
 from vime.agent.harness import ClaudeCodeHarness, CodexHarness
 from vime.agent.model_profile import (
     ModelProfile,
@@ -38,13 +54,14 @@ from vime.agent.model_profile import (
     uses_qwen3_apply_patch_policy,
     uses_single_system_message_policy,
 )
-from vime.agent.sandbox import E2BSandbox
-from vime.observability.trace_utils import bind_trace, export_trace, import_trace, trace_event, trace_span
+from vime.agent.sandbox import E2BSandbox, Sandbox, SandboxAdmissionTimeout, sandbox_preparation
+from vime.observability.trace_utils import TraceHandle, bind_trace
 from vime.utils.misc import SingletonMeta
 from vime.utils.processing_utils import load_tokenizer
 from vime.utils.types import Sample
 
 from . import swe
+from .sandbox import create_sandbox
 from .template_mapping import TemplateMappingError, apply_template_mapping, load_template_mapping
 from .verifier_spec import VerifierSpecError, apply_verifier_spec, load_verifier_specs
 
@@ -55,9 +72,9 @@ _AGENTS = {
     "claude_code": (ClaudeCodeHarness, AnthropicAdapter),
     "codex": (CodexHarness, ResponsesAdapter),
 }
-AGENT_NAME = os.environ.get("SWE_AGENT", "claude_code")
+AGENT_NAME = rl_value("swegym", "AGENT", "claude_code")
 if AGENT_NAME not in _AGENTS:
-    raise ValueError(f"SWE_AGENT={AGENT_NAME!r} not in {sorted(_AGENTS)}")
+    raise ValueError(f"VIME_RL_AGENT={AGENT_NAME!r} not in {sorted(_AGENTS)}")
 HARNESS_CLS, ADAPTER_CLS = _AGENTS[AGENT_NAME]
 
 
@@ -82,23 +99,25 @@ class SweConfig:
 
     @classmethod
     def from_env(cls) -> SweConfig:
-        agent_time_budget = int(os.environ.get("SWE_AGENT_TIME_BUDGET_SEC", "1800"))
-        eval_timeout = int(os.environ.get("SWE_EVAL_TIMEOUT_SEC", "600"))
-        guard = int(os.environ.get("SWE_ROLLOUT_GUARD_SEC", "0") or 0) or (agent_time_budget + eval_timeout + 180)
+        agent_time_budget = int(rl_value("swegym", "AGENT_TIME_BUDGET_SEC", "1800"))
+        eval_timeout = int(rl_value("swegym", "EVAL_TIMEOUT_SEC", "600"))
+        guard = int(rl_value("swegym", "ROLLOUT_GUARD_SEC", "0") or 0) or (agent_time_budget + eval_timeout + 180)
         fork = int(v) if (v := os.environ.get("VIME_FORK_MERGE_MAX_RESPONSE_TOKENS")) else None
-        selector_mode = os.environ.get("VIME_AGENT_E2B_SELECTOR_MODE", E2BSandbox.default_selector_mode).strip()
-        template_map = os.environ.get("SWE_AGENTENV_TEMPLATE_MAP", "").strip() or None
-        verifier_map = os.environ.get("SWE_VERIFIER_SPEC_MAP", "").strip() or None
+        selector_mode = effective_sandbox_env().get(
+            "VIME_AGENT_E2B_SELECTOR_MODE", E2BSandbox.default_selector_mode
+        ).strip()
+        template_map = (bundle_path("swegym", "environment") or "").strip() or None
+        verifier_map = (bundle_path("swegym", "verifier") or "").strip() or None
         public_port = os.environ.get("ADAPTER_PUBLIC_PORT", "").strip()
         max_turns = os.environ.get("VIME_AGENT_MAX_TURNS_PER_SESSION", "").strip()
-        if template_map and selector_mode != "template":
+        if sandbox_backend() == "agentenv" and template_map and selector_mode != "template":
             raise ValueError(
-                "SWE_AGENTENV_TEMPLATE_MAP requires VIME_AGENT_E2B_SELECTOR_MODE=template; "
+                "A prepared environment mapping requires AgentENV selector_mode=template; "
                 f"got {selector_mode!r}"
             )
         return cls(
-            eval_protocol=os.environ.get("SWE_EVAL_PROTOCOL", swe.PROTOCOL_SCALESWE),
-            train_protocol=os.environ.get("SWE_TRAIN_PROTOCOL", swe.PROTOCOL_SCALESWE),
+            eval_protocol=rl_value("swegym", "EVAL_PROTOCOL", swe.PROTOCOL_SCALESWE),
+            train_protocol=rl_value("swegym", "TRAIN_PROTOCOL", swe.PROTOCOL_SCALESWE),
             adapter_public_host=os.environ.get("ADAPTER_PUBLIC_HOST"),
             adapter_public_port=int(public_port) if public_port else None,
             adapter_bind_host=os.environ.get("ADAPTER_BIND_HOST", "0.0.0.0"),
@@ -108,14 +127,15 @@ class SweConfig:
             agent_time_budget_sec=agent_time_budget,
             eval_timeout_sec=eval_timeout,
             rollout_guard_sec=guard,
-            boot_concurrency=int(os.environ.get("SWE_BOOT_CONCURRENCY", "16")),
-            boot_retries=int(os.environ.get("SWE_BOOT_RETRIES", "2")),
+            boot_concurrency=int(rl_value("swegym", "BOOT_CONCURRENCY", "16")),
+            boot_retries=int(rl_value("swegym", "BOOT_RETRIES", "2")),
             sandbox_selector_mode=selector_mode,
             agentenv_template_map=template_map,
             verifier_spec_map=verifier_map,
         )
 
 
+validate_sandbox_config()
 CONFIG = SweConfig.from_env()
 TEMPLATE_MAPPING = load_template_mapping(CONFIG.agentenv_template_map) if CONFIG.agentenv_template_map else None
 VERIFIER_SPECS = load_verifier_specs(CONFIG.verifier_spec_map) if CONFIG.verifier_spec_map else None
@@ -123,68 +143,82 @@ VERIFIER_SPECS = load_verifier_specs(CONFIG.verifier_spec_map) if CONFIG.verifie
 _BOOT_SEM = asyncio.Semaphore(CONFIG.boot_concurrency)
 
 
-async def _boot_sandbox_attempt(cand: E2BSandbox, trace, attempt: int) -> None:
-    async with _BOOT_SEM:
-        with trace_span(trace, "sandbox_create", attrs={"attempt": attempt}, record_error=False):
-            await cand.__aenter__()
+async def _initialize_agent_sandbox(sb: Sandbox, instance_id: str, md: dict) -> None:
+    started = time.monotonic()
+    await sb.__aenter__()
+    logger.info(
+        "[swe_agent_rl] %s sandbox=%s stage=create elapsed_sec=%.3f",
+        instance_id, sb.sandbox_id, time.monotonic() - started,
+    )
+    for stage, operation in (
+        ("install_cli", lambda: HARNESS_CLS().install_cli(sb)),
+        ("workspace", lambda: swe.prepare_workspace(sb, md["workdir"], md)),
+    ):
+        started = time.monotonic()
         try:
-            with trace_span(trace, "harness_install", record_error=False) if trace else nullcontext():
-                await HARNESS_CLS().install_cli(cand)
+            await operation()
+        except BaseException as error:
+            logger.warning(
+                "[swe_agent_rl] %s sandbox=%s stage=%s status=%s elapsed_sec=%.3f",
+                instance_id, sb.sandbox_id, stage, type(error).__name__, time.monotonic() - started,
+            )
+            raise
+        logger.info(
+            "[swe_agent_rl] %s sandbox=%s stage=%s status=ok elapsed_sec=%.3f",
+            instance_id, sb.sandbox_id, stage, time.monotonic() - started,
+        )
+
+
+async def _provision_agent_sandbox(sb: Sandbox, instance_id: str, md: dict) -> None:
+    async with _BOOT_SEM:
+        try:
+            async with sandbox_preparation(sb):
+                await _initialize_agent_sandbox(sb, instance_id, md)
         except BaseException:
-            with trace_span(trace, "sandbox_cleanup", record_error=False) if trace else nullcontext():
-                await cand.__aexit__(None, None, None)
+            await sb.__aexit__(None, None, None)
             raise
 
 
 @asynccontextmanager
 async def boot_agent_sandbox(
-    image: str, instance_id: str, *, trace=None
-) -> AsyncIterator[E2BSandbox]:
-    """Boot a fresh E2B sandbox and install the selected harness toolchain.
+    image: str, instance_id: str, md: dict, *, trace: TraceHandle | None = None
+) -> AsyncIterator[Sandbox]:
+    """Boot a fresh sandbox and prepare its toolchain and task workspace.
 
     Create the sandbox from the dataset image, install Node 22 + the harness CLI
-    from host tarballs, retry transient boot/install failures, and close the
-    sandbox when the caller leaves the context.
+    from host tarballs and prepare ownership under the preparation limit. Retry
+    failures in a fresh sandbox, never by replaying a possibly executed command.
     """
     sb = None
     last_err: Exception | None = None
     for attempt in range(CONFIG.boot_retries):
-        cand = E2BSandbox(image, trace=trace)
+        cand = create_sandbox(image, trace=trace)
         try:
-            with trace_span(trace, "sandbox_boot_wait", record_error=False) if trace else nullcontext():
-                await _boot_sandbox_attempt(cand, trace, attempt)
+            await _provision_agent_sandbox(cand, instance_id, md)
             sb = cand
             break
+        except SandboxAdmissionTimeout:
+            # Capacity waiting retains its FIFO ticket and original deadline.
+            # Expiry is explicit; recreating would reset its place and budget.
+            raise
         except Exception as e:
             last_err = e
-            if trace is not None:
-                trace_event(
-                    trace,
-                    "agentic.sandbox_boot_attempt_failed",
-                    attrs={
-                        "boot_attempt": attempt + 1,
-                        "error_type": type(e).__name__,
-                        "will_retry": attempt + 1 < CONFIG.boot_retries,
-                    },
-                )
             logger.warning(
-                "[coding_agent_rl] %s: provision attempt %d/%d failed: %s: %s",
+                "[swe_agent_rl] %s: provision attempt %d/%d failed: %s: %s",
                 instance_id,
                 attempt + 1,
                 CONFIG.boot_retries,
                 type(e).__name__,
                 str(e)[:200],
             )
-            with trace_span(trace, "sandbox_boot_backoff", record_error=False) if trace else nullcontext():
-                await asyncio.sleep(1 + attempt + random.random())
+            await asyncio.sleep(1 + attempt + random.random())
     if sb is None:
         assert last_err is not None
         raise last_err
     try:
         yield sb
     finally:
-        with trace_span(trace, "sandbox_cleanup", record_error=False) if trace else nullcontext():
-            await sb.__aexit__(None, None, None)
+        await sb.__aexit__(None, None, None)
 
 
 class _AdapterService(metaclass=SingletonMeta):
@@ -202,7 +236,7 @@ class _AdapterService(metaclass=SingletonMeta):
             coalesce_system_messages=uses_single_system_message_policy(checkpoint_model_type),
         )
         logger.info(
-            "[coding_agent_rl] checkpoint_model_type=%s normalize_apply_patch_description=%s "
+            "[swe_agent_rl] checkpoint_model_type=%s normalize_apply_patch_description=%s "
             "coalesce_system_messages=%s",
             checkpoint_model_type,
             self.model_profile.normalize_apply_patch_description,
@@ -241,7 +275,7 @@ class _AdapterService(metaclass=SingletonMeta):
         public_port = CONFIG.adapter_public_port or self.app_handle.port
         self.adapter_url = f"http://{CONFIG.adapter_public_host}:{public_port}"
         logger.info(
-            "[coding_agent_rl] tokenizer=%s adapter=%s max_context_len=%s tool_parser=%s reasoning_parser=%s",
+            "[swe_agent_rl] tokenizer=%s adapter=%s max_context_len=%s tool_parser=%s reasoning_parser=%s",
             args.hf_checkpoint,
             self.adapter_url,
             self.max_context_len,
@@ -251,20 +285,6 @@ class _AdapterService(metaclass=SingletonMeta):
 
 
 async def generate(args, base_sample: Sample, sampling_params: dict[str, Any], evaluation: bool = False):
-    samples = None
-    try:
-        with trace_span(base_sample, "coding_rollout", record_error=False):
-            samples = await _generate(args, base_sample, sampling_params, evaluation)
-        return samples
-    finally:
-        # The carrier is copied to emitted Samples by TrajectoryManager. Keep
-        # the final trace on the base Sample for upstream debug dumps too.
-        if samples and getattr(base_sample, "trace", None) is not None:
-            for sample in samples:
-                sample.trace = base_sample.trace
-
-
-async def _generate(args, base_sample, sampling_params, evaluation):
     """Per-sample agent function with wall-clock guard (see rollout_guard_sec)."""
     state = _AdapterService(args)
     protocol = CONFIG.eval_protocol if evaluation else CONFIG.train_protocol
@@ -274,7 +294,7 @@ async def _generate(args, base_sample, sampling_params, evaluation):
         try:
             md = apply_template_mapping(md, TEMPLATE_MAPPING)
         except TemplateMappingError as error:
-            logger.error("[coding_agent_rl] %s: template mapping rejected row: %s", instance_id, error)
+            logger.error("[swe_agent_rl] %s: template mapping rejected row: %s", instance_id, error)
             return _abort_result(base_sample, "invalid_agentenv_template_mapping", instance_id)
     # Without a configured manifest, SWE-bench retains its inline grading path.
     # A configured manifest must bind successfully; never fall back on mismatch.
@@ -282,7 +302,7 @@ async def _generate(args, base_sample, sampling_params, evaluation):
         try:
             md = apply_verifier_spec(md, VERIFIER_SPECS)
         except VerifierSpecError as error:
-            logger.error("[coding_agent_rl] %s: VerifierSpec rejected row: %s", instance_id, error)
+            logger.error("[swe_agent_rl] %s: VerifierSpec rejected row: %s", instance_id, error)
             return _abort_result(base_sample, "invalid_verifier_spec", instance_id)
     if not md["image"] or not md["workdir"]:
         return _abort_result(base_sample, "missing_image_or_workdir", instance_id)
@@ -291,46 +311,32 @@ async def _generate(args, base_sample, sampling_params, evaluation):
         return _abort_result(base_sample, f"unevaluatable:{reason}", instance_id)
 
     session_id = base_sample.session_id = _session_id(base_sample, instance_id)
+    state.adapter.open_session(
+        session_id,
+        sampling_defaults=sampling_params,
+        max_context_tokens=state.max_context_len,
+    )
+    trace = bind_trace(base_sample) if sandbox_backend() == "agentenv" else None
     t0 = time.time()
     try:
         async with asyncio.timeout(CONFIG.rollout_guard_sec):
-            async with boot_agent_sandbox(md["image"], instance_id, trace=base_sample) as sb:
-                with trace_span(base_sample, "workspace_prepare", record_error=False):
-                    await swe.prepare_workspace(sb, md["workdir"], md)
-                with trace_span(base_sample, "agent_run", record_error=False) as stage:
-                    # Export after entering ``agent_run`` so the adapter's
-                    # independent event loop keeps this span as its parent.
-                    trace = import_trace(export_trace(bind_trace(base_sample)), base_sample.trace)
-                    state.adapter.open_session(
-                        session_id,
-                        sampling_defaults=sampling_params,
-                        max_context_tokens=state.max_context_len,
-                        trace=trace,
-                    )
-                    agent_exit_code = await HARNESS_CLS().run(
-                        sb,
-                        workdir=md["workdir"],
-                        session_id=session_id,
-                        adapter_url=state.adapter_url,
-                        time_budget_sec=CONFIG.agent_time_budget_sec,
-                        prompt=swe.SWE_PROMPT,
-                    )
-                    stage.set("exit_code", agent_exit_code)
-                with trace_span(base_sample, "patch_extract", record_error=False):
-                    diff_text = await swe.git_diff(sb, md["workdir"])
-
-            with trace_span(base_sample, "evaluation", record_error=False) as span:
-                eval_result = await swe.run_evaluation(
-                    md,
-                    diff_text=diff_text,
-                    timeout_sec=CONFIG.eval_timeout_sec,
-                    trace=base_sample,
+            async with boot_agent_sandbox(md["image"], instance_id, md, trace=trace) as sb:
+                agent_exit_code = await HARNESS_CLS().run(
+                    sb,
+                    workdir=md["workdir"],
+                    session_id=session_id,
+                    adapter_url=state.adapter_url,
+                    time_budget_sec=CONFIG.agent_time_budget_sec,
+                    prompt=swe.SWE_PROMPT,
                 )
-                span.update({
-                    "reward": float(eval_result.reward),
-                    "applied_cleanly": bool(eval_result.applied_cleanly),
-                    "status": eval_result.status,
-                })
+                diff_text = await swe.git_diff(sb, md["workdir"])
+
+            eval_result = await swe.run_evaluation(
+                md,
+                diff_text=diff_text,
+                timeout_sec=CONFIG.eval_timeout_sec,
+                trace=trace,
+            )
             reward = eval_result.reward
             applied_cleanly = eval_result.applied_cleanly
             if eval_result.infra_failure:
@@ -340,19 +346,18 @@ async def _generate(args, base_sample, sampling_params, evaluation):
                         f"verifier_infra_error:{eval_result.reason or 'unknown'}",
                         instance_id,
                     )
-                with trace_span(base_sample, "trajectory_finalize", record_error=False):
-                    samples = await state.adapter.finish_session(
-                        session_id,
-                        base_sample=base_sample,
-                        reward=0.0,
-                        extra_metadata={
-                            "instance_id": instance_id,
-                            "verifier_spec_id": md.get("verifier_spec_id"),
-                            "verifier_status": eval_result.status,
-                            "verifier_infra_failure": True,
-                            "verifier_reason": eval_result.reason,
-                        },
-                    )
+                samples = await state.adapter.finish_session(
+                    session_id,
+                    base_sample=base_sample,
+                    reward=0.0,
+                    extra_metadata={
+                        "instance_id": instance_id,
+                        "verifier_spec_id": md.get("verifier_spec_id"),
+                        "verifier_status": eval_result.status,
+                        "verifier_infra_failure": True,
+                        "verifier_reason": eval_result.reason,
+                    },
+                )
                 if not samples:
                     return _abort_result(base_sample, "verifier_infra_error:empty_session", instance_id)
                 for sample in samples:
@@ -362,7 +367,7 @@ async def _generate(args, base_sample, sampling_params, evaluation):
                 return samples
             if evaluation:
                 logger.info(
-                    "[coding_agent_rl] %s: reward=%.2f applied=%s agent_exit_code=%d elapsed=%.1fs (eval-only)",
+                    "[swe_agent_rl] %s: reward=%.2f applied=%s agent_exit_code=%d elapsed=%.1fs (eval-only)",
                     instance_id,
                     float(reward),
                     bool(applied_cleanly),
@@ -377,22 +382,21 @@ async def _generate(args, base_sample, sampling_params, evaluation):
                     instance_id=instance_id,
                 )
 
-            with trace_span(base_sample, "trajectory_finalize", record_error=False):
-                samples = await state.adapter.finish_session(
-                    session_id,
-                    base_sample=base_sample,
-                    reward=float(reward),
-                    extra_metadata={
-                        "grading_solved": float(reward) == 1.0,
-                        "instance_id": instance_id,
-                        "sandbox_template_id": md.get("template_id"),
-                        "sandbox_source_image": md.get("source_image"),
-                        "verifier_spec_id": md.get("verifier_spec_id"),
-                        "verifier_status": eval_result.status,
-                        "verifier_infra_failure": False,
-                        "verifier_reason": eval_result.reason,
-                    },
-                )
+            samples = await state.adapter.finish_session(
+                session_id,
+                base_sample=base_sample,
+                reward=float(reward),
+                extra_metadata={
+                    "grading_solved": float(reward) == 1.0,
+                    "instance_id": instance_id,
+                    "sandbox_template_id": md.get("template_id"),
+                    "sandbox_source_image": md.get("source_image"),
+                    "verifier_spec_id": md.get("verifier_spec_id"),
+                    "verifier_status": eval_result.status,
+                    "verifier_infra_failure": False,
+                    "verifier_reason": eval_result.reason,
+                },
+            )
             if not samples:
                 return _abort_result(base_sample, "adapter_session_empty", instance_id)
 
@@ -401,13 +405,13 @@ async def _generate(args, base_sample, sampling_params, evaluation):
             if agent_exit_code != 0:
                 reason = "time budget exceeded" if agent_exit_code < 0 else f"CLI error (exit {agent_exit_code})"
                 logger.warning(
-                    "[coding_agent_rl] %s: agent_exit_code=%d (%s)",
+                    "[swe_agent_rl] %s: agent_exit_code=%d (%s)",
                     instance_id,
                     agent_exit_code,
                     reason,
                 )
             logger.info(
-                "[coding_agent_rl] %s: reward=%.2f applied=%s agent_exit_code=%d elapsed=%.1fs segments=%d",
+                "[swe_agent_rl] %s: reward=%.2f applied=%s agent_exit_code=%d elapsed=%.1fs segments=%d",
                 instance_id,
                 float(reward),
                 bool(applied_cleanly),
@@ -417,20 +421,22 @@ async def _generate(args, base_sample, sampling_params, evaluation):
             )
             return samples
 
+    except SandboxAdmissionTimeout as error:
+        logger.warning("[swe_agent_rl] %s: preparation admission failed: %s", instance_id, error)
+        return _abort_result(base_sample, "preparation_admission_timeout", instance_id)
     except asyncio.TimeoutError:
         _log_timeout_diagnostic(t0, instance_id)
         return _abort_result(base_sample, "wall_clock_timeout", instance_id)
     except Exception as e:
         logger.warning(
-            "[coding_agent_rl] %s: rollout failed: %s\n%s",
+            "[swe_agent_rl] %s: rollout failed: %s\n%s",
             instance_id,
             e,
             traceback.format_exc(),
         )
         return _abort_result(base_sample, f"exception:{type(e).__name__}", instance_id)
     finally:
-        with trace_span(base_sample, "adapter_cleanup", record_error=False):
-            await state.adapter.drop_session(session_id, wait_timeout=30)  # cleanup only, idempotent
+        await state.adapter.drop_session(session_id, wait_timeout=30)  # cleanup only, idempotent
         await asyncio.sleep(10)
 
 
@@ -444,7 +450,7 @@ def _log_timeout_diagnostic(t0: float, instance_id: str) -> None:
             coro = getattr(t, "_coro", None)
             stuck.append(getattr(coro, "__qualname__", repr(coro)))
         logger.warning(
-            "[coding_agent_rl] %s: wall_clock_timeout after %.1fs "
+            "[swe_agent_rl] %s: wall_clock_timeout after %.1fs "
             "(guard=%ds); %d tasks pending; sample of stuck: %s",
             instance_id,
             elapsed,
@@ -467,7 +473,6 @@ def _session_id(sample: Sample, instance_id: str) -> str:
 def _abort_result(sample: Sample, reason: str, instance_id: str) -> list[Sample]:
     """Mark ``sample`` aborted in place and return it in the list shape this
     fan-out generate function always yields."""
-    trace_event(sample, "agentic.trial_aborted", attrs={"reason": reason})
     # Preserve one identity per attempt, just as normal trajectory segments do.
     if sample.rollout_id is None:
         sample.rollout_id = sample.index
@@ -484,7 +489,7 @@ def _abort_result(sample: Sample, reason: str, instance_id: str) -> list[Sample]
         "abort_reason": reason,
         "instance_id": instance_id,
     }
-    logger.warning("[coding_agent_rl] %s aborted: %s", instance_id, reason)
+    logger.warning("[swe_agent_rl] %s aborted: %s", instance_id, reason)
     return [sample]
 
 

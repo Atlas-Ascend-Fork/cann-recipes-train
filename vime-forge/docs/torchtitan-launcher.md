@@ -5,7 +5,7 @@ Ascend NPU 上以 torchtitan 后端 + vLLM rollout 跑 RL 训练的启动脚本�
 ```
 scripts/torchtitan/
   run-qwen3-4B.sh              入口，训练参数
-  common/launcher.sh       机制：解析、校验、组装、提交
+  common/launcher.sh       上游公共机制：组装、Ray 启停、提交与归档
   common/default.sh        开关与环境的默认值
   common/local.sh          本机路径与实验覆盖（不上库）
   common/local.sh.example  模板
@@ -19,10 +19,10 @@ bash scripts/torchtitan/run-qwen3-4B.sh
 
 首次使用需先建本机配置：复制 `common/local.sh.example` 为 `common/local.sh`，填入路径、CANN 位置、venv 与可见卡。不建也能跑，但路径多半不对。要多份配置时按 `local.<experiment>.sh` 各存一份，用 `--local` 切换。
 
-命令行只有三个参数，其余设定都在文件里：
+所有使用公共 launcher 的模型入口接受以下选项：
 
 ```
---local <name>        用 common/ 下的哪份配置，一台机器或一组实验参数一份，默认 local.sh
+--local <name|path>   配置文件：名称相对 common/，也支持仓库外的绝对路径
 --dump-dir <path>     落 rollout 数据
 --replay-dir <path>   回放已落的数据（与 --dump-dir 互斥）
 ```
@@ -33,7 +33,27 @@ bash scripts/torchtitan/run-qwen3-4B.sh
 bash scripts/torchtitan/run-qwen3-4B.sh --local local.<experiment>.sh -- --num-rollout 5 --training.max_norm 0.5
 ```
 
----
+
+### 模型脚本接入 AgenticRL 的约定
+
+模型脚本直接运行即为单轮 RL；AgenticRL 由 [examples/](../examples/) 下的任务入口启动，它先完成任务配置，再 source 同一个模型脚本，因此一份模型参数同时服务两种训练。公共 launcher 在拼接命令行时插入 `AGENTIC_ARGS`（单轮为空），顺序为：
+
+```
+TRAIN_ARGS(模型) → AGENTIC_ARGS(任务) → OVERRIDE_ARGS(local.sh) → -- 之后的参数
+```
+
+希望被 AgenticRL 复用的模型脚本需满足两条：
+
+1. **共享变量写成可覆盖形式**，如 `SEQ_LEN=${SEQ_LEN:-10240}`。任务入口在 source 模型脚本之前预设 `SEQ_LEN`、`MAX_RESPONSE_LEN`、`MAX_PROMPT_LEN`、`PROMPT_DATA`，由这些变量派生的参数会自动跟随。写死赋值会覆盖预设值，导致 Agent 上下文与训练长度不一致。
+2. **单轮专有的参数用 `VIME_RL_TASK` 开关添加**。该变量在单轮路径上由公共 launcher 置为 `singleturn`，AgenticRL 路径上则是任务名：
+
+```bash
+add_when VIME_RL_TASK singleturn ROLLOUT_ARGS -- --apply-chat-template --rm-type deepscaler
+```
+
+数据集 chat 模板和规则奖励属于单轮数据路径：AgenticRL 的提示词、工具与奖励由 Agent 适配器提供，其提示词直接保留会话结构，跳过单轮数据的模板渲染。`--apply-chat-template` 是开关型参数，后续参数无法撤销，只能从源头不添加。轨迹 dump 同理，AgenticRL 按 `VIME_RL_DUMP_MODE` 自行选择。
+
+资源分配、batch、采样数、训练长度、温度均为共享参数，保留在模型脚本中，由 `local.sh` 的变量或 `--` 之后的参数覆盖；上下文长度是 AgenticRL 专有的，只能通过 `VIME_AGENT_MAX_CONTEXT_TOKENS` 调整。任务数据包与智能体用 `--bundle`、`--agent` 选择，详见 [AgenticRL 配置](../examples/README.md)。`common/launcher.sh` 和 `common/default.sh` 保持上游版本。
 
 ## 1. 参数分类与优先级
 
@@ -41,7 +61,7 @@ bash scripts/torchtitan/run-qwen3-4B.sh --local local.<experiment>.sh -- --num-r
 
 | 类别 | 内容 | 位置 | 何时改动 |
 |---|---|---|---|
-| **训练参数** | `train.py` 入参 | `run-qwen3-4B.sh` | 修改默认参数 |
+| **训练参数** | `train.py` 入参 | `run-[model].sh` | 修改默认训练参数 |
 | **开关** | 控制哪些训练参数被加入 | `common/default.sh` | 新增参数 |
 | **环境** | 路径、卡、端口、ray worker 环境变量 | `common/default.sh` | 新增参数 |
 
@@ -109,11 +129,11 @@ TRAIN_ARGS=(
 
 | 根 | 派生出 |
 |---|---|
-| `VIME_WORKSPACE` | `VIME_DATA_ROOT`、`VIME_CKPT_ROOT`、`VIME_TB_ROOT`、`TMPDIR`、`TRITON_CACHE_DIR`、`HF_HOME`、`ASCEND_CACHE_PATH` |
+| `VIME_WORKSPACE` | `VIME_DATA_ROOT`、`VIME_CKPT_ROOT`、`VIME_TB_ROOT`、`TRITON_CACHE_DIR`、`HF_HOME`、`ASCEND_CACHE_PATH`；公共 Ray 临时目录也以此为根 |
 | `VIME_SLOT` | 五个端口与 `VIME_RAY_TEMP_DIR` |
-| `VIME_TRAIN_ENV` / `VIME_VLLM_ENV` | `TRAIN_PYTHON`、`VIME_VLLM_EXECUTABLE`、`VIME_VLLM_PYTHON` |
+| `VIME_TRAIN_ENV` / `VIME_VLLM_ENV` | 公共 launcher 使用的训练与推理环境 |
 
-文件末尾的 `RT_ENV` 是交给 ray worker 的环境变量：NPU 与 vLLM 的各项规避设置，每项都注明了存在的原因。launcher 另外追加计算得出的四项（`TENSORBOARD_DIR`、`PYTHONPATH`、`VIME_VLLM_EXECUTABLE`、`VIME_VLLM_PYTHON`）与确定性相关项。
+文件末尾的 `RT_ENV` 是交给 ray worker 的环境变量：NPU 与 vLLM 的各项规避设置，每项都注明了存在的原因。launcher 另外追加解析后的四项（`TENSORBOARD_DIR`、`PYTHONPATH`、`VIME_VLLM_EXECUTABLE`、`VIME_VLLM_PYTHON`）与确定性相关项，其中 vLLM 入口保留用户的显式覆盖。
 
 ### 2.3 local.sh
 
@@ -124,28 +144,26 @@ TRAIN_ARGS=(
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | **根** | | |
-| `VIME_WORKSPACE` | `/tmp/vime` | data / ckpt / tb / tmp / 各类缓存的共同根 |
+| `VIME_WORKSPACE` | `/tmp/vime` | data / ckpt / tb / Ray 临时目录 / 各类缓存的共同根；不设置 `TMPDIR` |
 | `VIME_MODEL_ROOT` | `/tmp/models` | 模型库，通常与 workspace 不同盘 |
 | `VIME_SLOT` | `0` | 同机第几个并发实例，决定整套端口 |
 | **运行时** | | |
 | `VIME_CANN_HOME` | `/usr/local/Ascend/ascend-toolkit` | 需含 `set_env.sh` |
-| `VIME_NNAL_HOME` | `/usr/local/Ascend/nnal/atb` | 需含 `set_env.sh` |
+| `VIME_NNAL_HOME` | `/usr/local/Ascend/nnal/atb` | 需含 `set_env.sh`；空值使用公共默认目录 |
 | `VIME_TRAIN_ENV` | 空 | 训练侧与 vime 侧 python 环境；留空则用当前解释器 |
-| `VIME_VLLM_ENV` | 同 `VIME_TRAIN_ENV` | vLLM 侧 python 环境；设成不同环境即双环境 |
-| `TRAIN_PYTHON` | 由 `VIME_TRAIN_ENV` 推导 | 直接点名可执行文件，绕过推导 |
-| `VIME_VLLM_EXECUTABLE` | 由 `VIME_VLLM_ENV` 推导 | 同上；会传给 ray worker，serve 子进程据此切换解释器 |
-| `VIME_VLLM_PYTHON` | 由 `VIME_VLLM_ENV` 推导 | vLLM serve 子进程用于 re-exec 的 Python；双环境时不要指向 shell wrapper |
+| `VIME_VLLM_ENV` | 同训练环境 | vLLM 侧 python 环境；设成不同环境即双环境 |
+| `TRAIN_PYTHON` | 训练环境的 `bin/python`，或 `PATH` 中的 `python3` | 非空时显式覆盖训练 Python，不改变环境激活或 Ray 的选择 |
+| `VIME_VLLM_EXECUTABLE` | 推理环境的 `bin/vllm`，或 `PATH` 中的 `vllm` | 非空时显式覆盖 vLLM 入口，不改变推理 Python 的选择 |
 | `VIME_NOFILE_LIMIT` | `65535` | `ulimit -n`；过低会让 raylet 因 EMFILE 中止 |
 | `ASCEND_RT_VISIBLE_DEVICES` | `0,…,7` | 本机可用的卡；如何分给训练与 rollout 在 `run-qwen3-4B.sh` |
 | **开关** | | |
 | `MODE` | `sync` | `sync` \| `async` \| `fully-async` |
-| `DET` | `on` | 一次开关三处确定性 |
 | `EVAL_ON` | 跟随 `MODE` | 设 `off` 可在测吞吐或冒烟时跳过 eval |
 | **派生路径** | | 布局不同时可单独覆盖 |
 | `VIME_DATA_ROOT` | `$VIME_WORKSPACE/data` | |
 | `VIME_CKPT_ROOT` | `$VIME_WORKSPACE/ckpt` | |
 | `VIME_TB_ROOT` | `$VIME_WORKSPACE/tb` | |
-| `TMPDIR` | `$VIME_WORKSPACE/tmp` | |
+| `TMPDIR` | 沿用外部环境 | 启动器不设置；未设置时由相应程序选择系统临时目录 |
 | `TRITON_CACHE_DIR` | `$VIME_WORKSPACE/.triton` | |
 | `HF_HOME` | `$VIME_WORKSPACE/.cache/huggingface` | |
 | `ASCEND_CACHE_PATH` | `$VIME_WORKSPACE/.ascend_cache` | |
@@ -155,12 +173,12 @@ TRAIN_ARGS=(
 | `VIME_RAY_DASHBOARD_AGENT_PORT` | `52365 + VIME_SLOT` | ray 的默认值在同机多集群时必撞 |
 | `HCCL_HOST_SOCKET_PORT_RANGE` | `60000+100·SLOT` 起 50 个 | |
 | `HCCL_NPU_SOCKET_PORT_RANGE` | `61000+100·SLOT` 起 50 个 | |
-| `VIME_RAY_TEMP_DIR` | `$TMPDIR/ray-s$VIME_SLOT` | 刻意取短：AF_UNIX 路径上限 107 字节 |
+| `VIME_RAY_TEMP_DIR` | `$VIME_WORKSPACE/ray-s$VIME_SLOT` | 刻意取短：AF_UNIX 路径上限 107 字节 |
 | `MASTER_ADDR` | `127.0.0.1` | |
 | **训练参数** | | |
 | `OVERRIDE_ARGS` | 空 | 数组，追加在所有参数组之后，因而覆盖同名项 |
 
-dual-venv，训练与 rollout 各用一套 torch：
+训练和推理使用独立的 Python 环境时，在本机配置文件中分别设置两个环境的路径。
 
 ```bash
 export VIME_TRAIN_ENV=/path/to/train/env
@@ -181,7 +199,7 @@ OVERRIDE_ARGS=(--num-rollout 3000 --max-tokens-per-gpu 4096)
 
 ### 模式
 
-`MODE` 展开成五处改动：
+公共启动器根据 `MODE` 选择训练入口。下表以第 2.1 节的脚本为例，列出各模式下由模型脚本追加的参数。
 
 | | `sync` | `async` | `fully-async` |
 |---|---|---|---|
@@ -195,9 +213,7 @@ OVERRIDE_ARGS=(--num-rollout 3000 --max-tokens-per-gpu 4096)
 
 ### 确定性
 
-`DET=on` 在三处同时加入参数：训练侧的 `--debug.seed` 与 `--debug.deterministic`、采样侧的 `--vllm-enable-deterministic-inference` 与 `--rollout-seed`、以及 ray worker 环境里的 `HCCL_DETERMINISTIC=strict` 与 `LCCL_DETERMINISTIC=1`。
-
-之所以是一个开关而非三个：HCCL 这项必须两端一致。vllm-ascend 的 batch-invariant 路径会把 rollout worker 强制设为 `strict`，训练侧若停在 `true`，跨进程权重传输所用的集合通信会死锁。
+公共 launcher 为训练和推理启用确定性计算及 `--rl-batch-invariant`。Ray 工作进程使用 `HCCL_DETERMINISTIC=strict` 和 `LCCL_DETERMINISTIC=1`，确保训练与推理在传输权重时使用一致的通信设置。
 
 ### 目录
 
@@ -216,6 +232,8 @@ ckpt 路径跨次运行稳定，`--load` 才能续上；归档路径带时间戳
 | `train.log` | 训练输出 |
 
 `rerun.sh` 存的是字面命令而非重新调用模型脚本，因此之后修改参数或 `local.sh` 都不会改变它重放的内容。
+
+不过，`rerun.sh` 不保存完整机器环境；独立重放时仍需准备相同的 Python、CANN、ATB 和编译器环境。日常启动建议继续使用模型入口与 `--local`。
 
 ### ray worker 环境变量
 

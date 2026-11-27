@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import shlex
 from pathlib import Path
 
@@ -61,11 +62,28 @@ class CodexHarness(BaseHarness):
     )
 
     async def install_cli(self, sb: Sandbox) -> None:
+        expected = os.environ.get("VIME_AGENT_CODEX_VERSION", "").strip()
+        if not expected:
+            match = re.search(r"-(\d+\.\d+\.\d+)\.tgz$", os.environ.get(self.cli_tarball_env, ""))
+            expected = match.group(1) if match else ""
+        if expected:
+            code, out, _ = await sb.exec(
+                "command -v codex >/dev/null 2>&1 && codex --version",
+                user="root", timeout=30, check=False,
+            )
+            if code == 0 and out.strip().split()[-1:] == [expected]:
+                return
+        missing = [key for key in (self.node_tarball_env, self.cli_tarball_env) if not os.environ.get(key)]
+        if missing:
+            raise RuntimeError("Codex installation requires: " + ", ".join(missing))
+        check_cmd = "codex --version"
+        if expected:
+            check_cmd += f" | grep -Eq {shlex.quote('(^| )' + re.escape(expected) + '$')}"
         await install_npm_cli(
             sb,
             node_runtime=Path(os.environ[self.node_tarball_env]),
             npm_package=Path(os.environ[self.cli_tarball_env]),
-            check_cmd="codex --version",
+            check_cmd=check_cmd,
         )
 
     async def write_config(self, sb: Sandbox, ctx: HarnessContext) -> None:

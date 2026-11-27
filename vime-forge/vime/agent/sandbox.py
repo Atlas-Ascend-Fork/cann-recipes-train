@@ -9,18 +9,23 @@ one sandbox provider.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
-from contextlib import contextmanager
 import io
 import logging
 import os
 import random
+import shlex
 import sys
 import time
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from vime.observability.trace_utils import TraceHandle, trace_event, trace_span
+from .config import apply_agentenv_config, effective_sandbox_env
+
+if TYPE_CHECKING:
+    from vime.observability.trace_utils import TraceHandle
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +95,8 @@ def _sandbox_command_span(sandbox: Sandbox, cmd: str):
     if trace is None or _MARKER_RPC.get() is not None or _SUPPRESS_COMMAND_SPAN.get():
         yield None
         return
+    from vime.observability.trace_utils import trace_span
+
     attrs = {
         "sandbox_id": sandbox.sandbox_id,
         "sandbox_role": getattr(sandbox, "observation_role", "agent"),
@@ -102,6 +109,36 @@ def _sandbox_command_span(sandbox: Sandbox, cmd: str):
 def _set_command_exit_code(span: Any, exit_code: int) -> None:
     if span is not None and hasattr(span, "set"):
         span.set("exit_code", int(exit_code))
+
+
+class SandboxAdmissionTimeout(TimeoutError):
+    """Capacity admission expired before setup; do not recreate/requeue blindly."""
+
+
+class SandboxCommandTimeout(RuntimeError):
+    """The worker returned a complete command-timeout reply; execution is unknown.
+
+    Only read-only completion checks may retry this error. It is deliberately
+    distinct from a transport timeout, which can leave an unread RPC response.
+    """
+
+
+def _positive_env(name: str, default: int) -> int:
+    value = int(os.environ.get(name, default))
+    if value <= 0:
+        raise ValueError(f"{name} must be positive")
+    return value
+
+
+@asynccontextmanager
+async def sandbox_preparation(sb: Sandbox):
+    """Optional provider admission control, held through all agent preparation."""
+    prepare = getattr(sb, "preparation", None)
+    if prepare is None:
+        yield
+    else:
+        async with prepare():
+            yield
 
 
 def _exception_chain(error: BaseException):
@@ -138,6 +175,9 @@ async def _await_done_marker(sb: Sandbox, done_file: str, *, user: str, time_bud
     clock. Only this read-only operation opts into wrapped-transport recovery.
     """
     deadline = time.monotonic() + time_budget_sec
+    poll_timeout = _positive_env("VIME_AGENT_MARKER_TIMEOUT_SEC", 15)
+    retry_limit = _positive_env("VIME_AGENT_MARKER_TIMEOUT_RETRIES", 3)
+    timeout_count = 0
     cmd = f"test -f {done_file} && cat {done_file}"
     while time.monotonic() < deadline:
         await asyncio.sleep(min(5, max(0, deadline - time.monotonic())))
@@ -147,15 +187,27 @@ async def _await_done_marker(sb: Sandbox, done_file: str, *, user: str, time_bud
         token = _MARKER_RPC.set(f"exec({cmd[:60]!r})")
         try:
             ec, out, _ = await asyncio.wait_for(
-                sb.exec(cmd, user=user, timeout=min(15, remaining), check=False),
+                sb.exec(cmd, user=user, timeout=min(poll_timeout, remaining), check=False),
                 timeout=remaining,
             )
+        except SandboxCommandTimeout:
+            timeout_count += 1
+            if time.monotonic() >= deadline:
+                return EXIT_TIME_BUDGET_EXCEEDED
+            if timeout_count > retry_limit:
+                raise
+            delay = min(2 ** timeout_count + random.random(), 15, deadline - time.monotonic())
+            logger.warning("sandbox=%s marker_timeout retry=%d/%d backoff_sec=%.2f",
+                           sb.sandbox_id, timeout_count, retry_limit, max(0, delay))
+            await asyncio.sleep(max(0, delay))
+            continue
         except asyncio.TimeoutError:
             if time.monotonic() < deadline:
                 raise  # A genuine request timeout, not exhaustion of our budget.
             return EXIT_TIME_BUDGET_EXCEEDED
         finally:
             _MARKER_RPC.reset(token)
+        timeout_count = 0
         if ec == 0 and (out or "").strip():
             return int(out.strip())
     return EXIT_TIME_BUDGET_EXCEEDED
@@ -187,10 +239,11 @@ async def exec_and_wait(
     but polling does not extend the sandbox lifetime.
     """
     out_file = out_file or f"/tmp/.{tag}.out"
+    quoted_out_file = shlex.quote(out_file)
     done_file = f"/tmp/.{tag}.done"
     launcher = f"/tmp/.{tag}.sh"
     lock_dir = f"/tmp/.{tag}.spawned"
-    prefix = f"cd {workdir}\nexport HOME=/home/{user}\n" if workdir else ""
+    prefix = f"cd {shlex.quote(workdir)}\nexport HOME=/home/{user}\n" if workdir else ""
     launcher_body = f"#!/bin/bash\n{prefix}{cmd}\necho $? > {done_file}\n"
     await sb.write_file(launcher, launcher_body, user=user)
 
@@ -204,7 +257,7 @@ async def exec_and_wait(
     with _sandbox_command_span(sb, cmd) as span:
         with _suppress_command_span():
             await sb.exec(
-                f"rm -rf {lock_dir}; rm -f {out_file} {done_file}",
+                f"rm -rf {lock_dir}; rm -f {quoted_out_file} {done_file}",
                 user=user,
                 timeout=30,
                 check=True,
@@ -213,7 +266,7 @@ async def exec_and_wait(
             await sb.exec(
                 f"chmod +x {launcher}; "
                 f"mkdir {lock_dir} 2>/dev/null || exit 0; "
-                f"setsid bash {launcher} < /dev/null > {out_file} 2>&1 &",
+                f"setsid bash {launcher} < /dev/null > {quoted_out_file} 2>&1 &",
                 user=user,
                 env=env,
                 timeout=30,
@@ -228,17 +281,20 @@ async def exec_and_wait(
     if want_output:
         return exit_code, await sb.read_file(out_file, user=user)
     with _suppress_command_span():
-        _, tail, _ = await sb.exec(f"tail -c 512 {out_file} 2>/dev/null", user=user, timeout=15, check=False)
+        _, tail, _ = await sb.exec(
+            f"tail -c 512 {quoted_out_file} 2>/dev/null", user=user, timeout=15, check=False
+        )
     return exit_code, tail or ""
 
 
-def _getenv(*names: str, default: str = "") -> str:
+def _getenv(*names: str, default: str = "", env: Mapping[str, str] | None = None) -> str:
     """First non-empty environment value among ``names`` (else ``default``).
 
     Lets a setting carry a primary name plus legacy aliases: list the canonical
     ``VIME_AGENT_*`` name first, older names after."""
+    source = os.environ if env is None else env
     for name in names:
-        value = os.environ.get(name)
+        value = source.get(name)
         if value is not None and value.strip():
             return value
     return default
@@ -291,39 +347,40 @@ class E2BSandbox:
         observation_role: str = "agent",
         trace: TraceHandle | None = None,
     ) -> None:
+        env = effective_sandbox_env()
         self.image = image
-        # Labels events as agent or verifier activity; it does not alter the
-        # sandbox API or execution behavior.
         self.observation_role = observation_role
         self.trace = trace
-        self.timeout = timeout if timeout is not None else self._lifetime_sec_from_env()
-        self.image_metadata_key = image_metadata_key or self._image_metadata_key_from_env()
-        self.selector_mode = selector_mode or _getenv(*self.selector_mode_env, default=self.default_selector_mode)
+        self.timeout = timeout if timeout is not None else self._lifetime_sec_from_env(env)
+        self.image_metadata_key = image_metadata_key or self._image_metadata_key_from_env(env)
+        self.selector_mode = selector_mode or _getenv(
+            *self.selector_mode_env, default=self.default_selector_mode, env=env
+        )
         if self.selector_mode not in {"metadata", "template"}:
             raise ValueError(
                 "VIME_AGENT_E2B_SELECTOR_MODE must be 'metadata' or 'template', "
                 f"got {self.selector_mode!r}"
             )
-        self.rpc_retries = rpc_retries if rpc_retries is not None else self._rpc_retries_from_env()
-        self.size = size if size is not None else self._size_from_env()
+        self.rpc_retries = rpc_retries if rpc_retries is not None else self._rpc_retries_from_env(env)
+        self.size = size if size is not None else self._size_from_env(env)
         self._sb = None
         self.sandbox_id = ""
 
     @classmethod
-    def _image_metadata_key_from_env(cls) -> str | None:
-        return _getenv(*cls.image_metadata_key_env) or None
+    def _image_metadata_key_from_env(cls, env: Mapping[str, str] | None = None) -> str | None:
+        return _getenv(*cls.image_metadata_key_env, env=env) or None
 
     @classmethod
-    def _lifetime_sec_from_env(cls) -> int:
-        return int(_getenv(*cls.lifetime_sec_env, default=str(cls.default_lifetime_sec)))
+    def _lifetime_sec_from_env(cls, env: Mapping[str, str] | None = None) -> int:
+        return int(_getenv(*cls.lifetime_sec_env, default=str(cls.default_lifetime_sec), env=env))
 
     @classmethod
-    def _rpc_retries_from_env(cls) -> int:
-        return int(_getenv(*cls.rpc_retries_env, default=str(cls.default_rpc_retries)))
+    def _rpc_retries_from_env(cls, env: Mapping[str, str] | None = None) -> int:
+        return int(_getenv(*cls.rpc_retries_env, default=str(cls.default_rpc_retries), env=env))
 
     @classmethod
-    def _size_from_env(cls) -> str:
-        return _getenv(*cls.size_env, default=cls.default_size)
+    def _size_from_env(cls, env: Mapping[str, str] | None = None) -> str:
+        return _getenv(*cls.size_env, default=cls.default_size, env=env)
 
     # Transient client-side failures safe to retry.
     _TRANSIENT_RPC_ERRORS = frozenset(
@@ -380,6 +437,8 @@ class E2BSandbox:
             if type(e).__name__ == "CommandExitException":
                 raise
             if self.trace is not None:
+                from vime.observability.trace_utils import trace_event
+
                 trace_event(
                     self.trace,
                     "agentic.sandbox_rpc_failed",
@@ -410,6 +469,7 @@ class E2BSandbox:
                 "The legacy SWE_SANDBOX_IMAGE_METADATA_KEY name is also "
                 "accepted for coding-agent examples."
             )
+        apply_agentenv_config()
         _append_optional_sdk_path("VIME_AGENT_E2B_SDK_PATH")
         from e2b import AsyncSandbox  # type: ignore
 
@@ -430,6 +490,8 @@ class E2BSandbox:
         self._sb = await self._rpc_retry("create", create)
         self.sandbox_id = self._sb.sandbox_id
         if self.trace is not None:
+            from vime.observability.trace_utils import trace_event
+
             trace_event(
                 self.trace,
                 "agentic.sandbox_ready",
@@ -447,6 +509,8 @@ class E2BSandbox:
                 await self._sb.kill()
         except Exception as e:
             if self.trace is not None:
+                from vime.observability.trace_utils import trace_event
+
                 trace_event(
                     self.trace,
                     "agentic.sandbox_destroy_failed",
@@ -600,6 +664,8 @@ class E2BSandbox:
 
     def _record_rpc_retry(self, op_name: str, attempt: int, error: Exception, backoff: float) -> None:
         if self.trace is not None:
+            from vime.observability.trace_utils import trace_event
+
             trace_event(
                 self.trace,
                 "agentic.sandbox_rpc_retry",
@@ -615,12 +681,32 @@ class E2BSandbox:
 
 
 async def ensure_agent_user(sb: Sandbox, workdir: str) -> None:
-    """Create the unprivileged 'agent' user that owns workdir + can git diff."""
-    await sb.exec(
-        f"id agent >/dev/null 2>&1 || useradd -m -s /bin/bash agent && "
-        f"chown -R agent:agent /home/agent {workdir} && "
-        f"git config --system --add safe.directory '*' && id agent",
-        user="root",
-        check=True,
-        timeout=60,
-    )
+    """Prepare ownership once per sandbox identity/workdir, after success only.
+
+    Subsequent workspace writes must use the agent user. No mutation is replayed
+    on timeout; the orchestrator discards the failed sandbox before retrying.
+    """
+    if not hasattr(sb, "_agent_ownership_lock"):
+        sb._agent_ownership_lock = asyncio.Lock()
+        sb._agent_owned_workspaces = set()
+    async with sb._agent_ownership_lock:
+        key = (sb.sandbox_id, workdir)
+        if key in sb._agent_owned_workspaces:
+            return
+        timeout = _positive_env("VIME_AGENT_WORKSPACE_PREP_TIMEOUT_SEC", 60)
+        started = time.monotonic()
+        try:
+            await sb.exec(
+                "id agent >/dev/null 2>&1 || useradd -m -s /bin/bash agent && "
+                f"chown -R agent:agent /home/agent {shlex.quote(workdir)} && "
+                "(if command -v git >/dev/null 2>&1; "
+                "then git config --system --add safe.directory '*'; fi) && id agent",
+                user="root", check=True, timeout=timeout, idempotent=False,
+            )
+        except BaseException as error:
+            logger.warning("sandbox=%s stage=ownership status=%s elapsed_sec=%.3f timeout_sec=%s",
+                           sb.sandbox_id, type(error).__name__, time.monotonic() - started, timeout)
+            raise
+        sb._agent_owned_workspaces.add(key)
+        logger.info("sandbox=%s stage=ownership status=ok elapsed_sec=%.3f",
+                    sb.sandbox_id, time.monotonic() - started)

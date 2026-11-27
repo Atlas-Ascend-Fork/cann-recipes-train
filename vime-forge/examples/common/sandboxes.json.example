@@ -1,0 +1,48 @@
+{
+  "common": {
+    "lifetime_sec": 9000,
+    "boot_concurrency": 8,
+    "boot_retries": 3
+  },
+  "agentenv": {
+    "api_url": "http://agentenv.example:18000",
+    "sandbox_url": "http://agentenv.example:18000",
+    "api_key_file": "/path/on/npu/agentenv-api-key",
+    "sdk_path": "",
+    "selector_mode": "template",
+    "size": "md",
+    "rpc_retries": 6
+  },
+  "harbor": {
+    "environment": "remote_docker",
+    "hosts": [
+      {
+        "ssh": "sandbox@cpu-a.example",
+        "ssh_args": ["-p", "32", "-i", "/path/on/npu/sandbox-key", "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=yes"],
+        "python": "/path/on/cpu/harbor-venv/bin/python",
+        "worker": "/path/on/cpu/harbor_worker.py",
+        "root": "/path/on/cpu/harbor-state",
+        "slots": 64,
+        "docker_compose": []
+      },
+      {
+        "ssh": "sandbox@cpu-b.example",
+        "ssh_args": ["-p", "32", "-i", "/path/on/npu/sandbox-key", "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=yes"],
+        "python": "/path/on/cpu/harbor-venv/bin/python",
+        "worker": "/path/on/cpu/harbor_worker.py",
+        "root": "/path/on/cpu/harbor-state",
+        "slots": 64,
+        "docker_compose": []
+      }
+    ],
+    "cpus": 16,
+    "memory_mb": 65536,
+    "registry": "",
+    "startup_timeout": 600,
+    "acquire_timeout": 600,
+    "marker_cancel_grace": 30,
+    "prepare_concurrency": 8,
+    "prepare_acquire_timeout": 1800,
+    "prepare_queue_limit": 32
+  }
+}
