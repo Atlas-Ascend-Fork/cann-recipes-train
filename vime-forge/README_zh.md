@@ -79,7 +79,7 @@ Agent 工作负载通过 Vime 的定制接口接入标准 rollout / Data Buffer 
 
 Vime 的参数分为三类：
 
-1. **torchtitan 参数**：`--module` / `--config` 指定 `config_registry` 中的预置配置函数，由它返回预置配置，给出模型规格、优化器、精度等基线；`--<字段>.<子字段>` 形式的点分参数覆盖预置配置中的字段，例如 `--parallelism.tensor_parallel_degree 4`。详见 [torchtitan 训练后端](docs/zh/advanced/torchtitan-backend.md) 第 6 章；
+1. **torchtitan 参数**：`--module` / `--config` 指定 `config_registry` 中的预置配置函数，由它返回预置配置，给出模型规格、优化器、精度等基线；`--<字段>.<子字段>` 形式的点分参数覆盖预置配置中的字段，例如 `--parallelism.tensor_parallel_degree 4`。详见 [torchtitan 训练后端](docs/torchtitan-backend.md) 第 6 章；
 2. **vLLM 参数**：vLLM server 与 engine 相关选项以 `--vllm-` 为前缀（例如 `--vllm-gpu-memory-utilization`）。vllm-router 自身的选项以 `--router-` 传入（例如 `--router-policy round_robin`）；Vime 侧的 router 编排参数使用 `--vllm-router-` 前缀，包括 `--vllm-router-ip`、`--vllm-router-port` 和实际生效的 `--vllm-router-request-timeout-secs`。完整参数见 [vime/backends/vllm_utils/arguments.py](vime/backends/vllm_utils/arguments.py)。
 3. **框架参数**：与 Vime 编排相关的开关（rollout GPU、数据路径、RL 算法等），见 [vime/utils/arguments.py](vime/utils/arguments.py)。
 

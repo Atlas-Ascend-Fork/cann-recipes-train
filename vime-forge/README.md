@@ -78,7 +78,7 @@ See the [Agentic RL Training Roadmap](docs/en/get_started/agent.md) and [Customi
 
 Arguments in Vime are divided into three categories:
 
-1. **torchtitan arguments**: `--module` / `--config` selects a preset config function from `config_registry`, which returns a preset config providing baselines such as model specification, optimizer, and precision; dotted arguments of the form `--<field>.<subfield>` override fields in the preset config, for example `--parallelism.tensor_parallel_degree 4`. See Chapter 6 of the [torchtitan training backend](docs/zh/advanced/torchtitan-backend.md).
+1. **torchtitan arguments**: `--module` / `--config` selects a preset config function from `config_registry`, which returns a preset config providing baselines such as model specification, optimizer, and precision; dotted arguments of the form `--<field>.<subfield>` override fields in the preset config, for example `--parallelism.tensor_parallel_degree 4`. See Chapter 6 of the [torchtitan training backend](docs/torchtitan-backend.md).
 2. **vLLM arguments**: vLLM server and engine options are exposed with a `--vllm-` prefix (for example, `--vllm-gpu-memory-utilization`). vllm-router's own options are passed with `--router-` (for example, `--router-policy round_robin`); Vime-side router orchestration arguments use the `--vllm-router-` prefix, including `--vllm-router-ip`, `--vllm-router-port`, and the effective `--vllm-router-request-timeout-secs`. See [vime/backends/vllm_utils/arguments.py](vime/backends/vllm_utils/arguments.py) for the full surface.
 3. **Framework arguments**: Flags related to Vime orchestration (rollout GPUs, data paths, RL algorithms, etc.), see [vime/utils/arguments.py](vime/utils/arguments.py).
 
