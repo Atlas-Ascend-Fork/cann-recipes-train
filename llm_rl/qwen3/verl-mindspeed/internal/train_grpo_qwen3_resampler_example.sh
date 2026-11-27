@@ -43,7 +43,7 @@ export VLLM_USE_V1=1
 export USE_ALLTOALL_OVERLAP=1
 export HCCL_OP_EXPANSION_MODE=AIV
 export VLLM_LOGGING_LEVEL=INFO
-export VLLM_ENABLE_MC2=1                     # 910C开启
+export VLLM_ENABLE_MC2=1                     # Atlas A3 开启
 export VLLM_DP_SIZE=16                        # world_size // rollout.tp_size
 export HCCL_BUFFSIZE=800
 

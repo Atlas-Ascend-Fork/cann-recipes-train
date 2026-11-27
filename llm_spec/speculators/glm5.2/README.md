@@ -116,7 +116,7 @@ pip install mooncake-transfer-engine-npu==0.3.11.post1
 
 W4A8C8 verifier 另需引擎侧支持 `--quantization ascend`，并保证 `/data/GLM-5.2-w4a8c8` 这类量化权重目录在**每台引擎节点本地都可读**。
 
-**A3 侧开关与版本的关系**：`serve_vllm_hs_glm5.2.sh` 里有一组只服务于 A3（910C）大 EP 布局的开关，它们不是通用必需项，版本前提各不相同：
+**A3 侧开关与版本的关系**：`serve_vllm_hs_glm5.2.sh` 里有一组只服务于 Atlas A3 大 EP 布局的开关，它们不是通用必需项，版本前提各不相同：
 
 | 开关 | 读取方 | 版本前提 |
 | --- | --- | --- |

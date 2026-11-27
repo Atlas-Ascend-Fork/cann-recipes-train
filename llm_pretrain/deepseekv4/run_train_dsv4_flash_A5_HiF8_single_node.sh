@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# DeepSeek-V4-Flash single-node HiF8 low-precision pretrain launcher for Atlas A5.
+# DeepSeek-V4-Flash single-node HiF8 low-precision pretrain launcher for Ascend 950.
 #
 # Copy this script into torchtitan-npu/scripts/ and run it FROM the torchtitan-npu
 # source root (same convention as run_train_dsv4_flash_A5_BF16_pretrain.sh):
@@ -27,7 +27,7 @@
 # torchtitan-npu repo root on PYTHONPATH -- both handled below.
 #
 # Requirements:
-#   * Atlas A5 / Ascend 950 (HiF8 has no python-level HW guard; non-A5 fails at op call)
+#   * Ascend 950 (HiF8 has no python-level HW guard; non-A5 fails at op call)
 #   * torchtitan-npu on branch `master` with its deps installed
 #     (`pip install -r requirements.txt`, notably torchao==0.17.0)
 #   * CANN env sourced BEFORE running (this script also sources the defaults below)

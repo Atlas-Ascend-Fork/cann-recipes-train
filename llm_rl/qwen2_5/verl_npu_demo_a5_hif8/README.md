@@ -2,13 +2,13 @@
 
 ## 概述
 
-在Ascend 950实现 [`../verl_npu_demo`](../verl_npu_demo)。模型、数据集、chat template、奖励函数与原样例保持一致，区别是平台为 <term>Atlas A5 系列产品</term> + CANN 9.2，并添加 **HiF8（W8A8_HIF8_PTS）** rollout 功能以加速强化学习。
+在Ascend 950实现 [`../verl_npu_demo`](../verl_npu_demo)。模型、数据集、chat template、奖励函数与原样例保持一致，区别是平台为 <term>Ascend 950 系列产品</term> + CANN 9.2，并添加 **HiF8（W8A8_HIF8_PTS）** rollout 功能以加速强化学习。
 
 两组同用启动脚本 [run_qwen2_5_1_5b_A5.sh](run_qwen2_5_1_5b_A5.sh)，第一个参数选 `bf16`（BF16 对照）或 `hif8`（W8A8_HIF8）。
 
 ## 支持的产品型号
 
-<term>Atlas A5系列产品</term>。A2/A3 走原样例流程，不受影响。
+<term>Ascend 950 系列产品</term>。A2/A3 走原样例流程，不受影响。
 
 ## 环境准备
 

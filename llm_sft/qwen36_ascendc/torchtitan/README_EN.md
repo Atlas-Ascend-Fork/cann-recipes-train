@@ -18,7 +18,7 @@ For training results and the training process report, see the [practice report](
 
 | Component | Version or revision |
 | --- | --- |
-| Hardware | 8 Ascend 910C cards (16 dies) |
+| Hardware | 8 Atlas A3 cards (16 dies) |
 | CANN | 9.2.0 |
 | TorchTitan | `c91448d20480c7b294314e68976823050002ebec` |
 | TorchTitan-NPU | `2afd4c01aa5b1bc9a860a2bd67bdd212b1b1a8f7` |
@@ -34,7 +34,7 @@ cd llm_sft/qwen36_ascendc/torchtitan
 docker build -t cannbot-qwen36-sft:cannbot-domain .
 ```
 
-Mount a legally obtained Hugging Face base model, the JSONL data, and an independent output directory when starting the container. Pass through all 8 Ascend 910C cards (16 dies) and the host driver.
+Mount a legally obtained Hugging Face base model, the JSONL data, and an independent output directory when starting the container. Pass through all 8 Atlas A3 cards (16 dies) and the host driver.
 
 ### 2. Validate the training data
 

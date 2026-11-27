@@ -9,9 +9,9 @@ AscendC 算子的开发应以功能正确性为首要目标，确保代码可成
 
 ### 硬件平台说明
 
-**目标硬件**：生成在 **Ascend 910C（SoC 家族 `ascend910_93`）** NPU 上编译并评测的高性能算子。请针对该平台编写代码：
-- 只使用在 Ascend 910C / `ascend910_93` 上有效的 AscendC API 与 intrinsic。
-- 设计 tiling 与 buffer（AI Core 数量、UB / L0 / L1 容量、支持的 dtype）时请按 **910C 语义**来假定。
+**目标硬件**：生成在 **Atlas A3（SoC 家族 `ascend910_93`）** NPU 上编译并评测的高性能算子。请针对该平台编写代码：
+- 只使用在 Atlas A3 / `ascend910_93` 上有效的 AscendC API 与 intrinsic。
+- 设计 tiling 与 buffer（AI Core 数量、UB / L0 / L1 容量、支持的 dtype）时请按 **Atlas A3 语义**来假定。
 
 
 ## 本任务算子规格等信息详述

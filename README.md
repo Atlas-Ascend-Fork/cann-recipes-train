@@ -27,15 +27,15 @@
 ## 🚀 最新动态
 
 - [2026/10] 新增 [speculators DSpark 草稿模型训练样例](llm_spec/speculators/README.md)，在 Atlas A2 上完成 Qwen3.8-27B（BF16）与 GLM5.2（W4A8C8）DSpark 草稿模型训练，接受长度在同一评测框架下与 DeepSeek 官方模型并列参考
-- [2026/09] 新增 [Qwen2.5 HiF8 低精度 RL 样例](llm_rl/qwen2_5/verl_npu_demo_a5_hif8/README.md)，在 Atlas A5 上支持多卡 HiF8 低精度 RL 后训练
+- [2026/09] 新增 [Qwen2.5 HiF8 低精度 RL 样例](llm_rl/qwen2_5/verl_npu_demo_a5_hif8/README.md)，在 Ascend 950 上支持多卡 HiF8 低精度 RL 后训练
 - [2026/09] 新增 [DeepSpec DSpark草稿模型训练支持](llm_sft/DeepSpec/README.md)样例，在 Atlas A3上完成开源DSpark同结构草稿模型训练
 - [2026/09] 新增 [鲲鹏CPU、昇腾950与灵衢协同的 Agentic RL 训练实践](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/llm_rl/kunpeng_ascend_agentic_rl/zh/kunpeng_ascend_agentic_rl_infrastructure.md)，支持 AgentENV 沙箱与多 Harness 训练，实现 DSV4 Flash 训推bitwise对齐 MXFP8/MXFP4 低精度训练与长序列等特性。
 - [2026/09] 新增 [基于昇腾950超节点的万亿MoE模型预训练系统参考实践](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/llm_pretrain/ascend950/zh/ascend950_superpod_moe_pretrain_system_reference.md)，围绕**超大规模、超长序列、多模态、高可用训练及训练开发者效率提升**等复杂场景提供系统参考实践。
 - [2026/09] 新增 [DeepSeek-V4.1-Flash 模型CPT/SFT支持](llm_pretrain/deepseek_v4_1/README.md)样例，基于 TorchTitan-NPU + TorchAO-NPU，在 **Ascend950 64 卡**集群完成全参模型低精度训练复现
 - [2026/09] 新增 Qwen3.6-27B 和 DeepSeek-V4-Flash-0731 模型 AscendC 算子生成监督微调支持，包括 Qwen3.6-27B 的 [TorchTitan-NPU 样例](llm_sft/qwen36_ascendc/torchtitan/README.md)、[MindSpeed-MM 样例](llm_sft/qwen36_ascendc/mindspeed-mm/README.md)，以及 DeepSeek-V4-Flash-0731 的 [MindSpeed-LLM LoRA 样例](llm_sft/dsv4_flash_ascendc/mindspeed-llm/README.md)
-- [2026/08] 新增 [DeepSeek-V4-Flash HiF8 低精度预训练](llm_pretrain/deepseekv4/README.md#deepseek-v4-flash-a5-hif8-%E4%BD%8E%E7%B2%BE%E5%BA%A6%E8%AE%AD%E7%BB%83)样例，在 Atlas A5 上使能单卡 HiF8 低精度预训练
+- [2026/08] 新增 [DeepSeek-V4-Flash HiF8 低精度预训练](llm_pretrain/deepseekv4/README.md#deepseek-v4-flash-a5-hif8-%E4%BD%8E%E7%B2%BE%E5%BA%A6%E8%AE%AD%E7%BB%83)样例，在 Ascend 950 上使能单卡 HiF8 低精度预训练
 - [2026/05] 新增 [DeepSeek-V4-Pro 模型续训练支持](llm_pretrain/deepseekv4/README.md)，基于 TorchTitan-NPU + AutoFuse，使能 **训练入图、AutoFuse**
-- [2026/04] 新增 [DeepSeek-V3 MXFP8/HiF8 低精度预训练](llm_pretrain/DeepSeekV3/README.md)样例，在 Atlas A5 上完成 8K 序列低精度预训练复现
+- [2026/04] 新增 [DeepSeek-V3 MXFP8/HiF8 低精度预训练](llm_pretrain/DeepSeekV3/README.md)样例，在 Ascend 950 上完成 8K 序列低精度预训练复现
 - [2026/04] 新增 [DeepSeek-V4-Flash 模型续训练 0day 支持](llm_pretrain/deepseekv4/README.md)，支持 **极简切分、训练入图、AutoFuse**
 - [2026/02] 新增 [DeepSeek-V3.2 TorchTitan 预训练](llm_pretrain/deepseekv32/README.md)样例，在 Atlas A3 64 卡集群完成 32K 长序列预训练复现
 - [2026/02] 新增 [Qwen3 系列模型 RL 训练使能 npugraph_ex 图模式](llm_rl/qwen3/verl-mindspeed/README.md)样例
@@ -204,7 +204,7 @@ flowchart TB
 | 预训练 / 续训练 | 低精度训练（MXFP8 / HiF8） | 通过低精度数据格式兼顾显存、吞吐与训练精度 | [DeepSeek-V3 低精度训练文档](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/llm_pretrain/deepseek_v3/zh/deepseek-v3_pre_train_hif8_mxfp8.md) |
 | 预训练 / 续训练 | Swap Optimizer / 优化器状态卸载 | 降低 FSDP2 场景下优化器状态的设备显存占用 | [DeepSeek-V4 训练优化文档](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/llm_pretrain/deepseek_v4/zh/deepseek-v4_torchtitan_npu_autofuse.md) |
 | SFT | MindSpeed-LLM SFT 链路适配 | 提供数据处理、权重转换、训练启动的一站式微调链路 | [Qwen3-1.7B SFT](llm_sft/qwen3/README.md) |
-| SFT | Ascend C 算子生成领域全参数微调 | 提供基于 TorchTitan-NPU 的 8 卡 910C（16 die）、CP8 × FSDP2 长序列领域微调 | [Qwen3.6-27B Ascend C 算子生成](llm_sft/qwen36_ascendc/torchtitan/README.md) |
+| SFT | Ascend C 算子生成领域全参数微调 | 提供基于 TorchTitan-NPU 的 8 卡 Atlas A3（16 die）、CP8 × FSDP2 长序列领域微调 | [Qwen3.6-27B Ascend C 算子生成](llm_sft/qwen36_ascendc/torchtitan/README.md) |
 | RL | TorchAir / npugraph_ex 推理图优化 | 在 rollout 推理阶段降低动态图调度开销，提升长序列 RL 性能 | [Qwen3 长序列 RL 训练优化文档](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/llm_rl/qwen3/qwen3_235B/zh/qwen3_235B_32k_longseq_rl_train_optimization.md) |
 | RL | SAM 无损投机解码 | 在保持训练结果一致性的前提下提升 rollout decode 效率 | [SAM 无损投机推理文档](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/features/zh/sam_speculative_decoding.md) |
 | RL | Rollout Rebalance 序列级均衡调度 | 缓解 On-Policy rollout 中 response 长尾导致的推理负载不均 | [Rollout Rebalance 文档](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/features/zh/rollout_rebalance.md) |
@@ -235,8 +235,8 @@ flowchart TB
 | [Qwen3-1.7B SFT](llm_sft/qwen3/README.md) | MindSpeed-LLM SFT 样例，支持一站式平台快速启动 |
 | [Qwen3-1.7B TorchTitan-NPU SFT](llm_sft/qwen3_1.7B_torchtitan/README.md) | 单卡 TorchTitan-NPU SFT 样例，支持一站式平台快速启动 |
 | [Qwen3-30B-A3B 医学 SFT](llm_sft/qwen3_30b_a3b/README.md) | 基于 TorchTitan-NPU 的医学领域多卡全参微调与效果评测样例 |
-| [Qwen3.6-27B Ascend C 算子生成](llm_sft/qwen36_ascendc/torchtitan/README.md) | 基于 TorchTitan-NPU 的 8 卡 910C（16 die）、CP8 × FSDP2 全参数监督微调样例 |
-| [Qwen3.6-27B Ascend C 算子生成](llm_sft/qwen36_ascendc/mindspeed-mm/README.md) | 基于 MindSpeed-MM 的 8 卡 910C（16 die）、CP8 × FSDP2 全参数及 LoRA 监督微调样例 |
+| [Qwen3.6-27B Ascend C 算子生成](llm_sft/qwen36_ascendc/torchtitan/README.md) | 基于 TorchTitan-NPU 的 8 卡 Atlas A3（16 die）、CP8 × FSDP2 全参数监督微调样例 |
+| [Qwen3.6-27B Ascend C 算子生成](llm_sft/qwen36_ascendc/mindspeed-mm/README.md) | 基于 MindSpeed-MM 的 8 卡 Atlas A3（16 die）、CP8 × FSDP2 全参数及 LoRA 监督微调样例 |
 | [DeepSeek-V4.1-Flash](llm_sft/deepseek_v4_1/README.md) | 基于TorchTitan-NPU + TorchAO-NPU 的 mxFP8 低精度训练，使用多模态数据集，在64卡Ascend 950集群完成全参数监督微调 |
 
 #### 强化学习训练

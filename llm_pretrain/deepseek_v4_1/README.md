@@ -11,7 +11,7 @@
 ### DeepSeek-V4.1-Flash 模型基于[master分支](https://gitcode.com/cann/torchtitan-npu)的硬件与软件要求
 | 项目 | 要求 |
 | --- | --- |
-| 产品型号 | Atlas A5 系列 |
+| 产品型号 | Ascend 950 系列 |
 | 最小卡数要求 | 16 机 128 卡 A5 |
 | 操作系统 | Linux ARM |
 | 驱动版本 | Ascend HDK 25.1.RC2 |

@@ -18,7 +18,7 @@
 
 | 组件 | 发布构建版本或 revision |
 | --- | --- |
-| 硬件 | 8 卡 910C（16 die） |
+| 硬件 | 8 卡 Atlas A3（16 die） |
 | CANN | 9.2.0 |
 | TorchTitan | `c91448d20480c7b294314e68976823050002ebec` |
 | TorchTitan-NPU | `2afd4c01aa5b1bc9a860a2bd67bdd212b1b1a8f7` |
@@ -34,7 +34,7 @@ cd llm_sft/qwen36_ascendc/torchtitan
 docker build -t cannbot-qwen36-sft:cannbot-domain .
 ```
 
-容器运行时需要挂载合法获取的 Hugging Face 基础模型、JSONL 数据和独立输出目录，并透传 8 卡 910C（16 die）及宿主机驱动。
+容器运行时需要挂载合法获取的 Hugging Face 基础模型、JSONL 数据和独立输出目录，并透传 8 卡 Atlas A3（16 die）及宿主机驱动。
 
 ### 2. 校验训练数据
 

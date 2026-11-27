@@ -2,10 +2,10 @@
 
 ## 概述
 
-本样例针对DeepSeek-V3 裁剪模型，基于[MindSpeed 框架](https://gitcode.com/Ascend/MindSpeed)，在 8 卡 Atlas A5 上完成8K序列MXFP8/HiF8 低精度预训练。MXFP8/HiF8 低精度预训练介绍可参见[HiF8精度与性能双优：面向大模型训练的低精度优化实践](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/llm_pretrain/deepseek_v3/zh/deepseek-v3_pre_train_hif8_mxfp8.md)。
+本样例针对DeepSeek-V3 裁剪模型，基于[MindSpeed 框架](https://gitcode.com/Ascend/MindSpeed)，在 8 卡 Ascend 950 上完成8K序列MXFP8/HiF8 低精度预训练。MXFP8/HiF8 低精度预训练介绍可参见[HiF8精度与性能双优：面向大模型训练的低精度优化实践](https://gitcode.com/cann/cann-recipes-docs/blob/master/train/llm_pretrain/deepseek_v3/zh/deepseek-v3_pre_train_hif8_mxfp8.md)。
 
 ## 硬件要求
-产品型号：Atlas A5 950DT 系列
+产品型号：Ascend 950DT 系列
 
 最少卡数：8 张 A5
 

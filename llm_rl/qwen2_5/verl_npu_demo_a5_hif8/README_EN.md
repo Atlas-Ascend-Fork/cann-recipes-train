@@ -2,13 +2,13 @@
 
 ## Overview
 
-An Ascend 950 implementation of [`../verl_npu_demo`](../verl_npu_demo). The model, data set, chat template and reward function match the original sample; the differences are the platform, <term>**Atlas A5** Series Products</term> + CANN 9.2, and the added **HiF8 (W8A8_HIF8_PTS)** rollout path that speeds up reinforcement learning.
+An Ascend 950 implementation of [`../verl_npu_demo`](../verl_npu_demo). The model, data set, chat template and reward function match the original sample; the differences are the platform, <term>**Ascend 950** Series Products</term> + CANN 9.2, and the added **HiF8 (W8A8_HIF8_PTS)** rollout path that speeds up reinforcement learning.
 
 Both runs share the launcher [run_qwen2_5_1_5b_A5.sh](run_qwen2_5_1_5b_A5.sh); its first argument selects `bf16` (the BF16 control) or `hif8` (W8A8_HIF8).
 
 ## Supported Hardware Models
 
-<term>**Atlas A5** Series Products</term>. A2/A3 follow the original sample's flow and are unaffected.
+<term>**Ascend 950** Series Products</term>. A2/A3 follow the original sample's flow and are unaffected.
 
 ## Environment Preparation
 

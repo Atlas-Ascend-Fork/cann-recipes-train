@@ -121,7 +121,7 @@ export HCCL_EXEC_TIMEOUT=1200
 # Read micro_batch_mode from config
 micro_batch_mode=$(python3 -c "import yaml; print(yaml.safe_load(open('${CONFIG}')).get('model_config', {}).get('micro_batch_mode', 0))" 2>/dev/null || echo "0")
 
-# 910c/A3 platforms need HCCL AIV mode (not 950)
+# Atlas A3 platforms need HCCL AIV mode (not 950)
 if [[ "${DETECTED_PLATFORM_VERSION}" != "950" ]]; then
     export HCCL_OP_EXPANSION_MODE=AIV
     echo "[INFO] Set HCCL_OP_EXPANSION_MODE=AIV for platform ${DETECTED_PLATFORM_VERSION}"

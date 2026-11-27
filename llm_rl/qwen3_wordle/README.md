@@ -214,7 +214,7 @@ python3 -m unittest discover -s tests -v
 
 ## 性能参考
 
-Qwen3-1.7B Wordle RL, 2×Ascend 910C：
+Qwen3-1.7B Wordle RL, 2×Atlas A3：
 
 | 指标 | 参考值 |
 |------|--------|
