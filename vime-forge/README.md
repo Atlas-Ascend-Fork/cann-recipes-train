@@ -1,11 +1,11 @@
-# Vime
+# Vime-forge
 
-[中文版](./README_zh.md) · [Repository](https://github.com/vllm-project/vime)
+[中文版](./README_zh.md) · [Upstream repository](https://github.com/vllm-project/vime)
 
 [![Documentation](https://img.shields.io/badge/docs-latest-brightgreen.svg?style=flat)](https://docs.vllm.ai/projects/vime/en/latest/)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/vllm-project/vime)
 
-**Vime** is an LLM post-training framework for RL scaling, built on [slime](https://github.com/THUDM/slime). It keeps slime's training stack and data-generation design while using [**vLLM**](https://github.com/vllm-project/vllm) (with [vllm-router](https://github.com/vllm-project/router)) as the default rollout backend. Built on top of Vime, this repository targets Ascend NPU and uses [**torchtitan**](https://github.com/pytorch/torchtitan) as the training backend, providing two core capabilities:
+**Vime-forge** is an LLM post-training framework for RL scaling, built on [slime](https://github.com/THUDM/slime). It keeps slime's training stack and data-generation design while using [**vLLM**](https://github.com/vllm-project/vllm) (with [vllm-router](https://github.com/vllm-project/router)) as the default rollout backend. Built on top of Vime, this repository targets Ascend NPU and uses [**torchtitan**](https://github.com/pytorch/torchtitan) as the training backend, providing two core capabilities:
 
 1. **High-performance training**: Efficient training in various modes by connecting torchtitan with vLLM;
 2. **Flexible data generation**: Arbitrary training data generation workflows through custom data generation interfaces and server-based engines.
@@ -73,7 +73,7 @@ Agentic workloads use the standard rollout / Data Buffer loop through Vime's cus
 - [SWE-Gym Agentic RL training](docs/agentic-rl/swe-agentic-rl/training.md): Train a coding agent with Claude Code or Codex using sandboxed tools and test-based rewards.
 - [Terminal / TMax Agentic RL training](docs/agentic-rl/terminal-agentic-rl/training.md): Train a terminal agent on a prepared task bundle using Harbor or AgentENV sandboxes.
 
-See the [Agentic RL Training Roadmap](docs/en/get_started/agent.md) and [Customization Guide](docs/en/get_started/customization.md). The coding-agent example ships an E2B-compatible backend, while the shared `vime.agent.sandbox.Sandbox` contract can be implemented for Docker, Modal, or local VMs.
+See the [Agentic RL Training Roadmap](https://docs.vllm.ai/projects/vime/en/latest/get_started/agent.html) and [Customization Guide](https://docs.vllm.ai/projects/vime/en/latest/get_started/customization.html). The coding-agent example ships an E2B-compatible backend, while the shared `vime.agent.sandbox.Sandbox` contract can be implemented for Docker, Modal, or local VMs.
 
 ## Arguments Walkthrough
 
@@ -85,17 +85,16 @@ Arguments in Vime are divided into three categories:
 
 `--rollout-num-gpus-per-engine` sets the tensor parallel size of each vLLM engine. The default rollout entry is `vime.rollout.vllm_rollout.generate_rollout`.
 
-For complete usage instructions, please refer to the [Usage Documentation](docs/en/get_started/usage.md).
+For complete usage instructions, please refer to the [Usage Documentation](https://docs.vllm.ai/projects/vime/en/latest/get_started/usage.html).
 
 ## Engine Deployment
 
 Vime organizes the RL dataflow on top of the native torchtitan and vLLM control surfaces. Beyond the argument pass-through described above, see:
 
-- [vLLM Config](docs/en/advanced/vllm-config.md): Optional YAML topology configuration, heterogeneous server groups, multi-model serving, and per-group overrides;
-- [PD Disaggregation](docs/en/advanced/pd-disaggregation.md): For multi-turn and agentic workloads with different prefill/decode resource needs;
-- Router policies such as session affinity for multi-turn agents (see [vLLM Config](docs/en/advanced/vllm-config.md));
-- [Delta Weight Sync](docs/en/advanced/delta-weight-sync.md): Disk-based incremental updates for disaggregated rollout engines;
-- [External Rollout Engines](docs/en/advanced/external-rollout-engines.md): Serving managed outside the training job. Serving can use an independent environment; disk transport avoids an NCCL group between training and serving. Different GPU models or vendors still require compatible model formats, precision, and vLLM hardware support.
+- [vLLM Config](https://docs.vllm.ai/projects/vime/en/latest/advanced/vllm-config.html): Optional YAML topology configuration, heterogeneous server groups, multi-model serving, and per-group overrides;
+- [PD Disaggregation](https://docs.vllm.ai/projects/vime/en/latest/advanced/pd-disaggregation.html): For multi-turn and agentic workloads with different prefill/decode resource needs;
+- Router policies such as session affinity for multi-turn agents (see [vLLM Config](https://docs.vllm.ai/projects/vime/en/latest/advanced/vllm-config.html));
+- [External Rollout Engines](https://docs.vllm.ai/projects/vime/en/latest/advanced/external-rollout-engines.html): Serving managed outside the training job. Serving can use an independent environment; disk transport avoids an NCCL group between training and serving. Different GPU models or vendors still require compatible model formats, precision, and vLLM hardware support.
 
 ## Correctness, Stability, and CI
 
@@ -103,12 +102,12 @@ RL bugs can be silent. Vime keeps the dataflow explicit and supports separate ro
 
 Useful engineering docs:
 
-- [CI](docs/en/developer_guide/ci.md)
-- [Debugging](docs/en/developer_guide/debug.md)
-- [Reproducibility](docs/en/advanced/reproducibility.md)
-- [Fault Tolerance](docs/en/advanced/fault-tolerance.md)
-- [Trace Viewer](docs/en/developer_guide/trace.md)
-- [Profiling](docs/en/developer_guide/profiling.md)
+- [CI](https://docs.vllm.ai/projects/vime/en/latest/developer_guide/ci.html)
+- [Debugging](https://docs.vllm.ai/projects/vime/en/latest/developer_guide/debug.html)
+- [Reproducibility](https://docs.vllm.ai/projects/vime/en/latest/advanced/reproducibility.html)
+- [Fault Tolerance](https://docs.vllm.ai/projects/vime/en/latest/advanced/fault-tolerance.html)
+- [Trace Viewer](https://docs.vllm.ai/projects/vime/en/latest/developer_guide/trace.html)
+- [Profiling](https://docs.vllm.ai/projects/vime/en/latest/developer_guide/profiling.html)
 
 ## Code Reading Path
 
@@ -141,22 +140,22 @@ On a first pass, treat `vime/utils/arguments.py` as the configuration entry poin
   pre-commit run --all-files --show-diff-on-failure --color=always
   ```
 
-- For debugging tips, please refer to the [Debugging Guide](docs/en/developer_guide/debug.md)
+- For debugging tips, please refer to the [Debugging Guide](https://docs.vllm.ai/projects/vime/en/latest/developer_guide/debug.html)
 
 ## slime doc
 
-Vime is derived from slime. The following upstream resources and in-repo guides still use the slime naming and remain the reference for shared concepts (torchtitan integration, customization, advanced topics):
+Vime is derived from slime. The following upstream resources and documentation still use the slime naming and remain the reference for shared concepts (torchtitan integration, customization, advanced topics):
 
 [![Documentation](https://img.shields.io/badge/slime_docs-latest-brightgreen.svg?style=flat)](https://thudm.github.io/slime/)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/THUDM/slime)
 
 - Upstream repository: [THUDM/slime](https://github.com/THUDM/slime)
-- English docs in this repo: [docs/en/](docs/en/)
-- Chinese docs in this repo: [docs/zh/](docs/zh/)
+- English documentation: [docs.vllm.ai/projects/vime/en/latest](https://docs.vllm.ai/projects/vime/en/latest/)
+- Chinese documentation: [docs.vllm.ai/projects/vime/zh-cn/latest](https://docs.vllm.ai/projects/vime/zh-cn/latest/)
 
 ## FAQ
 
-For frequently asked questions, please see the [Q&A](docs/en/get_started/qa.md)
+For frequently asked questions, please see the [Q&A](https://docs.vllm.ai/projects/vime/en/latest/get_started/qa.html)
 
 ## Acknowledgements
 

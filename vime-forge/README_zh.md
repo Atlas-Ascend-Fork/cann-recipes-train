@@ -1,11 +1,11 @@
-# Vime
+# Vime-forge
 
-[English](./README.md) · [代码仓库](https://github.com/vllm-project/vime)
+[English](./README.md) · [上游代码仓库](https://github.com/vllm-project/vime)
 
 [![文档](https://img.shields.io/badge/docs-latest-brightgreen.svg?style=flat)](https://docs.vllm.ai/projects/vime/zh-cn/latest/)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/vllm-project/vime)
 
-**Vime** 是基于 [slime](https://github.com/THUDM/slime) 的 RL scaling 用 LLM post-training 框架。在保留 slime 训练栈与数据生成设计的同时，默认以 [**vLLM**](https://github.com/vllm-project/vllm)（配合 [vllm-router](https://github.com/vllm-project/router)）作为 rollout 后端。本仓库在Vime基础之上面向 Ascend NPU，以 [**torchtitan**](https://github.com/pytorch/torchtitan) 作为训练后端，提供两大核心能力：
+**Vime-forge** 是基于 [slime](https://github.com/THUDM/slime) 的 RL scaling 用 LLM post-training 框架。在保留 slime 训练栈与数据生成设计的同时，默认以 [**vLLM**](https://github.com/vllm-project/vllm)（配合 [vllm-router](https://github.com/vllm-project/router)）作为 rollout 后端。本仓库在Vime基础之上面向 Ascend NPU，以 [**torchtitan**](https://github.com/pytorch/torchtitan) 作为训练后端，提供两大核心能力：
 
 1. **高性能训练**：通过连接 torchtitan 与 vLLM，支持各种模式的高效训练；
 2. **灵活的数据生成**：通过自定义数据生成接口以及 server based engine，实现任意的训练数据生成流程。
@@ -74,7 +74,7 @@ Agent 工作负载通过 Vime 的定制接口接入标准 rollout / Data Buffer 
 - [SWE-Gym AgenticRL 训练](docs/agentic-rl/swe-agentic-rl/training.md)：使用 Claude Code 或 Codex 在沙箱中执行工具命令，根据测试结果计算奖励。
 - [Terminal／TMax AgenticRL 训练](docs/agentic-rl/terminal-agentic-rl/training.md)：使用准备好的任务 bundle，在 Harbor 或 AgentENV 沙箱中训练终端智能体。
 
-请参阅 [Agentic RL 训练路线图](docs/zh/get_started/agent.md)和[定制化指南](docs/zh/get_started/customization.md)。Coding-agent 示例内置 E2B 兼容后端；共享的 `vime.agent.sandbox.Sandbox` 协议也可以由 Docker、Modal 或本地虚拟机实现。
+请参阅 [Agentic RL 训练路线图](https://docs.vllm.ai/projects/vime/zh-cn/latest/get_started/agent.html)和[定制化指南](https://docs.vllm.ai/projects/vime/zh-cn/latest/get_started/customization.html)。Coding-agent 示例内置 E2B 兼容后端；共享的 `vime.agent.sandbox.Sandbox` 协议也可以由 Docker、Modal 或本地虚拟机实现。
 
 ## 参数说明
 
@@ -86,17 +86,16 @@ Vime 的参数分为三类：
 
 `--rollout-num-gpus-per-engine` 对应每个 vLLM engine 的 tensor parallel size。默认 rollout 入口为 `vime.rollout.vllm_rollout.generate_rollout`。
 
-完整使用说明请查阅 [使用文档](docs/zh/get_started/usage.md)。
+完整使用说明请查阅 [使用文档](https://docs.vllm.ai/projects/vime/zh-cn/latest/get_started/usage.html)。
 
 ## Engine 部署
 
 Vime 在 torchtitan 与 vLLM 原生控制接口外组织 RL 数据流。除上述参数透传外，请参阅：
 
-- [vLLM Config](docs/zh/advanced/vllm-config.md)：可选的 YAML 拓扑配置、异构 server group、多模型 serving 和 per-group override；
-- [PD Disaggregation](docs/zh/advanced/pd-disaggregation.md)：面向 prefill/decode 资源需求不同的多轮和 agentic 工作负载；
-- 面向多轮 agent 的 session affinity 等 router policy，见 [vLLM Config](docs/zh/advanced/vllm-config.md)；
-- [Delta Weight Sync](docs/zh/advanced/delta-weight-sync.md)：分离部署 rollout engine 的磁盘增量更新；
-- [External Rollout Engines](docs/zh/advanced/external-rollout-engines.md)：由训练任务外部管理 serving。Serving 可以使用独立环境；disk transport 无需训练端和 serving 端组成 NCCL group。不同 GPU 型号或厂商仍需满足模型格式、精度和 vLLM 硬件支持的兼容要求。
+- [vLLM Config](https://docs.vllm.ai/projects/vime/zh-cn/latest/advanced/vllm-config.html)：可选的 YAML 拓扑配置、异构 server group、多模型 serving 和 per-group override；
+- [PD Disaggregation](https://docs.vllm.ai/projects/vime/zh-cn/latest/advanced/pd-disaggregation.html)：面向 prefill/decode 资源需求不同的多轮和 agentic 工作负载；
+- 面向多轮 agent 的 session affinity 等 router policy，见 [vLLM Config](https://docs.vllm.ai/projects/vime/zh-cn/latest/advanced/vllm-config.html)；
+- [External Rollout Engines](https://docs.vllm.ai/projects/vime/zh-cn/latest/advanced/external-rollout-engines.html)：由训练任务外部管理 serving。Serving 可以使用独立环境；disk transport 无需训练端和 serving 端组成 NCCL group。不同 GPU 型号或厂商仍需满足模型格式、精度和 vLLM 硬件支持的兼容要求。
 
 ## 正确性、稳定性与 CI
 
@@ -104,12 +103,12 @@ RL bug 可能不会立即报错。Vime 保持显式数据流，支持 rollout-on
 
 相关工程文档：
 
-- [CI](docs/zh/developer_guide/ci.md)
-- [Debugging](docs/zh/developer_guide/debug.md)
-- [Reproducibility](docs/zh/advanced/reproducibility.md)
-- [Fault Tolerance](docs/zh/advanced/fault-tolerance.md)
+- [CI](https://docs.vllm.ai/projects/vime/zh-cn/latest/developer_guide/ci.html)
+- [Debugging](https://docs.vllm.ai/projects/vime/zh-cn/latest/developer_guide/debug.html)
+- [Reproducibility](https://docs.vllm.ai/projects/vime/zh-cn/latest/advanced/reproducibility.html)
+- [Fault Tolerance](https://docs.vllm.ai/projects/vime/zh-cn/latest/advanced/fault-tolerance.html)
 - [Trace Viewer](docs/zh/developer_guide/trace.md)
-- [Profiling](docs/zh/developer_guide/profiling.md)
+- [Profiling](https://docs.vllm.ai/projects/vime/zh-cn/latest/developer_guide/profiling.html)
 
 ## 代码阅读路径
 
@@ -142,22 +141,22 @@ train.py: train
   pre-commit run --all-files --show-diff-on-failure --color=always
   ```
 
-- 调试技巧请参考 [debug 指南](docs/zh/developer_guide/debug.md)
+- 调试技巧请参考 [debug 指南](https://docs.vllm.ai/projects/vime/zh-cn/latest/developer_guide/debug.html)
 
 ## slime doc
 
-Vime 由 slime 衍生而来。以下上游资源与本仓库文档仍沿用 slime 命名，可作为共享概念（torchtitan 集成、定制化、高级主题）的参考：
+Vime 由 slime 衍生而来。以下上游资源与文档仍沿用 slime 命名，可作为共享概念（torchtitan 集成、定制化、高级主题）的参考：
 
 [![Documentation](https://img.shields.io/badge/slime_文档-latest-brightgreen.svg?style=flat)](https://thudm.github.io/slime/)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/THUDM/slime)
 
 - 上游仓库：[THUDM/slime](https://github.com/THUDM/slime)
-- 本仓库英文文档：[docs/en/](docs/en/)
-- 本仓库中文文档：[docs/zh/](docs/zh/)
+- 英文文档：[docs.vllm.ai/projects/vime/en/latest](https://docs.vllm.ai/projects/vime/en/latest/)
+- 中文文档：[docs.vllm.ai/projects/vime/zh-cn/latest](https://docs.vllm.ai/projects/vime/zh-cn/latest/)
 
 ## FAQ
 
-常见问题请见 [Q&A](docs/zh/get_started/qa.md)
+常见问题请见 [Q&A](https://docs.vllm.ai/projects/vime/zh-cn/latest/get_started/qa.html)
 
 ## 致谢
 

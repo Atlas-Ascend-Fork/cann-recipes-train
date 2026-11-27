@@ -115,4 +115,4 @@ with trace_span(sample, "vllm_generate") as span:
 
 - 先保存少量 rollout；单个 dump 的 trial 数量适中时，viewer 会更容易阅读。
 - viewer 直接基于保存下来的 `.pt` dump 工作，因此可以把文件拷到别的机器离线分析。
-- 如果你想看的是 vLLM 自身的 GPU / kernel 级 profiling trace，请参考 [性能分析](./profiling.md)。
+- 如果你想看的是 vLLM 自身的 GPU / kernel 级 profiling trace，请参考 [性能分析](https://docs.vllm.ai/projects/vime/zh-cn/latest/developer_guide/profiling.html)。

@@ -67,7 +67,7 @@ def _vime_rl_config(model_spec, *, lr: float = 1e-6, fa_mxfp8: bool = False) -> 
     return TrainerEx.Config(
         model_spec=model_spec,
         extension=ExtensionConfig(quantization=quantization),
-        optimizer=_dsv4_optimizer_config(model_spec, lr=lr),
+        optimizer=replace(_dsv4_optimizer_config(model_spec, lr=lr), name="Muon"),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=0,
             decay_type="linear",
