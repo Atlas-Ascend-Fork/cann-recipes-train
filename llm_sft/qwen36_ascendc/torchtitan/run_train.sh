@@ -2,47 +2,69 @@
 # SPDX-License-Identifier: Apache-2.0
 set -Eeuo pipefail
 
-EXAMPLE_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+EXAMPLE_ROOT=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
-export_hf() {
-  (( $# == 3 )) || {
-    echo "usage: bash run_train.sh export-hf DCP SOURCE_HF OUTPUT" >&2
-    return 2
-  }
-  python3 "$EXAMPLE_ROOT/cannbot_recipe.py" export-hf "$@"
+die() {
+  printf '%s\n' "$1" >&2
+  exit 2
+}
+
+require_positive_integer() {
+  local name=$1 value=$2
+  [[ $value =~ ^[0-9]+$ && $value =~ [1-9] ]] || die "$name must be a positive integer"
 }
 
 if [[ ${1:-} == export-hf ]]; then
   shift
-  export_hf "$@"
-  exit
+  (( $# == 3 )) || die "usage: bash run_train.sh export-hf DCP SOURCE_HF OUTPUT"
+  exec python3 "$EXAMPLE_ROOT/cannbot_recipe.py" export-hf -- "$@"
 fi
 
+(( $# == 0 )) || die "This sample accepts only the export-hf subcommand"
 : "${HF_ASSETS_PATH:?Set the pinned Qwen3.6-27B HF directory}"
 : "${DUMP_FOLDER:?Set a new output directory}"
-(( $# == 0 )) || { echo "This sample accepts only the export-hf subcommand" >&2; exit 2; }
-mkdir -p "$DUMP_FOLDER"
+: "${DATA_FILES:?Set comma-separated JSONL paths}"
+[[ -d "$HF_ASSETS_PATH" ]] || die "HF_ASSETS_PATH must point to a model directory: $HF_ASSETS_PATH"
+[[ "$DUMP_FOLDER" != *,* ]] || die "DUMP_FOLDER must not contain commas"
+[[ "$HF_ASSETS_PATH" != -* ]] || HF_ASSETS_PATH="./$HF_ASSETS_PATH"
+[[ "$DUMP_FOLDER" != -* ]] || DUMP_FOLDER="./$DUMP_FOLDER"
 
-IFS=',' read -r -a data_files <<< "${DATA_FILES:?Set comma-separated JSONL paths}"
-export DATA_MANIFEST="$DUMP_FOLDER/data_manifest.json"
-python3 "$EXAMPLE_ROOT/data_process.py" \
-  --data "${data_files[@]}" --output "$DATA_MANIFEST"
-export DATA_FILES="$DUMP_FOLDER/train.jsonl"
-cat -- "${data_files[@]}" > "$DATA_FILES"
+case "$DATA_FILES" in
+  ,*|*,|*,,*|*$'\n'*|*$'\r'*)
+    die "DATA_FILES must be a single line of comma-separated paths with no empty entries"
+    ;;
+esac
+IFS=',' read -r -a data_files <<< "$DATA_FILES"
+for index in "${!data_files[@]}"; do
+  data_file=${data_files[index]}
+  [[ -f "$data_file" && -r "$data_file" ]] ||
+    die "DATA_FILES entry must be a readable file: $data_file"
+  if [[ "$data_file" == -* ]]; then
+    data_files[index]="./$data_file"
+  fi
+done
 
 if [[ ${CANNBOT_SMOKE:-0} == 1 ]]; then
-  export CANNBOT_TRAIN_STEPS=3
-  export CANNBOT_CHECKPOINT_INTERVAL=3
+  CANNBOT_TRAIN_STEPS=3
+  CANNBOT_CHECKPOINT_INTERVAL=3
 else
-  : "${CANNBOT_TRAIN_STEPS:?Set the number of optimizer steps}"
-  : "${CANNBOT_CHECKPOINT_INTERVAL:?Set the checkpoint interval in optimizer steps}"
+  require_positive_integer CANNBOT_TRAIN_STEPS "${CANNBOT_TRAIN_STEPS:-}"
+  require_positive_integer CANNBOT_CHECKPOINT_INTERVAL "${CANNBOT_CHECKPOINT_INTERVAL:-}"
 fi
+export CANNBOT_TRAIN_STEPS CANNBOT_CHECKPOINT_INTERVAL
 
-export ASCEND_VISIBLE_DEVICES=${ASCEND_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}
-export ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-$ASCEND_VISIBLE_DEVICES}
+mkdir -p -- "$DUMP_FOLDER"
+export DATA_MANIFEST="$DUMP_FOLDER/data_manifest.json"
+export DATA_FILES="$DUMP_FOLDER/train.jsonl"
+python3 "$EXAMPLE_ROOT/data_process.py" \
+  --data "${data_files[@]}" --output "$DATA_MANIFEST" \
+  --merge-jsonl "$DATA_FILES"
+
+export ASCEND_VISIBLE_DEVICES="${ASCEND_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}"
+export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-$ASCEND_VISIBLE_DEVICES}"
 export PYTHONPATH="$EXAMPLE_ROOT${PYTHONPATH:+:$PYTHONPATH}"
-export PYTHONPYCACHEPREFIX=${PYTHONPYCACHEPREFIX:-$DUMP_FOLDER/pycache}
-mkdir -p "$PYTHONPYCACHEPREFIX"
+export PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-$DUMP_FOLDER/pycache}"
+mkdir -p -- "$PYTHONPYCACHEPREFIX"
 
 python3 -m py_compile "$EXAMPLE_ROOT"/{cannbot_recipe,data_process}.py
 
